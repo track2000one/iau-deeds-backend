@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AttachmentEntityType {
+  deed
+  allocated_land
+  delivered_land
+  leased_land_out
+  leased_land_in
+  leased_building_out
+  leased_building_in
+}
+
+enum AttachmentType {
+  deed_image
+  plan_image
+  location_image
+  contract_image
+  delivery_minutes
+  other
+}
+
+model Deed {
+  id                  String       @id @default(cuid())
+  propertyDescription String
+  usageType           String
+  deedNumber          String       @unique
+  deedDate            DateTime?
+  plotNumber          String?
+  planNumber          String?
+  area                Float        @default(0)
+  location            String?
+  coordinates         String?
+  isPlanned           Boolean      @default(false)
+  city                String?
+  district            String?
+  region              String?
+  notes               String?
+  createdBy           String?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+}
+
+model Attachment {
+  id             String               @id @default(cuid())
+  entityType     AttachmentEntityType
+  entityId       String
+  attachmentType AttachmentType        @default(other)
+  title          String
+  driveUrl       String
+  driveFileId    String?
+  mimeType       String?
+  notes          String?
+  createdBy      String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+
+  @@index([entityType, entityId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String
+  entity    String
+  entityId  String?
+  userId    String?
+  details   Json?
+  createdAt DateTime @default(now())
+}
