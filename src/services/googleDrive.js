@@ -1,46 +1,26 @@
 import { google } from 'googleapis';
 import { Readable } from 'node:stream';
 
-const DRIVE_SCOPE = ['https://www.googleapis.com/auth/drive'];
-
-function getServiceAccountCredentials() {
-  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    try {
-      const parsed = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-      return {
-        client_email: parsed.client_email,
-        private_key: parsed.private_key,
-      };
-    } catch (error) {
-      throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.');
-    }
+function requireEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`${name} is missing.`);
   }
-
-  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const privateKey = process.env.GOOGLE_PRIVATE_KEY;
-
-  if (!clientEmail || !privateKey) {
-    throw new Error(
-      'Google Drive credentials are missing. Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_EMAIL + GOOGLE_PRIVATE_KEY.'
-    );
-  }
-
-  return {
-    client_email: clientEmail,
-    private_key: privateKey.replace(/\\n/g, '\n'),
-  };
+  return value;
 }
 
-function getDriveClient() {
-  const credentials = getServiceAccountCredentials();
+function getOAuthDriveClient() {
+  const clientId = requireEnv('GOOGLE_OAUTH_CLIENT_ID');
+  const clientSecret = requireEnv('GOOGLE_OAUTH_CLIENT_SECRET');
+  const refreshToken = requireEnv('GOOGLE_OAUTH_REFRESH_TOKEN');
 
-  const auth = new google.auth.JWT({
-    email: credentials.client_email,
-    key: credentials.private_key,
-    scopes: DRIVE_SCOPE,
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+
+  oauth2Client.setCredentials({
+    refresh_token: refreshToken,
   });
 
-  return google.drive({ version: 'v3', auth });
+  return google.drive({ version: 'v3', auth: oauth2Client });
 }
 
 function bufferToStream(buffer) {
@@ -52,6 +32,7 @@ function bufferToStream(buffer) {
 
 function buildSafeFileName(originalName = 'attachment') {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
   const safeName = String(originalName)
     .replace(/[^\w.\-\u0600-\u06FF\s]/g, '')
     .replace(/\s+/g, '_')
@@ -61,17 +42,14 @@ function buildSafeFileName(originalName = 'attachment') {
 }
 
 export async function uploadBufferToGoogleDrive(file, options = {}) {
-  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
-
-  if (!folderId) {
-    throw new Error('GOOGLE_DRIVE_FOLDER_ID is missing.');
-  }
+  const folderId = requireEnv('GOOGLE_DRIVE_FOLDER_ID');
 
   if (!file?.buffer) {
     throw new Error('No file buffer received for upload.');
   }
 
-  const drive = getDriveClient();
+  const drive = getOAuthDriveClient();
+
   const fileName = buildSafeFileName(options.fileName || file.originalname);
   const mimeType = file.mimetype || options.mimeType || 'application/octet-stream';
 
@@ -86,7 +64,6 @@ export async function uploadBufferToGoogleDrive(file, options = {}) {
       body: bufferToStream(file.buffer),
     },
     fields: 'id,name,mimeType,webViewLink,webContentLink',
-    supportsAllDrives: true,
   });
 
   const driveFileId = response.data.id;
@@ -102,7 +79,6 @@ export async function uploadBufferToGoogleDrive(file, options = {}) {
         role: 'reader',
         type: 'anyone',
       },
-      supportsAllDrives: true,
     });
   } catch (error) {
     console.warn('Could not make uploaded file public:', error?.message || error);
@@ -121,11 +97,10 @@ export async function deleteGoogleDriveFile(fileId) {
     return false;
   }
 
-  const drive = getDriveClient();
+  const drive = getOAuthDriveClient();
 
   await drive.files.delete({
     fileId,
-    supportsAllDrives: true,
   });
 
   return true;
