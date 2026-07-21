@@ -7,6 +7,7 @@ import healthRoutes from './routes/health.routes.js';
 import deedsRoutes from './routes/deeds.routes.js';
 import attachmentsRoutes from './routes/attachments.routes.js';
 import uploadsRoutes from './routes/uploads.routes.js';
+import recordsRoutes from './routes/records.routes.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 
 export const app = express();
@@ -32,12 +33,13 @@ app.get('/', (req, res) => {
   res.json({
     ok: true,
     service: 'IAU Deeds and Lands API',
-    message: 'Backend is running. Use /api/health, /api/deeds, /api/attachments or /api/uploads',
+    message: 'Backend is running. Use /api/health, /api/deeds, /api/records, /api/attachments or /api/uploads',
     endpoints: {
       health: '/api/health',
       deeds: '/api/deeds',
       attachments: '/api/attachments',
       uploads: '/api/uploads',
+      records: '/api/records/:resource',
     },
   });
 });
@@ -49,6 +51,7 @@ app.use('/api/health', healthRoutes);
 app.use('/api/deeds', deedsRoutes);
 app.use('/api/attachments', attachmentsRoutes);
 app.use('/api/uploads', uploadsRoutes);
+app.use('/api/records', recordsRoutes);
 
 /**
  * 404 + Error Handler
