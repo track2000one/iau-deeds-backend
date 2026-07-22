@@ -40,19 +40,36 @@ const normalizeCoordinates = (value) => {
   if (typeof value === 'object' && value.latitude !== undefined && value.longitude !== undefined) {
     const lat = Number(value.latitude);
     const lng = Number(value.longitude);
-    if (!Number.isNaN(lat) && !Number.isNaN(lng)) return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
+      return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+    }
   }
   return null;
 };
 
 const mapFrontendPayload = (resource, body = {}) => {
   const mapped = { ...body };
+
   if (resource === 'delivered-lands') {
     mapped.deliveryDate = body.deliveryDate || body.receiptDate || null;
-    mapped.propertyDescription = body.propertyDescription || body.description || body.landName || 'أرض مستلمة';
-    mapped.deliveryMinutesNumber = body.deliveryMinutesNumber || body.receiptNumber || null;
-    mapped.location = body.location || [body.region, body.city, body.district].filter(Boolean).join(' - ') || null;
+    mapped.propertyDescription =
+      body.propertyDescription || body.description || body.landName || 'أرض مستلمة';
+    mapped.deliveryMinutesNumber =
+      body.deliveryMinutesNumber || body.receiptNumber || null;
+    mapped.location =
+      body.location ||
+      [body.region, body.city, body.district].filter(Boolean).join(' - ') ||
+      null;
   }
+
+  if (resource === 'leased-lands-in') {
+    mapped.propertyDescription =
+      body.propertyDescription ||
+      body.location ||
+      [body.plotNumber, body.planNumber].filter(Boolean).join(' - ') ||
+      'أرض مستأجرة';
+  }
+
   return mapped;
 };
 
@@ -60,6 +77,7 @@ const sanitizeRecordPayload = (resource, body = {}) => {
   const mapped = mapFrontendPayload(resource, body);
   const allowed = new Set(allowedFields[resource] || []);
   const data = {};
+
   for (const [key, value] of Object.entries(mapped)) {
     if (allowed.has(key)) data[key] = value;
   }
@@ -67,11 +85,17 @@ const sanitizeRecordPayload = (resource, body = {}) => {
   if ('coordinates' in data) data.coordinates = normalizeCoordinates(data.coordinates);
 
   for (const field of dateFields) {
-    if (field in data) data[field] = data[field] ? new Date(data[field]) : null;
+    if (field in data) {
+      const date = data[field] ? new Date(data[field]) : null;
+      data[field] = date && !Number.isNaN(date.getTime()) ? date : null;
+    }
   }
 
   for (const field of numberFields) {
-    if (field in data) data[field] = data[field] === '' || data[field] == null ? null : Number(data[field]);
+    if (field in data) {
+      const parsed = data[field] === '' || data[field] == null ? null : Number(data[field]);
+      data[field] = parsed === null || Number.isNaN(parsed) ? null : parsed;
+    }
   }
 
   return data;
@@ -80,17 +104,22 @@ const sanitizeRecordPayload = (resource, body = {}) => {
 const sanitizeAttachments = (attachments, entityType, entityId) => {
   if (!Array.isArray(attachments)) return [];
   return attachments
-    .filter((a) => a?.driveUrl)
-    .map((a) => ({
+    .filter((attachment) => attachment?.driveUrl)
+    .map((attachment) => ({
       entityType,
       entityId,
-      attachmentType: a.attachmentType || 'other',
-      title: String(a.title || a.fileName || a.originalName || 'مرفق').trim() || 'مرفق',
-      driveUrl: String(a.driveUrl).trim(),
-      driveFileId: a.driveFileId || null,
-      mimeType: a.mimeType || a.fileType || null,
-      notes: a.notes || null,
-      createdBy: a.createdBy || null,
+      attachmentType: attachment.attachmentType || 'other',
+      title: String(
+        attachment.title ||
+        attachment.fileName ||
+        attachment.originalName ||
+        'مرفق'
+      ).trim() || 'مرفق',
+      driveUrl: String(attachment.driveUrl).trim(),
+      driveFileId: attachment.driveFileId || null,
+      mimeType: attachment.mimeType || attachment.fileType || null,
+      notes: attachment.notes || null,
+      createdBy: attachment.createdBy || null,
     }));
 };
 
@@ -108,7 +137,10 @@ const attachFilesToRecords = async (resource, records) => {
   if (!entityType || !records.length) return records;
 
   const attachments = await prisma.attachment.findMany({
-    where: { entityType, entityId: { in: records.map((r) => r.id) } },
+    where: {
+      entityType,
+      entityId: { in: records.map((record) => record.id) },
+    },
     orderBy: { createdAt: 'desc' },
   });
 
@@ -129,7 +161,11 @@ router.get('/:resource', async (req, res, next) => {
   try {
     const delegate = getDelegate(req, res);
     if (!delegate) return;
-    const records = await delegate.findMany({ orderBy: { updatedAt: 'desc' } });
+
+    const records = await delegate.findMany({
+      orderBy: { updatedAt: 'desc' },
+    });
+
     res.json(await attachFilesToRecords(req.params.resource, records));
   } catch (error) {
     next(error);
@@ -142,12 +178,20 @@ router.post('/:resource', async (req, res, next) => {
     if (!delegate) return;
 
     const resource = req.params.resource;
+
     const record = await delegate.create({
       data: sanitizeRecordPayload(resource, req.body),
     });
 
-    const attachments = sanitizeAttachments(req.body?.attachments, entityTypes[resource], record.id);
-    if (attachments.length) await prisma.attachment.createMany({ data: attachments });
+    const attachments = sanitizeAttachments(
+      req.body?.attachments,
+      entityTypes[resource],
+      record.id
+    );
+
+    if (attachments.length > 0) {
+      await prisma.attachment.createMany({ data: attachments });
+    }
 
     const [result] = await attachFilesToRecords(resource, [record]);
     res.status(201).json(result);
@@ -162,6 +206,7 @@ router.put('/:resource/:id', async (req, res, next) => {
     if (!delegate) return;
 
     const resource = req.params.resource;
+
     const record = await delegate.update({
       where: { id: req.params.id },
       data: sanitizeRecordPayload(resource, req.body),
@@ -169,11 +214,21 @@ router.put('/:resource/:id', async (req, res, next) => {
 
     if (Object.prototype.hasOwnProperty.call(req.body || {}, 'attachments')) {
       await prisma.attachment.deleteMany({
-        where: { entityType: entityTypes[resource], entityId: req.params.id },
+        where: {
+          entityType: entityTypes[resource],
+          entityId: req.params.id,
+        },
       });
 
-      const attachments = sanitizeAttachments(req.body?.attachments, entityTypes[resource], req.params.id);
-      if (attachments.length) await prisma.attachment.createMany({ data: attachments });
+      const attachments = sanitizeAttachments(
+        req.body?.attachments,
+        entityTypes[resource],
+        req.params.id
+      );
+
+      if (attachments.length > 0) {
+        await prisma.attachment.createMany({ data: attachments });
+      }
     }
 
     const [result] = await attachFilesToRecords(resource, [record]);
@@ -189,7 +244,10 @@ router.delete('/:resource/:id', async (req, res, next) => {
     if (!delegate) return;
 
     await prisma.attachment.deleteMany({
-      where: { entityType: entityTypes[req.params.resource], entityId: req.params.id },
+      where: {
+        entityType: entityTypes[req.params.resource],
+        entityId: req.params.id,
+      },
     });
 
     await delegate.delete({ where: { id: req.params.id } });
