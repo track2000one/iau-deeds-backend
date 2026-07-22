@@ -168,6 +168,33 @@ model Attachment {
   @@index([entityType, entityId])
 }
 
+model ArchiveDocument {
+  id                String   @id @default(cuid())
+  title             String
+  category          String   @default("عام")
+  documentNumber    String?
+  documentDate      String?
+  documentDateType  String   @default("gregorian")
+  issuingAuthority  String?
+  confidentiality   String   @default("internal")
+  tags              String?
+  description       String?
+  fileName          String
+  originalName      String?
+  mimeType          String?
+  fileSize          Float    @default(0)
+  driveUrl          String
+  driveFileId       String?
+  createdBy         String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([category])
+  @@index([documentNumber])
+  @@index([confidentiality])
+  @@index([createdAt])
+}
+
 model AuditLog {
   id        String   @id @default(cuid())
   action    String

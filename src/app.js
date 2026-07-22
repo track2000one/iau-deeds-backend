@@ -8,6 +8,7 @@ import deedsRoutes from './routes/deeds.routes.js';
 import attachmentsRoutes from './routes/attachments.routes.js';
 import uploadsRoutes from './routes/uploads.routes.js';
 import recordsRoutes from './routes/records.routes.js';
+import archiveRoutes from './routes/archive.routes.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 
 export const app = express();
@@ -15,46 +16,27 @@ export const app = express();
 const allowedOrigin = process.env.FRONTEND_URL || '*';
 
 app.use(helmet());
-
 app.use(
   cors({
     origin: allowedOrigin === '*' ? true : allowedOrigin,
   })
 );
-
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '10mb' }));
 app.use(morgan('dev'));
 
-/**
- * Root route
- * هذا المسار يظهر عند فتح رابط الـ Backend مباشرة بدون /api
- */
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   res.json({
-    ok: true,
-    service: 'IAU Deeds and Lands API',
-    message: 'Backend is running. Use /api/health, /api/deeds, /api/records, /api/attachments or /api/uploads',
-    endpoints: {
-      health: '/api/health',
-      deeds: '/api/deeds',
-      attachments: '/api/attachments',
-      uploads: '/api/uploads',
-      records: '/api/records/:resource',
-    },
+    name: 'IAU Deeds and Lands API',
+    status: 'running',
   });
 });
 
-/**
- * API Routes
- */
 app.use('/api/health', healthRoutes);
 app.use('/api/deeds', deedsRoutes);
 app.use('/api/attachments', attachmentsRoutes);
 app.use('/api/uploads', uploadsRoutes);
 app.use('/api/records', recordsRoutes);
+app.use('/api/archive', archiveRoutes);
 
-/**
- * 404 + Error Handler
- */
 app.use(notFound);
 app.use(errorHandler);
