@@ -22,29 +22,56 @@ const entityTypes = {
   'leased-buildings-in': 'leased_building_in',
 };
 
+const allowedFields = {
+  'allocated-lands': ['propertyDescription','plotNumber','planNumber','area','usageType','region','city','district','coordinates','googleEarthLink','notes','createdBy'],
+  'delivered-lands': ['recipientEntity','deliveryDate','propertyDescription','plotNumber','planNumber','area','location','coordinates','deliveryMinutesNumber','notes','createdBy'],
+  'leased-lands-out': ['tenant','contractNumber','contractStartDate','contractDuration','plotNumber','planNumber','area','location','coordinates','rentAmount','notes','createdBy'],
+  'leased-lands-in': ['owner','contractNumber','contractDuration','propertyDescription','area','location','coordinates','rentAmount','notes','createdBy'],
+  'leased-buildings-out': ['tenant','contractNumber','buildingNumber','planNumber','locationName','area','city','district','coordinates','rentAmount','notes','createdBy'],
+  'leased-buildings-in': ['owner','contractNumber','buildingNumber','locationName','area','region','city','coordinates','rentAmount','notes','createdBy'],
+};
+
 const dateFields = new Set(['deliveryDate', 'contractStartDate']);
 const numberFields = new Set(['area', 'rentAmount']);
 
-const sanitizeRecordPayload = (body = {}) => {
-  const data = { ...body };
-  delete data.id;
-  delete data.createdAt;
-  delete data.updatedAt;
-  delete data.attachments;
+const normalizeCoordinates = (value) => {
+  if (!value) return null;
+  if (typeof value === 'string') return value.trim() || null;
+  if (typeof value === 'object' && value.latitude !== undefined && value.longitude !== undefined) {
+    const lat = Number(value.latitude);
+    const lng = Number(value.longitude);
+    if (!Number.isNaN(lat) && !Number.isNaN(lng)) return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  }
+  return null;
+};
+
+const mapFrontendPayload = (resource, body = {}) => {
+  const mapped = { ...body };
+  if (resource === 'delivered-lands') {
+    mapped.deliveryDate = body.deliveryDate || body.receiptDate || null;
+    mapped.propertyDescription = body.propertyDescription || body.description || body.landName || 'أرض مستلمة';
+    mapped.deliveryMinutesNumber = body.deliveryMinutesNumber || body.receiptNumber || null;
+    mapped.location = body.location || [body.region, body.city, body.district].filter(Boolean).join(' - ') || null;
+  }
+  return mapped;
+};
+
+const sanitizeRecordPayload = (resource, body = {}) => {
+  const mapped = mapFrontendPayload(resource, body);
+  const allowed = new Set(allowedFields[resource] || []);
+  const data = {};
+  for (const [key, value] of Object.entries(mapped)) {
+    if (allowed.has(key)) data[key] = value;
+  }
+
+  if ('coordinates' in data) data.coordinates = normalizeCoordinates(data.coordinates);
 
   for (const field of dateFields) {
-    if (Object.prototype.hasOwnProperty.call(data, field)) {
-      data[field] = data[field] ? new Date(data[field]) : null;
-    }
+    if (field in data) data[field] = data[field] ? new Date(data[field]) : null;
   }
 
   for (const field of numberFields) {
-    if (Object.prototype.hasOwnProperty.call(data, field)) {
-      data[field] =
-        data[field] === '' || data[field] == null
-          ? null
-          : Number(data[field]);
-    }
+    if (field in data) data[field] = data[field] === '' || data[field] == null ? null : Number(data[field]);
   }
 
   return data;
@@ -52,24 +79,18 @@ const sanitizeRecordPayload = (body = {}) => {
 
 const sanitizeAttachments = (attachments, entityType, entityId) => {
   if (!Array.isArray(attachments)) return [];
-
   return attachments
-    .filter((attachment) => attachment?.driveUrl)
-    .map((attachment) => ({
+    .filter((a) => a?.driveUrl)
+    .map((a) => ({
       entityType,
       entityId,
-      attachmentType: attachment.attachmentType || 'other',
-      title: String(
-        attachment.title ||
-          attachment.fileName ||
-          attachment.originalName ||
-          'مرفق'
-      ).trim() || 'مرفق',
-      driveUrl: String(attachment.driveUrl).trim(),
-      driveFileId: attachment.driveFileId || null,
-      mimeType: attachment.mimeType || attachment.fileType || null,
-      notes: attachment.notes || null,
-      createdBy: attachment.createdBy || null,
+      attachmentType: a.attachmentType || 'other',
+      title: String(a.title || a.fileName || a.originalName || 'مرفق').trim() || 'مرفق',
+      driveUrl: String(a.driveUrl).trim(),
+      driveFileId: a.driveFileId || null,
+      mimeType: a.mimeType || a.fileType || null,
+      notes: a.notes || null,
+      createdBy: a.createdBy || null,
     }));
 };
 
@@ -87,23 +108,20 @@ const attachFilesToRecords = async (resource, records) => {
   if (!entityType || !records.length) return records;
 
   const attachments = await prisma.attachment.findMany({
-    where: {
-      entityType,
-      entityId: { in: records.map((record) => record.id) },
-    },
+    where: { entityType, entityId: { in: records.map((r) => r.id) } },
     orderBy: { createdAt: 'desc' },
   });
 
-  const byEntity = new Map();
+  const grouped = new Map();
   for (const attachment of attachments) {
-    const current = byEntity.get(attachment.entityId) || [];
+    const current = grouped.get(attachment.entityId) || [];
     current.push(attachment);
-    byEntity.set(attachment.entityId, current);
+    grouped.set(attachment.entityId, current);
   }
 
   return records.map((record) => ({
     ...record,
-    attachments: byEntity.get(record.id) || [],
+    attachments: grouped.get(record.id) || [],
   }));
 };
 
@@ -111,11 +129,7 @@ router.get('/:resource', async (req, res, next) => {
   try {
     const delegate = getDelegate(req, res);
     if (!delegate) return;
-
-    const records = await delegate.findMany({
-      orderBy: { updatedAt: 'desc' },
-    });
-
+    const records = await delegate.findMany({ orderBy: { updatedAt: 'desc' } });
     res.json(await attachFilesToRecords(req.params.resource, records));
   } catch (error) {
     next(error);
@@ -127,25 +141,15 @@ router.post('/:resource', async (req, res, next) => {
     const delegate = getDelegate(req, res);
     if (!delegate) return;
 
-    const entityType = entityTypes[req.params.resource];
-    const recordData = sanitizeRecordPayload(req.body);
-    const incomingAttachments = Array.isArray(req.body?.attachments)
-      ? req.body.attachments
-      : [];
+    const resource = req.params.resource;
+    const record = await delegate.create({
+      data: sanitizeRecordPayload(resource, req.body),
+    });
 
-    const record = await delegate.create({ data: recordData });
+    const attachments = sanitizeAttachments(req.body?.attachments, entityTypes[resource], record.id);
+    if (attachments.length) await prisma.attachment.createMany({ data: attachments });
 
-    const attachmentData = sanitizeAttachments(
-      incomingAttachments,
-      entityType,
-      record.id
-    );
-
-    if (attachmentData.length > 0) {
-      await prisma.attachment.createMany({ data: attachmentData });
-    }
-
-    const [result] = await attachFilesToRecords(req.params.resource, [record]);
+    const [result] = await attachFilesToRecords(resource, [record]);
     res.status(201).json(result);
   } catch (error) {
     next(error);
@@ -157,41 +161,22 @@ router.put('/:resource/:id', async (req, res, next) => {
     const delegate = getDelegate(req, res);
     if (!delegate) return;
 
-    const entityType = entityTypes[req.params.resource];
-    const recordData = sanitizeRecordPayload(req.body);
-    const hasAttachments = Object.prototype.hasOwnProperty.call(
-      req.body || {},
-      'attachments'
-    );
-    const incomingAttachments = Array.isArray(req.body?.attachments)
-      ? req.body.attachments
-      : [];
-
+    const resource = req.params.resource;
     const record = await delegate.update({
       where: { id: req.params.id },
-      data: recordData,
+      data: sanitizeRecordPayload(resource, req.body),
     });
 
-    if (hasAttachments) {
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'attachments')) {
       await prisma.attachment.deleteMany({
-        where: {
-          entityType,
-          entityId: req.params.id,
-        },
+        where: { entityType: entityTypes[resource], entityId: req.params.id },
       });
 
-      const attachmentData = sanitizeAttachments(
-        incomingAttachments,
-        entityType,
-        req.params.id
-      );
-
-      if (attachmentData.length > 0) {
-        await prisma.attachment.createMany({ data: attachmentData });
-      }
+      const attachments = sanitizeAttachments(req.body?.attachments, entityTypes[resource], req.params.id);
+      if (attachments.length) await prisma.attachment.createMany({ data: attachments });
     }
 
-    const [result] = await attachFilesToRecords(req.params.resource, [record]);
+    const [result] = await attachFilesToRecords(resource, [record]);
     res.json(result);
   } catch (error) {
     next(error);
@@ -203,19 +188,11 @@ router.delete('/:resource/:id', async (req, res, next) => {
     const delegate = getDelegate(req, res);
     if (!delegate) return;
 
-    const entityType = entityTypes[req.params.resource];
-
     await prisma.attachment.deleteMany({
-      where: {
-        entityType,
-        entityId: req.params.id,
-      },
+      where: { entityType: entityTypes[req.params.resource], entityId: req.params.id },
     });
 
-    await delegate.delete({
-      where: { id: req.params.id },
-    });
-
+    await delegate.delete({ where: { id: req.params.id } });
     res.status(204).send();
   } catch (error) {
     next(error);
