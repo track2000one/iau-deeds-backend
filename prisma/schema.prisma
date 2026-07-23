@@ -26,6 +26,26 @@ enum AttachmentType {
   other
 }
 
+enum AppUserRole {
+  admin
+  employee
+}
+
+model AppUser {
+  id           String      @id @default(cuid())
+  username     String
+  email        String      @unique
+  passwordHash String
+  role         AppUserRole @default(employee)
+  isActive     Boolean     @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([role])
+  @@index([isActive])
+}
+
 model Deed {
   id                  String    @id @default(cuid())
   propertyDescription String
