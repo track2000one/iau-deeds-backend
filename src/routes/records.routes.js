@@ -24,14 +24,44 @@ const entityTypes = {
 
 const allowedFields = {
   'allocated-lands': ['propertyDescription','plotNumber','planNumber','area','usageType','region','city','district','coordinates','googleEarthLink','notes','createdBy'],
-  'delivered-lands': ['recipientEntity','deliveryDate','propertyDescription','plotNumber','planNumber','area','location','coordinates','deliveryMinutesNumber','notes','createdBy'],
+  'delivered-lands': [
+    'receiptNumber',
+    'receiptDate',
+    'receiptDateType',
+    'deliveryDate',
+    'deliveryDateType',
+    'deliveringEntity',
+    'recipientEntity',
+    'landName',
+    'description',
+    'propertyDescription',
+    'region',
+    'city',
+    'district',
+    'plotNumber',
+    'planNumber',
+    'area',
+    'usageType',
+    'status',
+    'hasRelatedDeed',
+    'relatedDeedNumber',
+    'location',
+    'coordinates',
+    'deliveryMinutesNumber',
+    'notes',
+    'createdBy',
+  ],
   'leased-lands-out': ['tenant','contractNumber','contractStartDate','contractDuration','plotNumber','planNumber','area','location','coordinates','rentAmount','notes','createdBy'],
   'leased-lands-in': ['owner','contractNumber','contractDuration','propertyDescription','area','location','coordinates','rentAmount','notes','createdBy'],
   'leased-buildings-out': ['tenant','contractNumber','buildingNumber','planNumber','locationName','area','city','district','coordinates','rentAmount','notes','createdBy'],
   'leased-buildings-in': ['owner','contractNumber','buildingNumber','locationName','area','region','city','coordinates','rentAmount','notes','createdBy'],
 };
 
-const dateFields = new Set(['deliveryDate', 'contractStartDate']);
+const dateFields = new Set([
+  'receiptDate',
+  'deliveryDate',
+  'contractStartDate',
+]);
 const numberFields = new Set(['area', 'rentAmount']);
 
 const normalizeCoordinates = (value) => {
@@ -51,15 +81,38 @@ const mapFrontendPayload = (resource, body = {}) => {
   const mapped = { ...body };
 
   if (resource === 'delivered-lands') {
-    mapped.deliveryDate = body.deliveryDate || body.receiptDate || null;
-    mapped.propertyDescription =
-      body.propertyDescription || body.description || body.landName || 'أرض مستلمة';
+    mapped.receiptNumber =
+      body.receiptNumber || body.deliveryMinutesNumber || null;
     mapped.deliveryMinutesNumber =
       body.deliveryMinutesNumber || body.receiptNumber || null;
+
+    mapped.receiptDate =
+      body.receiptDate || body.deliveryDate || null;
+    mapped.deliveryDate =
+      body.deliveryDate || body.receiptDate || null;
+
+    mapped.receiptDateType =
+      body.receiptDateType || body.deliveryDateType || 'gregorian';
+    mapped.deliveryDateType =
+      body.deliveryDateType || body.receiptDateType || 'gregorian';
+
+    mapped.description =
+      body.description || body.propertyDescription || body.landName || '';
+    mapped.propertyDescription =
+      body.propertyDescription || body.description || body.landName || 'أرض مستلمة';
+
+    mapped.landName =
+      body.landName || body.propertyDescription || body.description || '';
+
     mapped.location =
       body.location ||
       [body.region, body.city, body.district].filter(Boolean).join(' - ') ||
       null;
+
+    mapped.hasRelatedDeed = Boolean(body.hasRelatedDeed);
+    mapped.relatedDeedNumber = body.hasRelatedDeed
+      ? body.relatedDeedNumber || null
+      : null;
   }
 
   if (resource === 'leased-lands-in') {

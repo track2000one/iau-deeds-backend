@@ -87,12 +87,26 @@ model AllocatedLand {
 
 model DeliveredLand {
   id                    String    @id @default(cuid())
-  recipientEntity       String
+  receiptNumber         String?
+  receiptDate           DateTime?
+  receiptDateType       String?
   deliveryDate          DateTime?
+  deliveryDateType      String?
+  deliveringEntity      String?
+  recipientEntity       String
+  landName              String?
+  description           String?
   propertyDescription   String
+  region                String?
+  city                  String?
+  district              String?
   plotNumber            String?
   planNumber            String?
   area                  Float     @default(0)
+  usageType             String?
+  status                String?
+  hasRelatedDeed        Boolean   @default(false)
+  relatedDeedNumber     String?
   location              String?
   coordinates           String?
   deliveryMinutesNumber String?
@@ -100,6 +114,10 @@ model DeliveredLand {
   createdBy             String?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
+
+  @@index([receiptNumber])
+  @@index([city])
+  @@index([status])
 }
 
 model LeasedLandOut {
