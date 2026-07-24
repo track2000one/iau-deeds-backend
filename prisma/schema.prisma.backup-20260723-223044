@@ -216,30 +216,11 @@ model ArchiveDocument {
 }
 
 model AuditLog {
-  id           String   @id @default(cuid())
-  userId       String?
-  username     String?
-  userEmail    String?
-  userRole     String?
-  action       String
-  module       String
-  entity       String?
-  entityId     String?
-  entityLabel  String?
-  status       String   @default("success")
-  description  String?
-  details      Json?
-  previousData Json?
-  newData      Json?
-  metadata     Json?
-  ipAddress    String?
-  userAgent    String?
-  errorMessage String?
-  createdAt    DateTime @default(now())
-
-  @@index([userId])
-  @@index([action])
-  @@index([module])
-  @@index([status])
-  @@index([createdAt])
+  id        String   @id @default(cuid())
+  action    String
+  entity    String
+  entityId  String?
+  userId    String?
+  details   Json?
+  createdAt DateTime @default(now())
 }
