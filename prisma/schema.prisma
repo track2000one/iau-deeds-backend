@@ -32,19 +32,37 @@ enum AppUserRole {
 }
 
 model AppUser {
-  id           String           @id @default(cuid())
-  username     String
-  email        String           @unique
-  passwordHash String
-  role         AppUserRole      @default(employee)
-  isActive     Boolean          @default(true)
-  lastLoginAt  DateTime?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
-  permissions  UserPermission[]
+  id                  String               @id @default(cuid())
+  username            String
+  email               String               @unique
+  passwordHash        String
+  role                AppUserRole          @default(employee)
+  isActive            Boolean              @default(true)
+  lastLoginAt         DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  permissions         UserPermission[]
+  passwordResetTokens PasswordResetToken[]
 
   @@index([role])
   @@index([isActive])
+}
+
+model PasswordResetToken {
+  id          String    @id @default(cuid())
+  userId      String
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  requestedIp String?
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+
+  user AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([usedAt])
 }
 
 model UserPermission {
