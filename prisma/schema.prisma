@@ -32,18 +32,36 @@ enum AppUserRole {
 }
 
 model AppUser {
-  id           String      @id @default(cuid())
+  id           String           @id @default(cuid())
   username     String
-  email        String      @unique
+  email        String           @unique
   passwordHash String
-  role         AppUserRole @default(employee)
-  isActive     Boolean     @default(true)
+  role         AppUserRole      @default(employee)
+  isActive     Boolean          @default(true)
   lastLoginAt  DateTime?
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  permissions  UserPermission[]
 
   @@index([role])
   @@index([isActive])
+}
+
+model UserPermission {
+  id        String  @id @default(cuid())
+  userId    String
+  module    String
+  canView   Boolean @default(false)
+  canAdd    Boolean @default(false)
+  canEdit   Boolean @default(false)
+  canDelete Boolean @default(false)
+  canPrint  Boolean @default(false)
+
+  user AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, module])
+  @@index([userId])
+  @@index([module])
 }
 
 model Deed {

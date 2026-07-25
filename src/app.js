@@ -14,8 +14,10 @@ import usersRoutes from './routes/users.routes.js';
 import auditRoutes from './routes/audit.routes.js';
 import {
   requireAdmin,
-  requireAdminForWrites,
   requireAuth,
+  requirePermission,
+  requireRecordPermission,
+  requireAttachmentPermission,
 } from './middleware/auth.js';
 import { auditTrail } from './middleware/audit.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
@@ -25,7 +27,6 @@ export const app = express();
 const allowedOrigin = process.env.FRONTEND_URL || '*';
 
 app.set('trust proxy', true);
-
 app.use(helmet());
 app.use(
   cors({
@@ -46,25 +47,14 @@ app.get('/', (_req, res) => {
 app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
 
-app.use(
-  '/api/audit',
-  requireAuth,
-  requireAdmin,
-  auditRoutes
-);
-
-app.use(
-  '/api/users',
-  requireAuth,
-  auditTrail('users'),
-  usersRoutes
-);
+app.use('/api/audit', requireAuth, requireAdmin, auditRoutes);
+app.use('/api/users', requireAuth, auditTrail('users'), usersRoutes);
 
 app.use(
   '/api/deeds',
   requireAuth,
   auditTrail('deeds'),
-  requireAdminForWrites,
+  requirePermission('deeds'),
   deedsRoutes
 );
 
@@ -72,15 +62,15 @@ app.use(
   '/api/attachments',
   requireAuth,
   auditTrail('attachments'),
-  requireAdminForWrites,
+  requireAttachmentPermission,
   attachmentsRoutes
 );
 
 app.use(
   '/api/uploads',
   requireAuth,
-  auditTrail('uploads'),
   requireAdmin,
+  auditTrail('uploads'),
   uploadsRoutes
 );
 
@@ -88,7 +78,7 @@ app.use(
   '/api/records',
   requireAuth,
   auditTrail('records'),
-  requireAdminForWrites,
+  requireRecordPermission,
   recordsRoutes
 );
 
@@ -96,7 +86,7 @@ app.use(
   '/api/archive',
   requireAuth,
   auditTrail('archive'),
-  requireAdminForWrites,
+  requirePermission('archive'),
   archiveRoutes
 );
 

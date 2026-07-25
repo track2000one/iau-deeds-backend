@@ -47,12 +47,25 @@ export const verifyAccessToken = (token) => {
   });
 };
 
+const permissionMap = (permissions = []) =>
+  permissions.reduce((output, item) => {
+    output[item.module] = {
+      canView: item.canView,
+      canAdd: item.canAdd,
+      canEdit: item.canEdit,
+      canDelete: item.canDelete,
+      canPrint: item.canPrint,
+    };
+    return output;
+  }, {});
+
 export const serializeUser = (user) => ({
   uid: user.id,
   email: user.email,
   username: user.username,
   role: user.role,
   isActive: user.isActive,
+  permissions: permissionMap(user.permissions),
   createdAt: user.createdAt,
   updatedAt: user.updatedAt,
   lastLoginAt: user.lastLoginAt,

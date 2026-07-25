@@ -10,11 +10,22 @@ router.use(requireAuth, requireAdmin);
 
 const roleSchema = z.enum(['admin', 'employee']);
 
+const permissionSchema = z.object({
+  canView: z.boolean().default(false),
+  canAdd: z.boolean().default(false),
+  canEdit: z.boolean().default(false),
+  canDelete: z.boolean().default(false),
+  canPrint: z.boolean().default(false),
+});
+
+const permissionsSchema = z.record(z.string(), permissionSchema).default({});
+
 const createUserSchema = z.object({
   username: z.string().trim().min(2, 'اسم المستخدم قصير جدًا'),
   email: z.string().email('البريد الإلكتروني غير صحيح'),
   password: z.string().min(8, 'كلمة المرور يجب ألا تقل عن 8 أحرف'),
   role: roleSchema.default('employee'),
+  permissions: permissionsSchema,
 });
 
 const updateUserSchema = z.object({
@@ -22,25 +33,45 @@ const updateUserSchema = z.object({
   email: z.string().email('البريد الإلكتروني غير صحيح'),
   role: roleSchema,
   isActive: z.boolean(),
+  permissions: permissionsSchema,
 });
 
 const passwordSchema = z.object({
   password: z.string().min(8, 'كلمة المرور يجب ألا تقل عن 8 أحرف'),
 });
 
-const countOtherActiveAdmins = async (userId) => {
-  return prisma.appUser.count({
+const normalizePermissionRows = (permissions = {}) =>
+  Object.entries(permissions).map(([module, value]) => ({
+    module,
+    canView:
+      Boolean(value.canView) ||
+      Boolean(value.canAdd) ||
+      Boolean(value.canEdit) ||
+      Boolean(value.canDelete) ||
+      Boolean(value.canPrint),
+    canAdd: Boolean(value.canAdd),
+    canEdit: Boolean(value.canEdit),
+    canDelete: Boolean(value.canDelete),
+    canPrint: Boolean(value.canPrint),
+  }));
+
+const countOtherActiveAdmins = async (userId) =>
+  prisma.appUser.count({
     where: {
       id: { not: userId },
       role: 'admin',
       isActive: true,
     },
   });
+
+const includePermissions = {
+  permissions: true,
 };
 
 router.get('/', async (_req, res, next) => {
   try {
     const users = await prisma.appUser.findMany({
+      include: includePermissions,
       orderBy: [
         { role: 'asc' },
         { username: 'asc' },
@@ -68,6 +99,11 @@ router.post('/', async (req, res, next) => {
       });
     }
 
+    const rows =
+      input.role === 'admin'
+        ? []
+        : normalizePermissionRows(input.permissions);
+
     const user = await prisma.appUser.create({
       data: {
         username: input.username,
@@ -75,7 +111,11 @@ router.post('/', async (req, res, next) => {
         passwordHash: await hashPassword(input.password),
         role: input.role,
         isActive: true,
+        permissions: {
+          create: rows,
+        },
       },
+      include: includePermissions,
     });
 
     res.status(201).json(serializeUser(user));
@@ -98,12 +138,13 @@ router.put('/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'المستخدم غير موجود' });
     }
 
-    if (req.authUser.id === userId) {
-      if (input.role !== 'admin' || input.isActive === false) {
-        return res.status(400).json({
-          message: 'لا يمكن للمسؤول إلغاء صلاحية حسابه الحالي أو تعطيله',
-        });
-      }
+    if (
+      req.authUser.id === userId &&
+      (input.role !== 'admin' || input.isActive === false)
+    ) {
+      return res.status(400).json({
+        message: 'لا يمكن للمسؤول إلغاء صلاحية حسابه الحالي أو تعطيله',
+      });
     }
 
     const removingAdmin =
@@ -130,14 +171,29 @@ router.put('/:id', async (req, res, next) => {
       });
     }
 
-    const updated = await prisma.appUser.update({
-      where: { id: userId },
-      data: {
-        username: input.username,
-        email,
-        role: input.role,
-        isActive: input.isActive,
-      },
+    const rows =
+      input.role === 'admin'
+        ? []
+        : normalizePermissionRows(input.permissions);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.userPermission.deleteMany({
+        where: { userId },
+      });
+
+      return tx.appUser.update({
+        where: { id: userId },
+        data: {
+          username: input.username,
+          email,
+          role: input.role,
+          isActive: input.isActive,
+          permissions: {
+            create: rows,
+          },
+        },
+        include: includePermissions,
+      });
     });
 
     res.json(serializeUser(updated));

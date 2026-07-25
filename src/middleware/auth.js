@@ -23,6 +23,7 @@ export const requireAuth = async (req, res, next) => {
 
     const user = await prisma.appUser.findUnique({
       where: { id: payload.sub },
+      include: { permissions: true },
     });
 
     if (!user || !user.isActive) {
@@ -53,12 +54,85 @@ export const requireAdmin = (req, res, next) => {
   next();
 };
 
-export const requireAdminForWrites = (req, res, next) => {
-  const readMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
+const actionByMethod = {
+  GET: 'canView',
+  HEAD: 'canView',
+  OPTIONS: 'canView',
+  POST: 'canAdd',
+  PUT: 'canEdit',
+  PATCH: 'canEdit',
+  DELETE: 'canDelete',
+};
 
-  if (readMethods.has(req.method.toUpperCase())) {
-    return next();
+const recordModuleByResource = {
+  'allocated-lands': 'allocated_lands',
+  'delivered-lands': 'delivered_lands',
+  'leased-lands-out': 'leased_lands_out',
+  'leased-lands-in': 'leased_lands_in',
+  'leased-buildings-out': 'leased_buildings_out',
+  'leased-buildings-in': 'leased_buildings_in',
+};
+
+const findPermission = (user, moduleName) =>
+  user?.permissions?.find((item) => item.module === moduleName);
+
+export const requirePermission = (moduleName) => (req, res, next) => {
+  if (req.authUser?.role === 'admin') return next();
+
+  const action = actionByMethod[req.method.toUpperCase()];
+  const permission = findPermission(req.authUser, moduleName);
+
+  if (!action || !permission?.[action]) {
+    return res.status(403).json({
+      message: 'لا تملك صلاحية تنفيذ هذه العملية',
+    });
   }
 
-  return requireAdmin(req, res, next);
+  next();
+};
+
+export const requireRecordPermission = (req, res, next) => {
+  if (req.authUser?.role === 'admin') return next();
+
+  const resource = String(req.path || '')
+    .split('/')
+    .filter(Boolean)[0];
+
+  const moduleName = recordModuleByResource[resource];
+
+  if (!moduleName) {
+    return res.status(403).json({
+      message: 'تعذر تحديد صلاحية القسم المطلوب',
+    });
+  }
+
+  return requirePermission(moduleName)(req, res, next);
+};
+
+export const requireAttachmentPermission = (req, res, next) => {
+  if (req.authUser?.role === 'admin') return next();
+
+  const entityType =
+    req.body?.entityType ||
+    String(req.path || '').split('/').filter(Boolean)[0];
+
+  const map = {
+    deed: 'deeds',
+    allocated_land: 'allocated_lands',
+    delivered_land: 'delivered_lands',
+    leased_land_out: 'leased_lands_out',
+    leased_land_in: 'leased_lands_in',
+    leased_building_out: 'leased_buildings_out',
+    leased_building_in: 'leased_buildings_in',
+  };
+
+  const moduleName = map[entityType];
+
+  if (!moduleName) {
+    return res.status(403).json({
+      message: 'تعذر تحديد صلاحية المرفق',
+    });
+  }
+
+  return requirePermission(moduleName)(req, res, next);
 };
