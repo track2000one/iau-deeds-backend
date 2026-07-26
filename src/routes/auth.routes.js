@@ -77,11 +77,6 @@ const auditLogin = (
 const hashResetToken = (token) =>
   crypto.createHash('sha256').update(token).digest('hex');
 
-const genericForgotResponse = {
-  message:
-    'إذا كان البريد الإلكتروني مسجلًا ونشطًا، فسيتم إرسال رابط إعادة تعيين كلمة المرور إليه.',
-};
-
 const waitMinimumResponseTime = async (startedAt, minimumMs = 450) => {
   const elapsed = Date.now() - startedAt;
   const remaining = minimumMs - elapsed;
@@ -104,15 +99,29 @@ router.post('/login', async (req, res, next) => {
       include: { permissions: true },
     });
 
-    if (!user || !user.isActive) {
+    if (!user) {
       await auditLogin(req, {
         email,
         status: 'failed',
-        errorMessage: 'الحساب غير موجود أو غير نشط',
+        errorMessage: 'الحساب غير موجود',
       });
 
       return res.status(401).json({
-        message: 'البريد الإلكتروني أو كلمة المرور غير صحيحة',
+        message: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
+      });
+    }
+
+    if (!user.isActive) {
+      await auditLogin(req, {
+        user,
+        email,
+        status: 'failed',
+        errorMessage: 'الحساب غير مفعّل',
+      });
+
+      return res.status(403).json({
+        message:
+          'الحساب غير مفعّل. يرجى التواصل مع مدير النظام لتفعيل الحساب.',
       });
     }
 
@@ -130,7 +139,7 @@ router.post('/login', async (req, res, next) => {
       });
 
       return res.status(401).json({
-        message: 'البريد الإلكتروني أو كلمة المرور غير صحيحة',
+        message: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
       });
     }
 
@@ -175,7 +184,24 @@ router.post('/forgot-password', async (req, res, next) => {
       where: { email },
     });
 
-    if (user?.isActive) {
+    if (!user) {
+      await waitMinimumResponseTime(startedAt);
+
+      return res.status(404).json({
+        message: 'البريد الإلكتروني المدخل غير مسجل في المنصة.',
+      });
+    }
+
+    if (!user.isActive) {
+      await waitMinimumResponseTime(startedAt);
+
+      return res.status(403).json({
+        message:
+          'الحساب غير مفعّل. يرجى التواصل مع مدير النظام لتفعيل الحساب.',
+      });
+    }
+
+    {
       const recentRequest = await prisma.passwordResetToken.findFirst({
         where: {
           userId: user.id,
@@ -264,7 +290,11 @@ router.post('/forgot-password', async (req, res, next) => {
     }
 
     await waitMinimumResponseTime(startedAt);
-    return res.json(genericForgotResponse);
+
+    return res.json({
+      message:
+        'تم إرسال رابط إعادة تعيين كلمة المرور إلى البريد الإلكتروني المسجل.',
+    });
   } catch (error) {
     if (error?.name === 'ZodError') {
       await waitMinimumResponseTime(startedAt);
