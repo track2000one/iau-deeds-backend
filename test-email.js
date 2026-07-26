@@ -1,12 +1,17 @@
-﻿import 'dotenv/config';
-import { verifyEmailTransport } from './src/services/email.service.js';
+﻿import "dotenv/config";
+import {
+  verifyEmailTransport,
+} from "./src/services/email.service.js";
 
 try {
   await verifyEmailTransport();
 
-  console.log('SMTP connection and authentication succeeded.');
-  process.exit(0);
+  console.log("Brevo email API configuration succeeded.");
 } catch (error) {
-  console.error('SMTP verification failed:', error);
-  process.exit(1);
+  console.error(
+    "Brevo email API verification failed:",
+    error
+  );
+
+  process.exitCode = 1;
 }
