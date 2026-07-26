@@ -107,7 +107,7 @@ router.post('/login', async (req, res, next) => {
       });
 
       return res.status(401).json({
-        message: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
+        message: 'اسم المستخدم أو كلمة المرور غير صحيحة.',
       });
     }
 
@@ -121,7 +121,7 @@ router.post('/login', async (req, res, next) => {
 
       return res.status(403).json({
         message:
-          'الحساب غير مفعّل. يرجى التواصل مع مدير النظام لتفعيل الحساب.',
+          'الحساب غير مفعّل. يرجى التواصل مع مدير النظام.',
       });
     }
 
@@ -139,7 +139,7 @@ router.post('/login', async (req, res, next) => {
       });
 
       return res.status(401).json({
-        message: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
+        message: 'اسم المستخدم أو كلمة المرور غير صحيحة.',
       });
     }
 
@@ -188,7 +188,7 @@ router.post('/forgot-password', async (req, res, next) => {
       await waitMinimumResponseTime(startedAt);
 
       return res.status(404).json({
-        message: 'البريد الإلكتروني المدخل غير مسجل في المنصة.',
+        message: 'هذا البريد الإلكتروني غير مسجل في المنصة.',
       });
     }
 
@@ -197,7 +197,7 @@ router.post('/forgot-password', async (req, res, next) => {
 
       return res.status(403).json({
         message:
-          'الحساب غير مفعّل. يرجى التواصل مع مدير النظام لتفعيل الحساب.',
+          'الحساب المرتبط بهذا البريد غير مفعّل. يرجى التواصل مع مدير النظام.',
       });
     }
 
