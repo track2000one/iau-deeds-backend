@@ -12,12 +12,14 @@ import archiveRoutes from './routes/archive.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import usersRoutes from './routes/users.routes.js';
 import auditRoutes from './routes/audit.routes.js';
+import siteInspectionsRoutes from './routes/site-inspections.routes.js';
 import {
   requireAdmin,
   requireAuth,
   requirePermission,
   requireRecordPermission,
   requireAttachmentPermission,
+  requireUploadPermission,
 } from './middleware/auth.js';
 import { auditTrail } from './middleware/audit.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
@@ -69,7 +71,7 @@ app.use(
 app.use(
   '/api/uploads',
   requireAuth,
-  requireAdmin,
+  requireUploadPermission,
   auditTrail('uploads'),
   uploadsRoutes
 );
@@ -88,6 +90,15 @@ app.use(
   auditTrail('archive'),
   requirePermission('archive'),
   archiveRoutes
+);
+
+
+app.use(
+  '/api/site-inspections',
+  requireAuth,
+  auditTrail('site_inspections'),
+  requirePermission('site_inspections'),
+  siteInspectionsRoutes
 );
 
 app.use(notFound);

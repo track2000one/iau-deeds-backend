@@ -124,6 +124,7 @@ export const requireAttachmentPermission = (req, res, next) => {
     leased_land_in: 'leased_lands_in',
     leased_building_out: 'leased_buildings_out',
     leased_building_in: 'leased_buildings_in',
+    site_inspection: 'site_inspections',
   };
 
   const moduleName = map[entityType];
@@ -135,4 +136,29 @@ export const requireAttachmentPermission = (req, res, next) => {
   }
 
   return requirePermission(moduleName)(req, res, next);
+};
+
+
+export const requireUploadPermission = (req, res, next) => {
+  if (req.authUser?.role === 'admin') return next();
+
+  const requestedModule = String(
+    req.headers['x-upload-module'] || req.query?.module || ''
+  ).trim();
+
+  if (!requestedModule) {
+    return res.status(403).json({
+      message: 'تعذر تحديد صلاحية رفع الملف',
+    });
+  }
+
+  const permission = findPermission(req.authUser, requestedModule);
+
+  if (!permission?.canAdd && !permission?.canEdit) {
+    return res.status(403).json({
+      message: 'لا تملك صلاحية رفع الملفات لهذا القسم',
+    });
+  }
+
+  next();
 };

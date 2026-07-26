@@ -15,6 +15,7 @@ enum AttachmentEntityType {
   leased_land_in
   leased_building_out
   leased_building_in
+  site_inspection
 }
 
 enum AttachmentType {
@@ -23,6 +24,7 @@ enum AttachmentType {
   location_image
   contract_image
   delivery_minutes
+  inspection_image
   other
 }
 
@@ -296,4 +298,62 @@ model AuditLog {
   @@index([module])
   @@index([status])
   @@index([createdAt])
+}
+
+model SiteInspection {
+  id                  String    @id @default(cuid())
+  inspectionNumber    String    @unique
+  title               String
+  siteType            String
+  siteName            String
+  visitDate           DateTime
+  visitPurpose        String?
+  inspectorName       String?
+  accompanyingEntity  String?
+  region              String?
+  city                String?
+  district            String?
+  locationDescription String?
+  deedNumber          String?
+  plotNumber          String?
+  planNumber          String?
+  latitude            Float?
+  longitude           Float?
+  locationAccuracy    Float?
+  mapUrl              String?
+  overallStatus       String    @default("good")
+  priority            String    @default("normal")
+  observations        String?
+  recommendedAction   String?
+  referredEntity      String?
+  followUpDate        DateTime?
+  workflowStatus      String    @default("new")
+  createdBy           String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  items SiteInspectionItem[]
+
+  @@index([visitDate])
+  @@index([siteType])
+  @@index([city])
+  @@index([overallStatus])
+  @@index([workflowStatus])
+}
+
+model SiteInspectionItem {
+  id           String   @id @default(cuid())
+  inspectionId String
+  category     String
+  status       String   @default("good")
+  note         String?
+  priority     String   @default("normal")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  inspection SiteInspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+
+  @@index([inspectionId])
+  @@index([category])
+  @@index([status])
 }
