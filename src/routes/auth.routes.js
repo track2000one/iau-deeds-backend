@@ -32,6 +32,18 @@ const loginSchema = z.object({
   password: z.string().min(1, 'كلمة المرور مطلوبة'),
 });
 
+
+const activateAccountSchema = z.object({
+  token: z.string().min(32, 'رابط التفعيل غير صالح'),
+  currentPassword: z.string().min(1, 'كلمة المرور الحالية مطلوبة'),
+  keepCurrentPassword: z.boolean().default(true),
+  newPassword: z
+    .string()
+    .min(8, 'كلمة المرور الجديدة يجب ألا تقل عن 8 أحرف')
+    .max(128, 'كلمة المرور الجديدة طويلة جدًا')
+    .optional(),
+});
+
 const forgotPasswordSchema = z.object({
   email: z.string().email('البريد الإلكتروني غير صحيح'),
 });
@@ -119,9 +131,25 @@ router.post('/login', async (req, res, next) => {
         errorMessage: 'الحساب غير مفعّل',
       });
 
+      if (user.activationTokenHash) {
+        const expired =
+          !user.activationExpires ||
+          user.activationExpires <= new Date();
+
+        return res.status(403).json({
+          code: expired
+            ? 'ACTIVATION_EXPIRED'
+            : 'ACTIVATION_REQUIRED',
+          message: expired
+            ? 'انتهت صلاحية رابط التفعيل. يرجى التواصل مع مسؤول النظام لإرسال رابط جديد.'
+            : 'الحساب غير مفعّل. يرجى فتح رابط التفعيل المرسل إلى بريدك الإلكتروني.',
+        });
+      }
+
       return res.status(403).json({
+        code: 'ACCOUNT_DISABLED',
         message:
-          'الحساب غير مفعّل. يرجى التواصل مع مدير النظام.',
+          'الحساب معطّل. يرجى التواصل مع مدير النظام.',
       });
     }
 
@@ -168,6 +196,151 @@ router.post('/login', async (req, res, next) => {
       });
     }
 
+    next(error);
+  }
+});
+
+
+router.get('/activate-account/validate', async (req, res, next) => {
+  try {
+    const token = String(req.query.token || '');
+
+    if (token.length < 32) {
+      return res.status(400).json({
+        valid: false,
+        message: 'رابط التفعيل غير صالح.',
+      });
+    }
+
+    const tokenHash = hashResetToken(token);
+
+    const user = await prisma.appUser.findUnique({
+      where: {
+        activationTokenHash: tokenHash,
+      },
+    });
+
+    if (!user || user.isActive || !user.activationTokenHash) {
+      return res.status(400).json({
+        valid: false,
+        message:
+          'رابط التفعيل غير صالح أو تم استخدامه مسبقًا.',
+      });
+    }
+
+    if (
+      !user.activationExpires ||
+      user.activationExpires <= new Date()
+    ) {
+      return res.status(400).json({
+        valid: false,
+        expired: true,
+        message:
+          'انتهت صلاحية رابط التفعيل. يرجى التواصل مع مسؤول النظام لإرسال رابط جديد.',
+      });
+    }
+
+    return res.json({
+      valid: true,
+      username: user.username,
+      email: user.email,
+      expiresAt: user.activationExpires,
+      message: 'رابط التفعيل صالح.',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/activate-account', async (req, res, next) => {
+  try {
+    const input = activateAccountSchema.parse(req.body);
+
+    if (!input.keepCurrentPassword && !input.newPassword) {
+      return res.status(400).json({
+        message: 'أدخل كلمة المرور الجديدة.',
+      });
+    }
+
+    const tokenHash = hashResetToken(input.token);
+
+    const user = await prisma.appUser.findUnique({
+      where: {
+        activationTokenHash: tokenHash,
+      },
+      include: {
+        permissions: true,
+      },
+    });
+
+    if (!user || user.isActive || !user.activationTokenHash) {
+      return res.status(400).json({
+        message:
+          'رابط التفعيل غير صالح أو تم استخدامه مسبقًا.',
+      });
+    }
+
+    if (
+      !user.activationExpires ||
+      user.activationExpires <= new Date()
+    ) {
+      return res.status(400).json({
+        message:
+          'انتهت صلاحية رابط التفعيل. يرجى التواصل مع مسؤول النظام لإرسال رابط جديد.',
+      });
+    }
+
+    const currentPasswordIsValid = await verifyPassword(
+      input.currentPassword,
+      user.passwordHash
+    );
+
+    if (!currentPasswordIsValid) {
+      return res.status(400).json({
+        message:
+          'كلمة المرور المرسلة إلى بريدك الإلكتروني غير صحيحة.',
+      });
+    }
+
+    const passwordHash = input.keepCurrentPassword
+      ? user.passwordHash
+      : await hashPassword(input.newPassword);
+
+    const activatedUser = await prisma.appUser.update({
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        isActive: true,
+        activationTokenHash: null,
+        activationExpires: null,
+        activatedAt: new Date(),
+      },
+      include: {
+        permissions: true,
+      },
+    });
+
+    await createAuditLog({
+      user: activatedUser,
+      action: 'account_activated',
+      module: 'auth',
+      entity: 'account',
+      entityId: activatedUser.id,
+      entityLabel: activatedUser.username,
+      status: 'success',
+      description: input.keepCurrentPassword
+        ? 'تم تفعيل الحساب مع الاحتفاظ بكلمة المرور'
+        : 'تم تفعيل الحساب وتعيين كلمة مرور جديدة',
+      ipAddress: getClientIp(req),
+      userAgent: req.headers['user-agent'],
+    });
+
+    return res.json({
+      message: input.keepCurrentPassword
+        ? 'تم تفعيل الحساب بنجاح. يمكنك الآن تسجيل الدخول بكلمة المرور الحالية.'
+        : 'تم تفعيل الحساب وتعيين كلمة المرور الجديدة بنجاح.',
+    });
+  } catch (error) {
     next(error);
   }
 });

@@ -213,3 +213,275 @@ export async function verifyEmailTransport() {
 
   return true;
 }
+
+export async function sendAccountActivationEmail({
+  to,
+  username,
+  initialPassword,
+  activationUrl,
+  expiresInHours = 24,
+  includePassword = true,
+}) {
+  const client = getBrevoClient();
+
+  const senderEmail = process.env.EMAIL_FROM_ADDRESS;
+  const senderName =
+    process.env.EMAIL_FROM_NAME ||
+    "منصة إدارة الصكوك والأراضي";
+
+  if (!senderEmail) {
+    throw new Error("EMAIL_FROM_ADDRESS is not configured");
+  }
+
+  const safeUsername = escapeHtml(username || "المستخدم");
+  const safeActivationUrl = escapeHtml(activationUrl);
+  const safeEmail = escapeHtml(to);
+  const safePassword = escapeHtml(initialPassword || "");
+
+  const passwordSection = includePassword
+    ? `
+      <div
+        style="
+          margin:22px 0;
+          padding:18px;
+          background:#f6f8fb;
+          border:1px solid #d8e2ef;
+          border-radius:12px;
+        "
+      >
+        <p style="margin:0 0 10px;">
+          <strong>بيانات الدخول الأولية</strong>
+        </p>
+
+        <p style="margin:7px 0;">
+          البريد الإلكتروني:
+          <span dir="ltr">${safeEmail}</span>
+        </p>
+
+        <p style="margin:7px 0;">
+          كلمة المرور التي أنشأها المسؤول:
+        </p>
+
+        <p
+          dir="ltr"
+          style="
+            margin:10px 0 0;
+            padding:12px;
+            background:#ffffff;
+            border-radius:8px;
+            text-align:center;
+            font-family:Consolas,monospace;
+            font-size:17px;
+            font-weight:bold;
+            letter-spacing:1px;
+          "
+        >
+          ${safePassword}
+        </p>
+      </div>
+    `
+    : `
+      <div
+        style="
+          margin:22px 0;
+          padding:16px;
+          background:#f6f8fb;
+          border-radius:10px;
+          font-size:14px;
+        "
+      >
+        استخدم كلمة المرور الأولية التي سبق أن أرسلها لك مسؤول النظام.
+      </div>
+    `;
+
+  const textPasswordSection = includePassword
+    ? `
+البريد الإلكتروني: ${to}
+كلمة المرور الأولية: ${initialPassword}
+`
+    : `
+استخدم كلمة المرور الأولية التي سبق أن أرسلها لك مسؤول النظام.
+`;
+
+  const result =
+    await client.transactionalEmails.sendTransacEmail({
+      sender: {
+        email: senderEmail,
+        name: senderName,
+      },
+
+      to: [
+        {
+          email: to,
+          name: username || undefined,
+        },
+      ],
+
+      subject:
+        "تفعيل حسابك - منصة إدارة الصكوك والأراضي",
+
+      htmlContent: `
+        <!doctype html>
+        <html lang="ar" dir="rtl">
+          <head>
+            <meta charset="utf-8" />
+            <meta
+              name="viewport"
+              content="width=device-width, initial-scale=1"
+            />
+          </head>
+
+          <body
+            style="
+              margin:0;
+              background:#f3f6fa;
+              font-family:Arial,Tahoma,sans-serif;
+              color:#1f365f;
+            "
+          >
+            <div
+              style="
+                max-width:640px;
+                margin:30px auto;
+                background:#ffffff;
+                border:1px solid #d8e2ef;
+                border-radius:16px;
+                overflow:hidden;
+              "
+            >
+              <div
+                style="
+                  background:#203a78;
+                  padding:28px;
+                  color:#ffffff;
+                "
+              >
+                <h2 style="margin:0 0 12px;">
+                  مرحبًا بك
+                </h2>
+
+                <p style="margin:0;">
+                  منصة إدارة الصكوك والأراضي
+                </p>
+              </div>
+
+              <div style="padding:30px;">
+                <p>
+                  السلام عليكم ورحمة الله وبركاته،
+                </p>
+
+                <p>
+                  مرحبًا
+                  <strong>${safeUsername}</strong>،
+                  قام مسؤول النظام بإنشاء حساب لك في المنصة.
+                </p>
+
+                ${passwordSection}
+
+                <p>
+                  يرجى الضغط على الزر التالي لتفعيل الحساب.
+                  بعد فتح الرابط يمكنك الاحتفاظ بكلمة المرور الحالية
+                  أو تعيين كلمة مرور جديدة.
+                </p>
+
+                <div
+                  style="
+                    text-align:center;
+                    margin:32px 0;
+                  "
+                >
+                  <a
+                    href="${safeActivationUrl}"
+                    style="
+                      display:inline-block;
+                      background:#2454dc;
+                      color:#ffffff;
+                      text-decoration:none;
+                      padding:14px 28px;
+                      border-radius:10px;
+                      font-weight:bold;
+                    "
+                  >
+                    تفعيل الحساب
+                  </a>
+                </div>
+
+                <p>
+                  رابط التفعيل صالح لمدة
+                  <strong>${expiresInHours} ساعة</strong>
+                  ويعمل مرة واحدة فقط.
+                </p>
+
+                <p
+                  style="
+                    font-size:13px;
+                    color:#667085;
+                  "
+                >
+                  لن تتمكن من تسجيل الدخول قبل إكمال عملية التفعيل.
+                </p>
+
+                <p
+                  style="
+                    font-size:12px;
+                    direction:ltr;
+                    text-align:left;
+                    word-break:break-all;
+                  "
+                >
+                  <a href="${safeActivationUrl}">
+                    ${safeActivationUrl}
+                  </a>
+                </p>
+
+                <div
+                  style="
+                    margin-top:24px;
+                    padding:15px;
+                    background:#fff7ed;
+                    border:1px solid #fed7aa;
+                    border-radius:10px;
+                    font-size:13px;
+                    color:#9a3412;
+                  "
+                >
+                  لا تشارك كلمة المرور أو رابط التفعيل مع أي شخص.
+                </div>
+
+                <p style="margin-top:26px;">
+                  مع تحياتنا،<br />
+                  إدارة أوقاف وأملاك الجامعة<br />
+                  جامعة الإمام عبدالرحمن بن فيصل
+                </p>
+              </div>
+            </div>
+          </body>
+        </html>
+      `,
+
+      textContent: `
+السلام عليكم ورحمة الله وبركاته،
+
+مرحبًا ${username || "المستخدم"}،
+
+قام مسؤول النظام بإنشاء حساب لك في منصة إدارة الصكوك والأراضي.
+${textPasswordSection}
+رابط تفعيل الحساب:
+${activationUrl}
+
+بعد فتح الرابط يمكنك الاحتفاظ بكلمة المرور الحالية
+أو تعيين كلمة مرور جديدة.
+
+الرابط صالح لمدة ${expiresInHours} ساعة ويعمل مرة واحدة فقط.
+لن تتمكن من تسجيل الدخول قبل إكمال التفعيل.
+      `.trim(),
+    });
+
+  console.log(
+    "Account activation email sent through Brevo:",
+    result?.messageId || result?.body?.messageId
+  );
+
+  return result;
+}
+

@@ -1,10 +1,43 @@
+import crypto from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { hashPassword, serializeUser } from '../security/auth.js';
+import { sendAccountActivationEmail } from '../services/email.service.js';
 
 const router = Router();
+
+const ACTIVATION_TOKEN_HOURS = Math.max(
+  1,
+  Number(process.env.ACCOUNT_ACTIVATION_TOKEN_HOURS || 24)
+);
+
+const FRONTEND_URL = (
+  process.env.FRONTEND_URL ||
+  'http://localhost:5173'
+).replace(/\/+$/, '');
+
+const hashActivationToken = (token) =>
+  crypto.createHash('sha256').update(token).digest('hex');
+
+const createActivationData = () => {
+  const plainToken = crypto.randomBytes(48).toString('hex');
+
+  return {
+    plainToken,
+    tokenHash: hashActivationToken(plainToken),
+    expiresAt: new Date(
+      Date.now() + ACTIVATION_TOKEN_HOURS * 60 * 60 * 1000
+    ),
+  };
+};
+
+const buildActivationUrl = (plainToken) =>
+  `${FRONTEND_URL}/#/activate-account?token=${encodeURIComponent(
+    plainToken
+  )}`;
+
 
 router.use(requireAuth, requireAdmin);
 
@@ -85,6 +118,8 @@ router.get('/', async (_req, res, next) => {
 });
 
 router.post('/', async (req, res, next) => {
+  let createdUserId = null;
+
   try {
     const input = createUserSchema.parse(req.body);
     const email = input.email.trim().toLowerCase();
@@ -104,13 +139,19 @@ router.post('/', async (req, res, next) => {
         ? []
         : normalizePermissionRows(input.permissions);
 
+    const activation = createActivationData();
+
     const user = await prisma.appUser.create({
       data: {
         username: input.username,
         email,
         passwordHash: await hashPassword(input.password),
         role: input.role,
-        isActive: true,
+        isActive: false,
+        activationTokenHash: activation.tokenHash,
+        activationExpires: activation.expiresAt,
+        activationSentAt: new Date(),
+        activatedAt: null,
         permissions: {
           create: rows,
         },
@@ -118,7 +159,84 @@ router.post('/', async (req, res, next) => {
       include: includePermissions,
     });
 
-    res.status(201).json(serializeUser(user));
+    createdUserId = user.id;
+
+    await sendAccountActivationEmail({
+      to: user.email,
+      username: user.username,
+      initialPassword: input.password,
+      activationUrl: buildActivationUrl(activation.plainToken),
+      expiresInHours: ACTIVATION_TOKEN_HOURS,
+      includePassword: true,
+    });
+
+    res.status(201).json({
+      ...serializeUser(user),
+      message:
+        'تم إنشاء الحساب وإرسال رسالة التفعيل إلى البريد الإلكتروني.',
+    });
+  } catch (error) {
+    if (createdUserId) {
+      try {
+        await prisma.appUser.delete({
+          where: { id: createdUserId },
+        });
+      } catch (rollbackError) {
+        console.error(
+          'Unable to rollback user after activation email failure:',
+          rollbackError
+        );
+      }
+    }
+
+    next(error);
+  }
+});
+
+router.post('/:id/resend-activation', async (req, res, next) => {
+  try {
+    const user = await prisma.appUser.findUnique({
+      where: { id: req.params.id },
+      include: includePermissions,
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: 'المستخدم غير موجود',
+      });
+    }
+
+    if (user.isActive) {
+      return res.status(400).json({
+        message: 'الحساب مفعّل بالفعل ولا يحتاج إلى رابط جديد.',
+      });
+    }
+
+    const activation = createActivationData();
+
+    const updated = await prisma.appUser.update({
+      where: { id: user.id },
+      data: {
+        activationTokenHash: activation.tokenHash,
+        activationExpires: activation.expiresAt,
+        activationSentAt: new Date(),
+      },
+      include: includePermissions,
+    });
+
+    await sendAccountActivationEmail({
+      to: updated.email,
+      username: updated.username,
+      initialPassword: null,
+      activationUrl: buildActivationUrl(activation.plainToken),
+      expiresInHours: ACTIVATION_TOKEN_HOURS,
+      includePassword: false,
+    });
+
+    res.json({
+      user: serializeUser(updated),
+      message: 'تم إرسال رابط تفعيل جديد إلى البريد الإلكتروني.',
+    });
   } catch (error) {
     next(error);
   }
@@ -187,7 +305,9 @@ router.put('/:id', async (req, res, next) => {
           username: input.username,
           email,
           role: input.role,
-          isActive: input.isActive,
+          isActive: current.activationTokenHash
+            ? false
+            : input.isActive,
           permissions: {
             create: rows,
           },

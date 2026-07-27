@@ -40,6 +40,10 @@ model AppUser {
   passwordHash        String
   role                AppUserRole          @default(employee)
   isActive            Boolean              @default(true)
+  activationTokenHash String?              @unique
+  activationExpires   DateTime?
+  activationSentAt    DateTime?
+  activatedAt         DateTime?
   lastLoginAt         DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
@@ -48,6 +52,7 @@ model AppUser {
 
   @@index([role])
   @@index([isActive])
+  @@index([activationExpires])
 }
 
 model PasswordResetToken {

@@ -65,6 +65,11 @@ export const serializeUser = (user) => ({
   username: user.username,
   role: user.role,
   isActive: user.isActive,
+  activationPending:
+    !user.isActive && Boolean(user.activationTokenHash),
+  activationExpires: user.activationExpires || null,
+  activationSentAt: user.activationSentAt || null,
+  activatedAt: user.activatedAt || null,
   permissions: permissionMap(user.permissions),
   createdAt: user.createdAt,
   updatedAt: user.updatedAt,
