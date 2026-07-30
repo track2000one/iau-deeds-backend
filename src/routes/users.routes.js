@@ -194,6 +194,8 @@ router.post('/', async (req, res, next) => {
 });
 
 router.post('/:id/resend-activation', async (req, res, next) => {
+  let previousActivationState = null;
+
   try {
     const user = await prisma.appUser.findUnique({
       where: { id: req.params.id },
@@ -208,34 +210,61 @@ router.post('/:id/resend-activation', async (req, res, next) => {
 
     if (user.isActive) {
       return res.status(400).json({
-        message: 'الحساب مفعّل بالفعل ولا يحتاج إلى رابط جديد.',
+        message: 'الحساب نشط بالفعل ولا يحتاج إلى رابط تفعيل جديد.',
       });
     }
 
+    previousActivationState = {
+      userId: user.id,
+      activationTokenHash: user.activationTokenHash,
+      activationExpires: user.activationExpires,
+      activationSentAt: user.activationSentAt,
+    };
+
     const activation = createActivationData();
+    const sentAt = new Date();
 
     const updated = await prisma.appUser.update({
       where: { id: user.id },
       data: {
+        isActive: false,
         activationTokenHash: activation.tokenHash,
         activationExpires: activation.expiresAt,
-        activationSentAt: new Date(),
+        activationSentAt: sentAt,
+        activatedAt: null,
       },
       include: includePermissions,
     });
 
-    await sendAccountActivationEmail({
-      to: updated.email,
-      username: updated.username,
-      initialPassword: null,
-      activationUrl: buildActivationUrl(activation.plainToken),
-      expiresInHours: ACTIVATION_TOKEN_HOURS,
-      includePassword: false,
-    });
+    try {
+      await sendAccountActivationEmail({
+        to: updated.email,
+        username: updated.username,
+        initialPassword: null,
+        activationUrl: buildActivationUrl(activation.plainToken),
+        expiresInHours: ACTIVATION_TOKEN_HOURS,
+        includePassword: false,
+      });
+    } catch (emailError) {
+      await prisma.appUser.update({
+        where: { id: user.id },
+        data: {
+          activationTokenHash:
+            previousActivationState.activationTokenHash,
+          activationExpires:
+            previousActivationState.activationExpires,
+          activationSentAt:
+            previousActivationState.activationSentAt,
+        },
+      });
+
+      throw emailError;
+    }
 
     res.json({
       user: serializeUser(updated),
-      message: 'تم إرسال رابط تفعيل جديد إلى البريد الإلكتروني.',
+      message:
+        `تم إرسال رابط تفعيل جديد صالح لمدة ${ACTIVATION_TOKEN_HOURS} ساعة.`,
     });
   } catch (error) {
     next(error);
@@ -305,9 +334,24 @@ router.put('/:id', async (req, res, next) => {
           username: input.username,
           email,
           role: input.role,
-          isActive: current.activationTokenHash
-            ? false
-            : input.isActive,
+          isActive: input.isActive,
+
+          // حالة الحساب الإدارية مستقلة عن مدة صلاحية رابط التفعيل.
+          // عند تنشيط الحساب مباشرة من المسؤول، يتم إلغاء أي رابط قديم
+          // ومنع النظام من إرجاع الحساب تلقائيًا إلى «معطل».
+          activationTokenHash: input.isActive
+            ? null
+            : current.activationTokenHash,
+          activationExpires: input.isActive
+            ? null
+            : current.activationExpires,
+          activationSentAt: input.isActive
+            ? current.activationSentAt
+            : current.activationSentAt,
+          activatedAt: input.isActive
+            ? current.activatedAt || new Date()
+            : current.activatedAt,
+
           permissions: {
             create: rows,
           },
