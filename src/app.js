@@ -13,6 +13,7 @@ import authRoutes from './routes/auth.routes.js';
 import usersRoutes from './routes/users.routes.js';
 import auditRoutes from './routes/audit.routes.js';
 import siteInspectionsRoutes from './routes/site-inspections.routes.js';
+import assetsRoutes from './routes/assets.routes.js';
 import {
   requireAdmin,
   requireAuth,
@@ -61,6 +62,14 @@ app.use(
 );
 
 app.use(
+  '/api/assets',
+  requireAuth,
+  auditTrail('assets'),
+  requirePermission('assets'),
+  assetsRoutes
+);
+
+app.use(
   '/api/attachments',
   requireAuth,
   auditTrail('attachments'),
@@ -91,7 +100,6 @@ app.use(
   requirePermission('archive'),
   archiveRoutes
 );
-
 
 app.use(
   '/api/site-inspections',
