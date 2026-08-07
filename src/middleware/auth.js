@@ -125,6 +125,7 @@ export const requireAttachmentPermission = (req, res, next) => {
     leased_building_out: 'leased_buildings_out',
     leased_building_in: 'leased_buildings_in',
     site_inspection: 'site_inspections',
+    asset: 'assets',
   };
 
   const moduleName = map[entityType];
@@ -137,7 +138,6 @@ export const requireAttachmentPermission = (req, res, next) => {
 
   return requirePermission(moduleName)(req, res, next);
 };
-
 
 export const requireUploadPermission = (req, res, next) => {
   if (req.authUser?.role === 'admin') return next();
