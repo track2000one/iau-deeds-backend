@@ -141,7 +141,7 @@ router.get('/stats', async (_req, res, next) => {
       prisma.asset.count(),
       prisma.asset.count({ where: { custodian: { not: null } } }),
       prisma.asset.count({ where: { status: 'maintenance' } }),
-      prisma.asset.count({ where: { status: 'excluded' } }),
+      prisma.asset.count({ where: { status: 'disposed' } }),
     ]);
 
     res.json({ total, inCustody, maintenance, excluded });
@@ -152,14 +152,8 @@ router.get('/stats', async (_req, res, next) => {
 
 router.get('/:id', async (req, res, next) => {
   try {
-    const record = await prisma.asset.findUnique({
-      where: { id: req.params.id },
-    });
-
-    if (!record) {
-      return res.status(404).json({ message: 'الأصل غير موجود' });
-    }
-
+    const record = await prisma.asset.findUnique({ where: { id: req.params.id } });
+    if (!record) return res.status(404).json({ message: 'الأصل غير موجود' });
     const [result] = await withAttachments([record]);
     res.json(result);
   } catch (error) {
@@ -175,25 +169,13 @@ router.post('/', async (req, res, next) => {
     const createdBy = req.authUser?.username || req.authUser?.email || null;
 
     if (input.barcode) {
-      const duplicateBarcode = await prisma.asset.findFirst({
-        where: { barcode: input.barcode },
-        select: { id: true },
-      });
-
-      if (duplicateBarcode) {
-        return res.status(409).json({ message: 'رقم الباركود مستخدم لأصل آخر' });
-      }
+      const duplicateBarcode = await prisma.asset.findFirst({ where: { barcode: input.barcode }, select: { id: true } });
+      if (duplicateBarcode) return res.status(409).json({ message: 'رقم الباركود مستخدم لأصل آخر' });
     }
 
     if (input.serialNumber) {
-      const duplicateSerial = await prisma.asset.findFirst({
-        where: { serialNumber: input.serialNumber },
-        select: { id: true },
-      });
-
-      if (duplicateSerial) {
-        return res.status(409).json({ message: 'الرقم التسلسلي مستخدم لأصل آخر' });
-      }
+      const duplicateSerial = await prisma.asset.findFirst({ where: { serialNumber: input.serialNumber }, select: { id: true } });
+      if (duplicateSerial) return res.status(409).json({ message: 'الرقم التسلسلي مستخدم لأصل آخر' });
     }
 
     const record = await prisma.$transaction(async (tx) => {
@@ -221,9 +203,7 @@ router.post('/', async (req, res, next) => {
 
       if (input.attachments.length) {
         await tx.attachment.createMany({
-          data: input.attachments.map((attachment) =>
-            createAttachmentData(attachment, created.id, createdBy)
-          ),
+          data: input.attachments.map((attachment) => createAttachmentData(attachment, created.id, createdBy)),
         });
       }
 
@@ -253,21 +233,14 @@ router.post('/', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   try {
     const input = assetSchema.parse(req.body);
-    const existing = await prisma.asset.findUnique({
-      where: { id: req.params.id },
-    });
-
-    if (!existing) {
-      return res.status(404).json({ message: 'الأصل غير موجود' });
-    }
+    const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ message: 'الأصل غير موجود' });
 
     const purchaseDate = toDate(input.purchaseDate, 'تاريخ الشراء');
     const updatedBy = req.authUser?.username || req.authUser?.email || null;
 
     const updated = await prisma.$transaction(async (tx) => {
-      await tx.attachment.deleteMany({
-        where: { entityType: 'asset', entityId: req.params.id },
-      });
+      await tx.attachment.deleteMany({ where: { entityType: 'asset', entityId: req.params.id } });
 
       const record = await tx.asset.update({
         where: { id: req.params.id },
@@ -292,9 +265,7 @@ router.put('/:id', async (req, res, next) => {
 
       if (input.attachments.length) {
         await tx.attachment.createMany({
-          data: input.attachments.map((attachment) =>
-            createAttachmentData(attachment, record.id, updatedBy)
-          ),
+          data: input.attachments.map((attachment) => createAttachmentData(attachment, record.id, updatedBy)),
         });
       }
 
@@ -324,18 +295,11 @@ router.put('/:id', async (req, res, next) => {
 
 router.delete('/:id', async (req, res, next) => {
   try {
-    const existing = await prisma.asset.findUnique({
-      where: { id: req.params.id },
-    });
-
-    if (!existing) {
-      return res.status(404).json({ message: 'الأصل غير موجود' });
-    }
+    const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ message: 'الأصل غير موجود' });
 
     await prisma.$transaction(async (tx) => {
-      await tx.attachment.deleteMany({
-        where: { entityType: 'asset', entityId: req.params.id },
-      });
+      await tx.attachment.deleteMany({ where: { entityType: 'asset', entityId: req.params.id } });
       await tx.asset.delete({ where: { id: req.params.id } });
     });
 
