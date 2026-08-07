@@ -16,6 +16,7 @@ enum AttachmentEntityType {
   leased_building_out
   leased_building_in
   site_inspection
+  asset
 }
 
 enum AttachmentType {
@@ -230,6 +231,36 @@ model LeasedBuildingIn {
   createdBy      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+}
+
+model Asset {
+  id            String    @id @default(cuid())
+  assetNumber   String    @unique
+  barcode       String?   @unique
+  name          String
+  category      String
+  brand         String?
+  model         String?
+  serialNumber  String?   @unique
+  status        String    @default("active")
+  department    String?
+  building      String?
+  floor         String?
+  room          String?
+  custodian     String?
+  purchaseDate  DateTime?
+  purchaseValue Float?
+  notes         String?
+  createdBy     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([category])
+  @@index([status])
+  @@index([department])
+  @@index([building])
+  @@index([custodian])
+  @@index([createdAt])
 }
 
 model Attachment {
