@@ -1,0 +1,34 @@
+name: Run backend date storage patch
+
+on:
+  push:
+    paths:
+      - '.github/scripts/unify_date_storage.py'
+      - '.github/workflows/run-unify-date-storage.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Apply patches
+        run: python .github/scripts/unify_date_storage.py
+      - name: Validate Prisma
+        run: npm ci && npx prisma generate
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/scripts/unify_date_storage.py .github/workflows/run-unify-date-storage.yml .github/workflows/unify-date-storage.yml
+          git add prisma src
+          git commit -m "Persist Hijri and Gregorian date types consistently"
+          git push
