@@ -51,18 +51,38 @@ const allowedFields = {
     'notes',
     'createdBy',
   ],
-  'leased-lands-out': ['tenant','contractNumber','contractStartDate','contractStartDateType','contractDuration','plotNumber','planNumber','area','location','coordinates','rentAmount','notes','createdBy'],
-  'leased-lands-in': ['owner','contractNumber','contractDuration','propertyDescription','area','location','coordinates','rentAmount','notes','createdBy'],
-  'leased-buildings-out': ['tenant','contractNumber','buildingNumber','planNumber','locationName','area','city','district','coordinates','rentAmount','notes','createdBy'],
-  'leased-buildings-in': ['owner','contractNumber','buildingNumber','locationName','area','region','city','coordinates','rentAmount','notes','createdBy'],
+  'leased-lands-out': ['tenant','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','contractDuration','plotNumber','planNumber','area','location','coordinates','rentAmount','notes','createdBy'],
+  'leased-lands-in': ['owner','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','contractDuration','propertyDescription','area','location','coordinates','rentAmount','notes','createdBy'],
+  'leased-buildings-out': ['tenant','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','buildingNumber','planNumber','locationName','area','city','district','coordinates','rentAmount','notes','createdBy'],
+  'leased-buildings-in': ['owner','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','buildingNumber','locationName','area','region','city','coordinates','rentAmount','notes','createdBy'],
 };
 
 const dateFields = new Set([
   'receiptDate',
   'deliveryDate',
   'contractStartDate',
+  'contractEndDate',
 ]);
 const numberFields = new Set(['area', 'rentAmount']);
+
+const hijriParts = (date) => {
+  const parts = new Intl.DateTimeFormat('en-u-ca-islamic-umalqura', {
+    year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC'
+  }).formatToParts(date);
+  const get = (type) => Number(parts.find((part) => part.type === type)?.value);
+  return { year: get('year'), month: get('month'), day: get('day') };
+};
+
+const hijriToGregorian = (year, month, day) => {
+  const roughYear = year + 579;
+  const center = Date.UTC(roughYear, Math.max(0, month - 1), Math.min(day, 28), 12, 0, 0);
+  for (let offset = -420; offset <= 420; offset += 1) {
+    const candidate = new Date(center + offset * 86400000);
+    const h = hijriParts(candidate);
+    if (h.year === year && h.month === month && h.day === day) return candidate;
+  }
+  return null;
+};
 
 const parseFlexibleDate = (value, type = 'gregorian') => {
   if (!value) return null;
@@ -73,7 +93,7 @@ const parseFlexibleDate = (value, type = 'gregorian') => {
     const month = Number(match[2]);
     const day = Number(match[3]);
     if (year < 1200 || year > 1700 || month < 1 || month > 12 || day < 1 || day > 30) return null;
-    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    return hijriToGregorian(year, month, day);
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
@@ -128,6 +148,18 @@ const mapFrontendPayload = (resource, body = {}) => {
     mapped.relatedDeedNumber = body.hasRelatedDeed
       ? body.relatedDeedNumber || null
       : null;
+  }
+
+  if (['leased-lands-out', 'leased-lands-in', 'leased-buildings-out', 'leased-buildings-in'].includes(resource)) {
+    for (const field of ['contractStartDate', 'contractEndDate']) {
+      const typeField = `${field}Type`;
+      const originalField = `${field}Original`;
+      const type = body[typeField] === 'hijri' ? 'hijri' : 'gregorian';
+      const original = body[originalField] || body[field] || null;
+      mapped[typeField] = type;
+      mapped[originalField] = original;
+      mapped[field] = original;
+    }
   }
 
   if (resource === 'leased-lands-in') {

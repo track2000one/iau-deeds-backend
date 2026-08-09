@@ -182,6 +182,10 @@ model LeasedLandOut {
   createdBy         String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+  contractStartDateOriginal String?
+  contractEndDate           DateTime?
+  contractEndDateOriginal   String?
+  contractEndDateType       String?   @default("gregorian")
 }
 
 model LeasedLandIn {
@@ -198,6 +202,12 @@ model LeasedLandIn {
   createdBy           String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
+  contractStartDate         DateTime?
+  contractStartDateOriginal String?
+  contractStartDateType     String?   @default("gregorian")
+  contractEndDate           DateTime?
+  contractEndDateOriginal   String?
+  contractEndDateType       String?   @default("gregorian")
 }
 
 model LeasedBuildingOut {
@@ -216,6 +226,12 @@ model LeasedBuildingOut {
   createdBy      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  contractStartDate         DateTime?
+  contractStartDateOriginal String?
+  contractStartDateType     String?   @default("gregorian")
+  contractEndDate           DateTime?
+  contractEndDateOriginal   String?
+  contractEndDateType       String?   @default("gregorian")
 }
 
 model LeasedBuildingIn {
@@ -233,6 +249,12 @@ model LeasedBuildingIn {
   createdBy      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  contractStartDate         DateTime?
+  contractStartDateOriginal String?
+  contractStartDateType     String?   @default("gregorian")
+  contractEndDate           DateTime?
+  contractEndDateOriginal   String?
+  contractEndDateType       String?   @default("gregorian")
 }
 
 model Asset {
