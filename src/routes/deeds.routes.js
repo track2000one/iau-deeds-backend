@@ -9,6 +9,7 @@ const deedSchema = z.object({
   usageType: z.string().default('other'),
   deedNumber: z.string().min(1, 'رقم الصك مطلوب'),
   deedDate: z.string().optional().nullable(),
+  deedDateType: z.enum(['gregorian', 'hijri']).optional().default('gregorian'),
   plotNumber: z.string().optional().nullable(),
   planNumber: z.string().optional().nullable(),
   area: z.coerce.number().optional().default(0),
@@ -22,11 +23,39 @@ const deedSchema = z.object({
   createdBy: z.string().optional().nullable(),
 });
 
+const parseFlexibleDate = (value, type = 'gregorian', fieldName = 'التاريخ') => {
+  if (!value) return null;
+  if (type === 'hijri') {
+    const match = String(value).trim().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+    if (!match) {
+      const error = new Error(`${fieldName} الهجري غير صحيح`);
+      error.status = 400;
+      throw error;
+    }
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (year < 1200 || year > 1700 || month < 1 || month > 12 || day < 1 || day > 30) {
+      const error = new Error(`${fieldName} الهجري غير صحيح`);
+      error.status = 400;
+      throw error;
+    }
+    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    const error = new Error(`${fieldName} الميلادي غير صحيح`);
+    error.status = 400;
+    throw error;
+  }
+  return parsed;
+};
+
 const toDbData = (body) => {
   const data = deedSchema.parse(body);
   return {
     ...data,
-    deedDate: data.deedDate ? new Date(data.deedDate) : null,
+    deedDate: parseFlexibleDate(data.deedDate, data.deedDateType, 'تاريخ الصك'),
   };
 };
 

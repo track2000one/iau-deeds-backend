@@ -30,16 +30,34 @@ const assetSchema = z.object({
   room: nullableShortText,
   custodian: nullableShortText,
   purchaseDate: z.string().trim().optional().nullable(),
+  purchaseDateType: z.enum(['gregorian', 'hijri']).optional().default('gregorian'),
   purchaseValue: z.coerce.number().min(0).optional().nullable(),
   notes: nullableText,
   attachments: z.array(attachmentSchema).default([]),
 });
 
-const toDate = (value, fieldName) => {
+const toDate = (value, fieldName, type = 'gregorian') => {
   if (!value) return null;
+  if (type === 'hijri') {
+    const match = String(value).trim().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+    if (!match) {
+      const error = new Error(`${fieldName} الهجري غير صحيح`);
+      error.status = 400;
+      throw error;
+    }
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (year < 1200 || year > 1700 || month < 1 || month > 12 || day < 1 || day > 30) {
+      const error = new Error(`${fieldName} الهجري غير صحيح`);
+      error.status = 400;
+      throw error;
+    }
+    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
-    const error = new Error(`${fieldName} غير صحيح`);
+    const error = new Error(`${fieldName} الميلادي غير صحيح`);
     error.status = 400;
     throw error;
   }
@@ -165,7 +183,7 @@ router.post('/', async (req, res, next) => {
   try {
     const input = assetSchema.parse(req.body);
     const assetNumber = await nextAssetNumber();
-    const purchaseDate = toDate(input.purchaseDate, 'تاريخ الشراء');
+    const purchaseDate = toDate(input.purchaseDate, 'تاريخ الشراء', input.purchaseDateType);
     const createdBy = req.authUser?.username || req.authUser?.email || null;
 
     if (input.barcode) {
@@ -195,6 +213,7 @@ router.post('/', async (req, res, next) => {
           room: input.room || null,
           custodian: input.custodian || null,
           purchaseDate,
+          purchaseDateType: input.purchaseDateType,
           purchaseValue: input.purchaseValue ?? null,
           notes: input.notes || null,
           createdBy,
@@ -236,7 +255,7 @@ router.put('/:id', async (req, res, next) => {
     const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ message: 'الأصل غير موجود' });
 
-    const purchaseDate = toDate(input.purchaseDate, 'تاريخ الشراء');
+    const purchaseDate = toDate(input.purchaseDate, 'تاريخ الشراء', input.purchaseDateType);
     const updatedBy = req.authUser?.username || req.authUser?.email || null;
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -258,6 +277,7 @@ router.put('/:id', async (req, res, next) => {
           room: input.room || null,
           custodian: input.custodian || null,
           purchaseDate,
+          purchaseDateType: input.purchaseDateType,
           purchaseValue: input.purchaseValue ?? null,
           notes: input.notes || null,
         },

@@ -96,6 +96,7 @@ model Deed {
   usageType           String
   deedNumber          String    @unique
   deedDate            DateTime?
+  deedDateType        String?   @default("gregorian")
   plotNumber          String?
   planNumber          String?
   area                Float     @default(0)
@@ -169,6 +170,7 @@ model LeasedLandOut {
   tenant            Json
   contractNumber    String
   contractStartDate DateTime?
+  contractStartDateType String? @default("gregorian")
   contractDuration  String?
   plotNumber        String?
   planNumber        String?
@@ -249,6 +251,7 @@ model Asset {
   room          String?
   custodian     String?
   purchaseDate  DateTime?
+  purchaseDateType String? @default("gregorian")
   purchaseValue Float?
   notes         String?
   createdBy     String?
@@ -343,6 +346,7 @@ model SiteInspection {
   siteType            String
   siteName            String
   visitDate           DateTime
+  visitDateType       String?   @default("gregorian")
   visitPurpose        String?
   inspectorName       String?
   accompanyingEntity  String?
@@ -363,6 +367,7 @@ model SiteInspection {
   recommendedAction   String?
   referredEntity      String?
   followUpDate        DateTime?
+  followUpDateType    String?   @default("gregorian")
   workflowStatus      String    @default("new")
   createdBy           String?
   createdAt           DateTime  @default(now())

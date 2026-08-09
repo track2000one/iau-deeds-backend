@@ -51,7 +51,7 @@ const allowedFields = {
     'notes',
     'createdBy',
   ],
-  'leased-lands-out': ['tenant','contractNumber','contractStartDate','contractDuration','plotNumber','planNumber','area','location','coordinates','rentAmount','notes','createdBy'],
+  'leased-lands-out': ['tenant','contractNumber','contractStartDate','contractStartDateType','contractDuration','plotNumber','planNumber','area','location','coordinates','rentAmount','notes','createdBy'],
   'leased-lands-in': ['owner','contractNumber','contractDuration','propertyDescription','area','location','coordinates','rentAmount','notes','createdBy'],
   'leased-buildings-out': ['tenant','contractNumber','buildingNumber','planNumber','locationName','area','city','district','coordinates','rentAmount','notes','createdBy'],
   'leased-buildings-in': ['owner','contractNumber','buildingNumber','locationName','area','region','city','coordinates','rentAmount','notes','createdBy'],
@@ -63,6 +63,21 @@ const dateFields = new Set([
   'contractStartDate',
 ]);
 const numberFields = new Set(['area', 'rentAmount']);
+
+const parseFlexibleDate = (value, type = 'gregorian') => {
+  if (!value) return null;
+  if (type === 'hijri') {
+    const match = String(value).trim().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (year < 1200 || year > 1700 || month < 1 || month > 12 || day < 1 || day > 30) return null;
+    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
 
 const normalizeCoordinates = (value) => {
   if (!value) return null;
@@ -139,8 +154,9 @@ const sanitizeRecordPayload = (resource, body = {}) => {
 
   for (const field of dateFields) {
     if (field in data) {
-      const date = data[field] ? new Date(data[field]) : null;
-      data[field] = date && !Number.isNaN(date.getTime()) ? date : null;
+      const typeField = `${field}Type`;
+      const dateType = mapped[typeField] === 'hijri' ? 'hijri' : 'gregorian';
+      data[field] = parseFlexibleDate(data[field], dateType);
     }
   }
 

@@ -29,6 +29,7 @@ const inspectionSchema = z.object({
   siteType: z.string().trim().min(1, 'نوع الموقع مطلوب').max(100),
   siteName: z.string().trim().min(1, 'اسم الموقع مطلوب').max(300),
   visitDate: z.string().trim().min(1, 'تاريخ الزيارة مطلوب'),
+  visitDateType: z.enum(['gregorian', 'hijri']).optional().default('gregorian'),
   visitPurpose: nullableText,
   inspectorName: nullableText,
   accompanyingEntity: nullableText,
@@ -49,16 +50,34 @@ const inspectionSchema = z.object({
   recommendedAction: nullableText,
   referredEntity: nullableText,
   followUpDate: nullableDate,
+  followUpDateType: z.enum(['gregorian', 'hijri']).optional().default('gregorian'),
   workflowStatus: z.string().trim().default('new'),
   items: z.array(itemSchema).default([]),
   attachments: z.array(attachmentSchema).default([]),
 });
 
-const toDate = (value, fieldName) => {
+const toDate = (value, fieldName, type = 'gregorian') => {
   if (!value) return null;
+  if (type === 'hijri') {
+    const match = String(value).trim().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+    if (!match) {
+      const error = new Error(`${fieldName} الهجري غير صحيح`);
+      error.status = 400;
+      throw error;
+    }
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (year < 1200 || year > 1700 || month < 1 || month > 12 || day < 1 || day > 30) {
+      const error = new Error(`${fieldName} الهجري غير صحيح`);
+      error.status = 400;
+      throw error;
+    }
+    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
-    const error = new Error(`${fieldName} غير صحيح`);
+    const error = new Error(`${fieldName} الميلادي غير صحيح`);
     error.status = 400;
     throw error;
   }
@@ -180,8 +199,8 @@ router.post('/', async (req, res, next) => {
   try {
     const input = inspectionSchema.parse(req.body);
     const inspectionNumber = await nextInspectionNumber();
-    const visitDate = toDate(input.visitDate, 'تاريخ الزيارة');
-    const followUpDate = toDate(input.followUpDate, 'تاريخ المتابعة');
+    const visitDate = toDate(input.visitDate, 'تاريخ الزيارة', input.visitDateType);
+    const followUpDate = toDate(input.followUpDate, 'تاريخ المتابعة', input.followUpDateType);
     const createdBy = req.authUser?.username || req.authUser?.email || null;
 
     const record = await prisma.$transaction(async (tx) => {
@@ -192,6 +211,7 @@ router.post('/', async (req, res, next) => {
           siteType: input.siteType,
           siteName: input.siteName,
           visitDate,
+          visitDateType: input.visitDateType,
           visitPurpose: input.visitPurpose || null,
           inspectorName: input.inspectorName || createdBy,
           accompanyingEntity: input.accompanyingEntity || null,
@@ -212,6 +232,7 @@ router.post('/', async (req, res, next) => {
           recommendedAction: input.recommendedAction || null,
           referredEntity: input.referredEntity || null,
           followUpDate,
+          followUpDateType: input.followUpDateType,
           workflowStatus: input.workflowStatus,
           createdBy,
           items: {
@@ -269,8 +290,8 @@ router.put('/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'المعاينة الميدانية غير موجودة' });
     }
 
-    const visitDate = toDate(input.visitDate, 'تاريخ الزيارة');
-    const followUpDate = toDate(input.followUpDate, 'تاريخ المتابعة');
+    const visitDate = toDate(input.visitDate, 'تاريخ الزيارة', input.visitDateType);
+    const followUpDate = toDate(input.followUpDate, 'تاريخ المتابعة', input.followUpDateType);
     const createdBy = req.authUser?.username || req.authUser?.email || null;
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -292,6 +313,7 @@ router.put('/:id', async (req, res, next) => {
           siteType: input.siteType,
           siteName: input.siteName,
           visitDate,
+          visitDateType: input.visitDateType,
           visitPurpose: input.visitPurpose || null,
           inspectorName: input.inspectorName || createdBy,
           accompanyingEntity: input.accompanyingEntity || null,
@@ -312,6 +334,7 @@ router.put('/:id', async (req, res, next) => {
           recommendedAction: input.recommendedAction || null,
           referredEntity: input.referredEntity || null,
           followUpDate,
+          followUpDateType: input.followUpDateType,
           workflowStatus: input.workflowStatus,
           items: {
             create: input.items.map((item) => ({
