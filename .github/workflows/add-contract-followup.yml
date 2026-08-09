@@ -1,0 +1,56 @@
+name: Add contract follow-up backend
+
+on:
+  push:
+    paths:
+      - '.github/workflows/add-contract-followup.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Patch backend
+        shell: python
+        run: |
+          from pathlib import Path
+
+          schema = Path('prisma/schema.prisma')
+          text = schema.read_text(encoding='utf-8')
+          if 'model ContractFollowUp {' not in text:
+              text += '''\n\nmodel ContractFollowUp {\n  id               String   @id @default(cuid())\n  contractKey      String   @unique\n  status           String   @default("not_started")\n  assignedTo       String?\n  action           String?\n  notes            String?\n  nextFollowUpDate DateTime?\n  updatedBy        String?\n  createdAt        DateTime @default(now())\n  updatedAt        DateTime @updatedAt\n\n  @@index([status])\n  @@index([nextFollowUpDate])\n  @@index([updatedAt])\n}\n'''
+          schema.write_text(text, encoding='utf-8')
+
+          app = Path('src/app.js')
+          text = app.read_text(encoding='utf-8')
+          if "import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';" not in text:
+              text = text.replace(
+                  "import assetsRoutes from './routes/assets.routes.js';",
+                  "import assetsRoutes from './routes/assets.routes.js';\nimport contractsFollowUpRoutes from './routes/contracts-followup.routes.js';"
+              )
+          if "'/api/contracts/follow-up'" not in text:
+              anchor = "app.use(\n  '/api/site-inspections',"
+              block = "app.use(\n  '/api/contracts/follow-up',\n  requireAuth,\n  auditTrail('contracts_followup'),\n  contractsFollowUpRoutes\n);\n\n"
+              text = text.replace(anchor, block + anchor)
+          app.write_text(text, encoding='utf-8')
+      - name: Prisma generate
+        run: npx prisma generate
+      - name: Validate backend
+        run: node --check src/routes/contracts-followup.routes.js && node --check src/app.js
+      - name: Commit changes
+        run: |
+          git config user.name "OpenAI Codex"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/add-contract-followup.yml
+          git add prisma/schema.prisma src/app.js src/routes/contracts-followup.routes.js
+          git commit -m "Add persistent contract follow-up workflow"
+          git push
