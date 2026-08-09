@@ -398,3 +398,21 @@ model SiteInspectionItem {
   @@index([category])
   @@index([status])
 }
+
+
+model ContractFollowUp {
+  id               String   @id @default(cuid())
+  contractKey      String   @unique
+  status           String   @default("not_started")
+  assignedTo       String?
+  action           String?
+  notes            String?
+  nextFollowUpDate DateTime?
+  updatedBy        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([status])
+  @@index([nextFollowUpDate])
+  @@index([updatedAt])
+}

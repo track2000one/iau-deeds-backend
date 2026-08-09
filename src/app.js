@@ -14,6 +14,7 @@ import usersRoutes from './routes/users.routes.js';
 import auditRoutes from './routes/audit.routes.js';
 import siteInspectionsRoutes from './routes/site-inspections.routes.js';
 import assetsRoutes from './routes/assets.routes.js';
+import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';
 import {
   requireAdmin,
   requireAuth,
@@ -99,6 +100,13 @@ app.use(
   auditTrail('archive'),
   requirePermission('archive'),
   archiveRoutes
+);
+
+app.use(
+  '/api/contracts/follow-up',
+  requireAuth,
+  auditTrail('contracts_followup'),
+  contractsFollowUpRoutes
 );
 
 app.use(
