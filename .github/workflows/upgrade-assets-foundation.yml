@@ -12,6 +12,8 @@ permissions:
 jobs:
   upgrade:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://user:pass@localhost:5432/iau_assets_validation?schema=public
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,4 +37,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add prisma/schema.prisma
           git commit -m "Expand asset data model and operations foundation"
+          git pull --rebase origin main
           git push
