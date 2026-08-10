@@ -544,3 +544,21 @@ model ContractFollowUp {
   @@index([nextFollowUpDate])
   @@index([updatedAt])
 }
+
+
+model AssetExcelTemplate {
+  id           String   @id @default(cuid())
+  templateKey  String   @unique
+  title        String
+  fileName     String
+  driveFileId  String   @unique
+  driveUrl     String
+  mimeType     String?
+  fileSize     Float?
+  uploadedBy   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([templateKey])
+  @@index([updatedAt])
+}

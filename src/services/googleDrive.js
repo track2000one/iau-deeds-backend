@@ -105,3 +105,17 @@ export async function deleteGoogleDriveFile(fileId) {
 
   return true;
 }
+
+
+export async function downloadGoogleDriveFile(fileId) {
+  if (!fileId) throw new Error('Google Drive file ID is required.');
+  const drive = getOAuthDriveClient();
+  const metadata = await drive.files.get({ fileId, fields: 'id,name,mimeType,size' });
+  const response = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
+  return {
+    buffer: Buffer.from(response.data),
+    fileName: metadata.data.name || 'asset-template.xlsx',
+    mimeType: metadata.data.mimeType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    size: metadata.data.size ? Number(metadata.data.size) : null,
+  };
+}
