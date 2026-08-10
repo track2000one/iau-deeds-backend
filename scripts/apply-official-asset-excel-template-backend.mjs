@@ -41,3 +41,4 @@ if (!routes.includes("router.get('/excel-template'")) {
 fs.writeFileSync(routesPath, routes);
 
 console.log('Official asset Excel template backend support applied.');
+// trigger 2026-08-10T14:12+03:00
