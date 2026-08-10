@@ -14,6 +14,7 @@ import usersRoutes from './routes/users.routes.js';
 import auditRoutes from './routes/audit.routes.js';
 import siteInspectionsRoutes from './routes/site-inspections.routes.js';
 import assetsRoutes from './routes/assets.routes.js';
+import assetsFastRoutes from './routes/assets-fast.routes.js';
 import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';
 import {
   requireAdmin,
@@ -60,6 +61,13 @@ app.use(
   auditTrail('deeds'),
   requirePermission('deeds'),
   deedsRoutes
+);
+
+app.use(
+  '/api/assets-fast',
+  requireAuth,
+  requirePermission('assets'),
+  assetsFastRoutes
 );
 
 app.use(
