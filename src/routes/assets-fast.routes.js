@@ -31,8 +31,14 @@ const GROUP_RULES = [
 ];
 
 const CATEGORY_LABELS = {
-  it: 'تقنية معلومات', furniture: 'الأثاث', equipment: 'الآلات والمعدات', vehicle: 'أصول النقل العام',
-  infrastructure: 'البنية التحتية', intangible: 'الأصول غير الملموسة', land: 'الأراضي', other: 'أخرى',
+  it: 'تقنية معلومات',
+  furniture: 'الأثاث',
+  equipment: 'الآلات والمعدات',
+  vehicle: 'أصول النقل العام',
+  infrastructure: 'البنية التحتية',
+  intangible: 'الأصول غير الملموسة',
+  land: 'الأراضي',
+  other: 'أخرى',
 };
 
 const classify = (asset) => {
@@ -69,23 +75,85 @@ const compactSelect = {
   createdAt: true,
 };
 
+const reportSelect = {
+  ...compactSelect,
+  custodian: true,
+  purchaseDate: true,
+  purchaseDateType: true,
+  purchaseValue: true,
+  acquisitionCost: true,
+  manufacturer: true,
+  region: true,
+  city: true,
+  buildingNumber: true,
+  coordinates: true,
+  classification1: true,
+  classification2: true,
+  classification3: true,
+  classification4: true,
+  classification5: true,
+  classification6: true,
+  accountingGroup: true,
+  accountingGroupCode: true,
+  remainingLife: true,
+  usefulLife: true,
+  serviceDate: true,
+  lastInventoryDate: true,
+  unitOfMeasure: true,
+  excelPayload: true,
+  notes: true,
+};
+
 const searchWhere = (search) => search ? {
   OR: [
     { itemNumber: { contains: search, mode: 'insensitive' } },
     { assetNumber: { contains: search, mode: 'insensitive' } },
     { barcode: { contains: search, mode: 'insensitive' } },
     { name: { contains: search, mode: 'insensitive' } },
+    { assetDescription: { contains: search, mode: 'insensitive' } },
     { serialNumber: { contains: search, mode: 'insensitive' } },
     { department: { contains: search, mode: 'insensitive' } },
     { responsibleDepartment: { contains: search, mode: 'insensitive' } },
+    { building: { contains: search, mode: 'insensitive' } },
+    { room: { contains: search, mode: 'insensitive' } },
     { cardNumber: { contains: search, mode: 'insensitive' } },
     { assetCode: { contains: search, mode: 'insensitive' } },
   ],
 } : {};
 
-router.get('/groups', async (_req, res, next) => {
+const baseWhere = ({ search, category, status }) => ({
+  ...(category && category !== 'all' ? { category } : {}),
+  ...(status && status !== 'all' ? { status } : {}),
+  ...searchWhere(search),
+});
+
+const matchingGroupIds = async (groupKey, where = {}) => {
+  if (!groupKey || groupKey === 'all') return null;
+  const candidates = await prisma.asset.findMany({
+    where,
+    select: { id: true, name: true, assetDescription: true, category: true },
+  });
+  return candidates.filter((item) => classify(item).key === groupKey).map((item) => item.id);
+};
+
+const attachmentCountsFor = async (items) => {
+  const ids = items.map((item) => item.id);
+  if (!ids.length) return {};
+  const grouped = await prisma.attachment.groupBy({
+    by: ['entityId'],
+    where: { entityType: 'asset', entityId: { in: ids } },
+    _count: { _all: true },
+  });
+  return Object.fromEntries(grouped.map((item) => [item.entityId, item._count._all]));
+};
+
+router.get('/groups', async (req, res, next) => {
   try {
+    const search = String(req.query.search || '').trim();
+    const category = String(req.query.category || '').trim();
+    const status = String(req.query.status || '').trim();
     const records = await prisma.asset.findMany({
+      where: baseWhere({ search, category, status }),
       select: { id: true, name: true, assetDescription: true, category: true, quantity: true },
     });
     const groups = new Map();
@@ -97,7 +165,7 @@ router.get('/groups', async (_req, res, next) => {
       current.quantity += Number.isFinite(quantity) ? quantity : 1;
       groups.set(group.key, current);
     }
-    res.setHeader('Cache-Control', 'private, max-age=30');
+    res.setHeader('Cache-Control', 'private, max-age=20');
     res.json(Array.from(groups.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ar')));
   } catch (error) { next(error); }
 });
@@ -108,49 +176,52 @@ router.get('/list', async (req, res, next) => {
     const groupKey = String(req.query.group || '').trim();
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(12, Number(req.query.limit) || 36));
-    let ids = null;
+    const initialWhere = baseWhere({ search, category: '', status: '' });
+    const ids = await matchingGroupIds(groupKey, initialWhere);
+    if (ids && !ids.length) return res.json({ items: [], page, limit, total: 0, totalPages: 0 });
+    const where = { ...initialWhere, ...(ids ? { id: { in: ids } } : {}) };
+    const [total, items] = await Promise.all([
+      prisma.asset.count({ where }),
+      prisma.asset.findMany({ where, select: compactSelect, orderBy: [{ createdAt: 'desc' }], skip: (page - 1) * limit, take: limit }),
+    ]);
+    const attachmentCounts = await attachmentCountsFor(items);
+    res.setHeader('Cache-Control', 'private, max-age=15');
+    res.json({ items: items.map((item) => ({ ...item, attachmentsCount: attachmentCounts[item.id] || 0 })), page, limit, total, totalPages: Math.ceil(total / limit) });
+  } catch (error) { next(error); }
+});
 
-    if (groupKey) {
-      const candidates = await prisma.asset.findMany({
-        select: { id: true, name: true, assetDescription: true, category: true },
-      });
-      ids = candidates.filter((item) => classify(item).key === groupKey).map((item) => item.id);
-      if (!ids.length) return res.json({ items: [], page, limit, total: 0, totalPages: 0 });
-    }
+router.get('/report', async (req, res, next) => {
+  try {
+    const search = String(req.query.search || '').trim();
+    const category = String(req.query.category || '').trim();
+    const status = String(req.query.status || '').trim();
+    const groupKey = String(req.query.group || '').trim();
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const all = String(req.query.all || '') === '1';
+    const limit = all ? 10000 : Math.min(200, Math.max(20, Number(req.query.limit) || 50));
+    const sortKeyRaw = String(req.query.sortKey || 'itemNumber');
+    const sortDirection = String(req.query.sortDirection || 'asc') === 'desc' ? 'desc' : 'asc';
+    const allowedSort = new Set(['itemNumber', 'assetNumber', 'barcode', 'name', 'category', 'status', 'department', 'building', 'floor', 'room', 'purchaseDate', 'purchaseValue', 'createdAt']);
+    const sortKey = allowedSort.has(sortKeyRaw) ? sortKeyRaw : 'itemNumber';
 
-    const where = {
-      ...(ids ? { id: { in: ids } } : {}),
-      ...searchWhere(search),
-    };
+    const initialWhere = baseWhere({ search, category, status });
+    const ids = await matchingGroupIds(groupKey, initialWhere);
+    if (ids && !ids.length) return res.json({ items: [], page, limit, total: 0, totalPages: 0, groups: [] });
+    const where = { ...initialWhere, ...(ids ? { id: { in: ids } } : {}) };
+
     const [total, items] = await Promise.all([
       prisma.asset.count({ where }),
       prisma.asset.findMany({
         where,
-        select: compactSelect,
-        orderBy: [{ createdAt: 'desc' }],
-        skip: (page - 1) * limit,
-        take: limit,
+        select: reportSelect,
+        orderBy: [{ [sortKey]: sortDirection }, { id: 'asc' }],
+        ...(all ? {} : { skip: (page - 1) * limit, take: limit }),
       }),
     ]);
-
-    const itemIds = items.map((item) => item.id);
-    const attachments = itemIds.length ? await prisma.attachment.findMany({
-      where: { entityType: 'asset', entityId: { in: itemIds } },
-      select: { entityId: true },
-    }) : [];
-    const attachmentCounts = attachments.reduce((acc, item) => {
-      acc[item.entityId] = (acc[item.entityId] || 0) + 1;
-      return acc;
-    }, {});
-
-    res.setHeader('Cache-Control', 'private, max-age=15');
-    res.json({
-      items: items.map((item) => ({ ...item, attachmentsCount: attachmentCounts[item.id] || 0 })),
-      page,
-      limit,
-      total,
-      totalPages: Math.ceil(total / limit),
-    });
+    const attachmentCounts = await attachmentCountsFor(items);
+    const resultItems = items.map((item) => ({ ...item, attachmentsCount: attachmentCounts[item.id] || 0 }));
+    res.setHeader('Cache-Control', all ? 'private, no-store' : 'private, max-age=10');
+    res.json({ items: resultItems, page: all ? 1 : page, limit, total, totalPages: all ? 1 : Math.ceil(total / limit) });
   } catch (error) { next(error); }
 });
 
