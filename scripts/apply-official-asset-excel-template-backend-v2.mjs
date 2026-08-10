@@ -116,3 +116,5 @@ if (!routes.includes("router.get('/excel-template'")) {
 }
 fs.writeFileSync(routesPath, routes);
 console.log('Official asset Excel template backend support applied v2.');
+
+// trigger: 2026-08-10 restore official asset Excel template API
