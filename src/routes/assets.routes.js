@@ -64,7 +64,7 @@ const assetSchema = z.object({
   lastInventoryDate: z.string().trim().optional().nullable(),
   lastInventoryDateType: dateType,
   unitOfMeasure: nullableShortText,
-  quantity: z.coerce.number().positive().optional().nullable().default(1),
+  quantity: z.coerce.number().min(0, 'العدد لا يمكن أن يكون أقل من صفر').optional().nullable().default(1),
   excelPayload: z.record(z.string(), z.any()).optional().nullable(),
   notes: nullableText,
   attachments: z.array(attachmentSchema).default([]),
@@ -119,8 +119,6 @@ const toDate = (value, fieldName, type = 'gregorian') => {
       error.status = 400;
       throw error;
     }
-    // Preserve the original Hijri year/month/day in the Date value for backward compatibility.
-    // The companion *DateType field remains the source of truth for presentation.
     return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
   }
   const parsed = new Date(value);
@@ -345,19 +343,29 @@ router.post('/:id/inventory', async (req, res, next) => {
     if (!existing) return res.status(404).json({ message: 'الأصل غير موجود' });
     const scannedBy = req.authUser?.username || req.authUser?.email || null;
     const event = await prisma.$transaction(async (tx) => {
-      const created = await tx.assetInventoryEvent.create({ data: { assetId: existing.id, ...input, scannedBy } });
+      const created = await tx.assetInventoryEvent.create({ data: {
+        assetId: existing.id,
+        method: input.method,
+        scannedBarcode: input.scannedBarcode || null,
+        result: input.result || 'matched',
+        department: input.department || existing.department,
+        building: input.building || existing.building,
+        floor: input.floor || existing.floor,
+        room: input.room || existing.room,
+        notes: input.notes || null,
+        scannedBy,
+      } });
       await tx.asset.update({ where: { id: existing.id }, data: { lastInventoryDate: new Date(), lastInventoryDateType: 'gregorian' } });
       return created;
     });
-    await createAuditLog({ user: req.authUser, action: 'inventory', module: 'assets', entity: 'asset', entityId: existing.id, entityLabel: existing.itemNumber || existing.assetNumber, description: `جرد أصل بواسطة ${input.method}`, details: event, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
+    await createAuditLog({ user: req.authUser, action: 'inventory', module: 'assets', entity: 'asset', entityId: existing.id, entityLabel: existing.itemNumber || existing.assetNumber, description: `جرد أصل بواسطة ${input.method}`, newData: event, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
     res.status(201).json(event);
   } catch (error) { next(error); }
 });
 
 router.get('/:id/loss-cases', async (req, res, next) => {
-  try {
-    res.json(await prisma.assetLossCase.findMany({ where: { assetId: req.params.id }, orderBy: { createdAt: 'desc' } }));
-  } catch (error) { next(error); }
+  try { res.json(await prisma.assetLossCase.findMany({ where: { assetId: req.params.id }, orderBy: { createdAt: 'desc' } })); }
+  catch (error) { next(error); }
 });
 
 router.post('/:id/loss-cases', async (req, res, next) => {
@@ -365,30 +373,26 @@ router.post('/:id/loss-cases', async (req, res, next) => {
     const input = lossCaseSchema.parse(req.body);
     const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ message: 'الأصل غير موجود' });
-    const duplicate = await prisma.assetLossCase.findUnique({ where: { caseNumber: input.caseNumber }, select: { id: true } });
-    if (duplicate) return res.status(409).json({ message: 'رقم محضر العجز / الفقد مستخدم مسبقًا' });
     const createdBy = req.authUser?.username || req.authUser?.email || null;
-    const lossCase = await prisma.$transaction(async (tx) => {
-      const created = await tx.assetLossCase.create({
-        data: {
-          assetId: existing.id,
-          caseNumber: input.caseNumber,
-          minutesNumber: input.minutesNumber || input.caseNumber,
-          minutesDate: toDate(input.minutesDate, 'تاريخ المحضر', input.minutesDateType),
-          minutesDateType: input.minutesDateType,
-          department: input.department || existing.department,
-          reason: input.reason,
-          assetValue: input.assetValue ?? existing.purchaseValue ?? existing.acquisitionCost ?? null,
-          actionTaken: input.actionTaken || null,
-          notes: input.notes || null,
-          createdBy,
-        },
-      });
+    const caseRecord = await prisma.$transaction(async (tx) => {
+      const created = await tx.assetLossCase.create({ data: {
+        assetId: existing.id,
+        caseNumber: input.caseNumber,
+        minutesNumber: input.minutesNumber || null,
+        minutesDate: toDate(input.minutesDate, 'تاريخ المحضر', input.minutesDateType),
+        minutesDateType: input.minutesDateType,
+        department: input.department || existing.department,
+        reason: input.reason,
+        assetValue: input.assetValue ?? existing.acquisitionCost ?? existing.purchaseValue ?? null,
+        actionTaken: input.actionTaken || null,
+        notes: input.notes || null,
+        createdBy,
+      } });
       await tx.asset.update({ where: { id: existing.id }, data: { status: 'lost' } });
       return created;
     });
-    await createAuditLog({ user: req.authUser, action: 'loss_case', module: 'assets', entity: 'asset', entityId: existing.id, entityLabel: existing.itemNumber || existing.assetNumber, description: 'تسجيل عجز / فقد أصل', details: lossCase, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
-    res.status(201).json(lossCase);
+    await createAuditLog({ user: req.authUser, action: 'create', module: 'assets', entity: 'asset_loss_case', entityId: caseRecord.id, entityLabel: input.caseNumber, description: 'تسجيل عجز / فقد على أصل', newData: caseRecord, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
+    res.status(201).json(caseRecord);
   } catch (error) { next(error); }
 });
 
@@ -397,41 +401,35 @@ router.get('/:id', async (req, res, next) => {
     const record = await prisma.asset.findUnique({ where: { id: req.params.id } });
     if (!record) return res.status(404).json({ message: 'الأصل غير موجود' });
     const [result] = await withAttachments([record]);
-    const [movements, lossCases, inventoryEvents] = await Promise.all([
-      prisma.assetMovement.findMany({ where: { assetId: record.id }, orderBy: { movedAt: 'desc' } }),
-      prisma.assetLossCase.findMany({ where: { assetId: record.id }, orderBy: { createdAt: 'desc' } }),
-      prisma.assetInventoryEvent.findMany({ where: { assetId: record.id }, orderBy: { scannedAt: 'desc' } }),
-    ]);
-    res.json({ ...result, movements, lossCases, inventoryEvents });
+    res.json(result);
   } catch (error) { next(error); }
 });
 
 router.post('/', async (req, res, next) => {
   try {
     const input = assetSchema.parse(req.body);
-    const duplicateItem = await prisma.asset.findFirst({ where: { OR: [{ itemNumber: input.itemNumber }, { assetNumber: input.itemNumber }] }, select: { id: true } });
-    if (duplicateItem) return res.status(409).json({ message: 'رقم الصنف مستخدم لأصل آخر، يجب أن يكون رقمًا فريدًا' });
-    const barcode = input.barcode || await nextBarcode();
-    const duplicateBarcode = await prisma.asset.findFirst({ where: { barcode }, select: { id: true } });
-    if (duplicateBarcode) return res.status(409).json({ message: 'رقم الباركود مستخدم لأصل آخر' });
-    if (input.serialNumber) {
-      const duplicateSerial = await prisma.asset.findFirst({ where: { serialNumber: input.serialNumber }, select: { id: true } });
-      if (duplicateSerial) return res.status(409).json({ message: 'الرقم التسلسلي مستخدم لأصل آخر' });
-    }
-    const dates = {
-      purchaseDate: toDate(input.purchaseDate, 'تاريخ الشراء', input.purchaseDateType),
-      serviceDate: toDate(input.serviceDate, 'تاريخ الدخول في الخدمة', input.serviceDateType),
-      lastInventoryDate: toDate(input.lastInventoryDate, 'تاريخ التحقق الميداني', input.lastInventoryDateType),
-    };
+    const duplicate = await prisma.asset.findUnique({ where: { itemNumber: input.itemNumber } });
+    if (duplicate) return res.status(409).json({ message: 'رقم الصنف مستخدم مسبقًا ويجب أن يكون فريدًا' });
+    let barcode = input.barcode?.trim() || '';
+    if (!barcode) barcode = await nextBarcode();
+    const barcodeDuplicate = await prisma.asset.findUnique({ where: { barcode } });
+    if (barcodeDuplicate) return res.status(409).json({ message: 'الباركود مستخدم مسبقًا' });
+
+    const purchaseDate = toDate(input.purchaseDate, 'تاريخ الشراء', input.purchaseDateType);
+    const serviceDate = toDate(input.serviceDate, 'تاريخ الدخول في الخدمة', input.serviceDateType);
+    const lastInventoryDate = toDate(input.lastInventoryDate, 'تاريخ الجرد', input.lastInventoryDateType);
+
     const createdBy = req.authUser?.username || req.authUser?.email || null;
-    const record = await prisma.$transaction(async (tx) => {
-      const created = await tx.asset.create({ data: { ...normalizeAssetData(input, { barcode, ...dates }), createdBy } });
-      if (input.attachments.length) await tx.attachment.createMany({ data: input.attachments.map((attachment) => createAttachmentData(attachment, created.id, createdBy)) });
-      return created;
+    const result = await prisma.$transaction(async (tx) => {
+      const record = await tx.asset.create({ data: normalizeAssetData(input, { barcode, purchaseDate, serviceDate, lastInventoryDate }) });
+      if (input.attachments.length) {
+        await tx.attachment.createMany({ data: input.attachments.map((attachment) => createAttachmentData(attachment, record.id, createdBy)) });
+      }
+      return record;
     });
-    await createAuditLog({ user: req.authUser, action: 'create', module: 'assets', entity: 'asset', entityId: record.id, entityLabel: record.itemNumber, description: 'إنشاء أصل جديد', newData: record, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
-    const [result] = await withAttachments([record]);
-    res.status(201).json(result);
+    const [withFiles] = await withAttachments([result]);
+    await createAuditLog({ user: req.authUser, action: 'create', module: 'assets', entity: 'asset', entityId: result.id, entityLabel: result.itemNumber || result.assetNumber, description: 'إضافة أصل جديد', newData: withFiles, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
+    res.status(201).json(withFiles);
   } catch (error) { next(error); }
 });
 
@@ -440,26 +438,28 @@ router.put('/:id', async (req, res, next) => {
     const input = assetSchema.parse(req.body);
     const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ message: 'الأصل غير موجود' });
-    const duplicateItem = await prisma.asset.findFirst({ where: { AND: [{ id: { not: existing.id } }, { OR: [{ itemNumber: input.itemNumber }, { assetNumber: input.itemNumber }] }] }, select: { id: true } });
-    if (duplicateItem) return res.status(409).json({ message: 'رقم الصنف مستخدم لأصل آخر، يجب أن يكون رقمًا فريدًا' });
-    const barcode = input.barcode || existing.barcode || await nextBarcode();
-    const duplicateBarcode = await prisma.asset.findFirst({ where: { barcode, id: { not: existing.id } }, select: { id: true } });
-    if (duplicateBarcode) return res.status(409).json({ message: 'رقم الباركود مستخدم لأصل آخر' });
-    const dates = {
-      purchaseDate: toDate(input.purchaseDate, 'تاريخ الشراء', input.purchaseDateType),
-      serviceDate: toDate(input.serviceDate, 'تاريخ الدخول في الخدمة', input.serviceDateType),
-      lastInventoryDate: toDate(input.lastInventoryDate, 'تاريخ التحقق الميداني', input.lastInventoryDateType),
-    };
-    const updatedBy = req.authUser?.username || req.authUser?.email || null;
-    const updated = await prisma.$transaction(async (tx) => {
+    const duplicate = await prisma.asset.findFirst({ where: { itemNumber: input.itemNumber, NOT: { id: existing.id } } });
+    if (duplicate) return res.status(409).json({ message: 'رقم الصنف مستخدم مسبقًا ويجب أن يكون فريدًا' });
+    let barcode = input.barcode?.trim() || existing.barcode || '';
+    if (!barcode) barcode = await nextBarcode();
+    const barcodeDuplicate = await prisma.asset.findFirst({ where: { barcode, NOT: { id: existing.id } } });
+    if (barcodeDuplicate) return res.status(409).json({ message: 'الباركود مستخدم مسبقًا' });
+
+    const purchaseDate = toDate(input.purchaseDate, 'تاريخ الشراء', input.purchaseDateType);
+    const serviceDate = toDate(input.serviceDate, 'تاريخ الدخول في الخدمة', input.serviceDateType);
+    const lastInventoryDate = toDate(input.lastInventoryDate, 'تاريخ الجرد', input.lastInventoryDateType);
+    const createdBy = req.authUser?.username || req.authUser?.email || null;
+    const result = await prisma.$transaction(async (tx) => {
       await tx.attachment.deleteMany({ where: { entityType: 'asset', entityId: existing.id } });
-      const record = await tx.asset.update({ where: { id: existing.id }, data: normalizeAssetData(input, { barcode, ...dates }) });
-      if (input.attachments.length) await tx.attachment.createMany({ data: input.attachments.map((attachment) => createAttachmentData(attachment, record.id, updatedBy)) });
+      const record = await tx.asset.update({ where: { id: existing.id }, data: normalizeAssetData(input, { barcode, purchaseDate, serviceDate, lastInventoryDate }) });
+      if (input.attachments.length) {
+        await tx.attachment.createMany({ data: input.attachments.map((attachment) => createAttachmentData(attachment, record.id, createdBy)) });
+      }
       return record;
     });
-    await createAuditLog({ user: req.authUser, action: 'update', module: 'assets', entity: 'asset', entityId: updated.id, entityLabel: updated.itemNumber || updated.assetNumber, description: 'تحديث بيانات أصل', previousData: existing, newData: updated, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
-    const [result] = await withAttachments([updated]);
-    res.json(result);
+    const [withFiles] = await withAttachments([result]);
+    await createAuditLog({ user: req.authUser, action: 'update', module: 'assets', entity: 'asset', entityId: result.id, entityLabel: result.itemNumber || result.assetNumber, description: 'تعديل بيانات أصل', previousData: existing, newData: withFiles, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
+    res.json(withFiles);
   } catch (error) { next(error); }
 });
 
@@ -467,12 +467,17 @@ router.delete('/:id', async (req, res, next) => {
   try {
     const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ message: 'الأصل غير موجود' });
-    await prisma.$transaction(async (tx) => {
-      await tx.attachment.deleteMany({ where: { entityType: 'asset', entityId: existing.id } });
-      await tx.asset.delete({ where: { id: existing.id } });
-    });
-    await createAuditLog({ user: req.authUser, action: 'delete', module: 'assets', entity: 'asset', entityId: existing.id, entityLabel: existing.itemNumber || existing.assetNumber, description: 'حذف أصل', previousData: existing, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
-    res.status(204).send();
+    const deletedBy = req.authUser?.username || req.authUser?.email || null;
+    await prisma.$transaction([
+      prisma.assetMovement.deleteMany({ where: { assetId: existing.id } }),
+      prisma.assetInventoryEvent.deleteMany({ where: { assetId: existing.id } }),
+      prisma.assetLossCase.deleteMany({ where: { assetId: existing.id } }),
+      prisma.attachment.deleteMany({ where: { entityType: 'asset', entityId: existing.id } }),
+      prisma.archiveRecord.create({ data: { entityType: 'asset', entityId: existing.id, documentType: 'أصل', documentNumber: existing.itemNumber || existing.assetNumber, title: existing.name, deletedData: existing, deletedBy } }),
+      prisma.asset.delete({ where: { id: existing.id } }),
+    ]);
+    await createAuditLog({ user: req.authUser, action: 'delete', module: 'assets', entity: 'asset', entityId: existing.id, entityLabel: existing.itemNumber || existing.assetNumber, description: 'حذف أصل ونقله للأرشفة', previousData: existing, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
+    res.status(204).end();
   } catch (error) { next(error); }
 });
 
