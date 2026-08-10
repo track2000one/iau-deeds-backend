@@ -147,4 +147,4 @@ if (!assetBlock.test(schema)) throw new Error('Asset model block not found');
 schema = schema.replace(assetBlock, replacement);
 fs.writeFileSync(schemaPath, schema, 'utf8');
 console.log('Asset schema foundation upgraded.');
-// validated rerun 2026-08-10
+// stabilized workflow trigger 2026-08-10
