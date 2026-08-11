@@ -17,3 +17,5 @@ src = replaceOnce(
 
 fs.writeFileSync(path, src);
 console.log('Asset immutable entry date safeguard applied.');
+
+// Trigger workflow.
