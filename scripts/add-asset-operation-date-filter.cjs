@@ -40,3 +40,5 @@ src = replaceOnce(
 
 fs.writeFileSync(path, src);
 console.log('Asset report operation date backend patch applied.');
+
+// Workflow trigger marker.
