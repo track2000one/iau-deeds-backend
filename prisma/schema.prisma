@@ -297,6 +297,10 @@ model Asset {
   purchaseDate          DateTime?
   purchaseDateType      String?   @default("gregorian")
   purchaseValue         Float?
+  vatRate               Float?    @default(15)
+  vatAmount             Float?
+  purchaseValueBeforeVat Float?
+  purchaseValueIncludingVat Float?
   serviceDate           DateTime?
   serviceDateType       String?   @default("gregorian")
   acquisitionCost       Float?
