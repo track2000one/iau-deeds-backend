@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'scripts/add-asset-smart-extraction.cjs'
+      - 'scripts/trigger-asset-smart-extraction.txt'
 
 permissions:
   contents: write
