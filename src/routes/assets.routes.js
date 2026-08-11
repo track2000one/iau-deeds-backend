@@ -505,7 +505,9 @@ router.put('/:id', async (req, res, next) => {
     const createdBy = req.authUser?.username || req.authUser?.email || null;
     const result = await prisma.$transaction(async (tx) => {
       await tx.attachment.deleteMany({ where: { entityType: 'asset', entityId: existing.id } });
-      const record = await tx.asset.update({ where: { id: existing.id }, data: normalizeAssetData(input, { barcode, purchaseDate, serviceDate, lastInventoryDate }) });
+      const updateData = normalizeAssetData(input, { barcode, purchaseDate, serviceDate, lastInventoryDate });
+      // createdAt is the immutable first-entry timestamp. Never allow edits/import refreshes to change it.
+      const record = await tx.asset.update({ where: { id: existing.id }, data: { ...updateData, createdAt: existing.createdAt } });
       if (input.attachments.length) {
         await tx.attachment.createMany({ data: input.attachments.map((attachment) => createAttachmentData(attachment, record.id, createdBy)) });
       }
