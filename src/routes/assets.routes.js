@@ -702,10 +702,9 @@ router.delete('/:id', async (req, res, next) => {
       prisma.assetInventoryEvent.deleteMany({ where: { assetId: existing.id } }),
       prisma.assetLossCase.deleteMany({ where: { assetId: existing.id } }),
       prisma.attachment.deleteMany({ where: { entityType: 'asset', entityId: existing.id } }),
-      prisma.archiveRecord.create({ data: { entityType: 'asset', entityId: existing.id, documentType: 'أصل', documentNumber: existing.itemNumber || existing.assetNumber, title: existing.name, deletedData: existing, deletedBy } }),
       prisma.asset.delete({ where: { id: existing.id } }),
     ]);
-    await createAuditLog({ user: req.authUser, action: 'delete', module: 'assets', entity: 'asset', entityId: existing.id, entityLabel: existing.itemNumber || existing.assetNumber, description: 'حذف أصل ونقله للأرشفة', previousData: existing, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
+    await createAuditLog({ user: req.authUser, action: 'delete', module: 'assets', entity: 'asset', entityId: existing.id, entityLabel: existing.itemNumber || existing.assetNumber, description: 'حذف أصل مع الاحتفاظ بسجل العملية وبياناته السابقة في سجل العمليات', previousData: existing, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
     res.status(204).end();
   } catch (error) { next(error); }
 });
