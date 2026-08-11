@@ -121,11 +121,29 @@ const searchWhere = (search) => search ? {
   ],
 } : {};
 
-const baseWhere = ({ search, category, status }) => ({
-  ...(category && category !== 'all' ? { category } : {}),
-  ...(status && status !== 'all' ? { status } : {}),
-  ...searchWhere(search),
-});
+const parseEntryDateBoundary = (value, endOfDay = false) => {
+  const raw = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const time = endOfDay ? '23:59:59.999' : '00:00:00.000';
+  const date = new Date(`${raw}T${time}+03:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const baseWhere = ({ search, category, status, dateFrom = '', dateTo = '' }) => {
+  const from = parseEntryDateBoundary(dateFrom, false);
+  const to = parseEntryDateBoundary(dateTo, true);
+  const createdAt = {
+    ...(from ? { gte: from } : {}),
+    ...(to ? { lte: to } : {}),
+  };
+
+  return {
+    ...(category && category !== 'all' ? { category } : {}),
+    ...(status && status !== 'all' ? { status } : {}),
+    ...(Object.keys(createdAt).length ? { createdAt } : {}),
+    ...searchWhere(search),
+  };
+};
 
 const matchingGroupIds = async (groupKey, where = {}) => {
   if (!groupKey || groupKey === 'all') return null;
@@ -152,8 +170,10 @@ router.get('/groups', async (req, res, next) => {
     const search = String(req.query.search || '').trim();
     const category = String(req.query.category || '').trim();
     const status = String(req.query.status || '').trim();
+    const dateFrom = String(req.query.dateFrom || '').trim();
+    const dateTo = String(req.query.dateTo || '').trim();
     const records = await prisma.asset.findMany({
-      where: baseWhere({ search, category, status }),
+      where: baseWhere({ search, category, status, dateFrom, dateTo }),
       select: { id: true, name: true, assetDescription: true, category: true, quantity: true },
     });
     const groups = new Map();
@@ -196,6 +216,8 @@ router.get('/report', async (req, res, next) => {
     const category = String(req.query.category || '').trim();
     const status = String(req.query.status || '').trim();
     const groupKey = String(req.query.group || '').trim();
+    const dateFrom = String(req.query.dateFrom || '').trim();
+    const dateTo = String(req.query.dateTo || '').trim();
     const page = Math.max(1, Number(req.query.page) || 1);
     const all = String(req.query.all || '') === '1';
     const limit = all ? 10000 : Math.min(200, Math.max(20, Number(req.query.limit) || 50));
@@ -204,7 +226,7 @@ router.get('/report', async (req, res, next) => {
     const allowedSort = new Set(['itemNumber', 'assetNumber', 'barcode', 'name', 'category', 'status', 'department', 'building', 'floor', 'room', 'purchaseDate', 'purchaseValue', 'createdAt']);
     const sortKey = allowedSort.has(sortKeyRaw) ? sortKeyRaw : 'itemNumber';
 
-    const initialWhere = baseWhere({ search, category, status });
+    const initialWhere = baseWhere({ search, category, status, dateFrom, dateTo });
     const ids = await matchingGroupIds(groupKey, initialWhere);
     if (ids && !ids.length) return res.json({ items: [], page, limit, total: 0, totalPages: 0, groups: [] });
     const where = { ...initialWhere, ...(ids ? { id: { in: ids } } : {}) };
