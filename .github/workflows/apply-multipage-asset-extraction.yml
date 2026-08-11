@@ -1,0 +1,36 @@
+name: Apply Multipage Asset Extraction Backend
+
+on:
+  push:
+    paths:
+      - 'scripts/enable-multipage-asset-extraction.cjs'
+      - 'scripts/trigger-multipage-asset-extraction.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Apply multipage extraction backend patch
+        run: node scripts/enable-multipage-asset-extraction.cjs
+      - name: Verify backend syntax
+        run: node --check src/routes/assets.routes.js
+      - name: Commit generated backend changes
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/routes/assets.routes.js
+          git commit -m "Support multipage smart asset extraction"
+          git push origin HEAD:main
