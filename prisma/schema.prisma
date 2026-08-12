@@ -166,22 +166,22 @@ model DeliveredLand {
 }
 
 model LeasedLandOut {
-  id                String    @id @default(cuid())
-  tenant            Json
-  contractNumber    String
-  contractStartDate DateTime?
-  contractStartDateType String? @default("gregorian")
-  contractDuration  String?
-  plotNumber        String?
-  planNumber        String?
-  area              Float     @default(0)
-  location          String?
-  coordinates       String?
-  rentAmount        Float?
-  notes             String?
-  createdBy         String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id                        String    @id @default(cuid())
+  tenant                    Json
+  contractNumber            String
+  contractStartDate         DateTime?
+  contractStartDateType     String?   @default("gregorian")
+  contractDuration          String?
+  plotNumber                String?
+  planNumber                String?
+  area                      Float     @default(0)
+  location                  String?
+  coordinates               String?
+  rentAmount                Float?
+  notes                     String?
+  createdBy                 String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
   contractStartDateOriginal String?
   contractEndDate           DateTime?
   contractEndDateOriginal   String?
@@ -189,19 +189,19 @@ model LeasedLandOut {
 }
 
 model LeasedLandIn {
-  id                  String   @id @default(cuid())
-  owner               Json
-  contractNumber      String
-  contractDuration    String?
-  propertyDescription String
-  area                Float    @default(0)
-  location            String?
-  coordinates         String?
-  rentAmount          Float?
-  notes               String?
-  createdBy           String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                        String    @id @default(cuid())
+  owner                     Json
+  contractNumber            String
+  contractDuration          String?
+  propertyDescription       String
+  area                      Float     @default(0)
+  location                  String?
+  coordinates               String?
+  rentAmount                Float?
+  notes                     String?
+  createdBy                 String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
   contractStartDate         DateTime?
   contractStartDateOriginal String?
   contractStartDateType     String?   @default("gregorian")
@@ -211,21 +211,21 @@ model LeasedLandIn {
 }
 
 model LeasedBuildingOut {
-  id             String   @id @default(cuid())
-  tenant         Json
-  contractNumber String
-  buildingNumber String
-  planNumber     String?
-  locationName   String
-  area           Float    @default(0)
-  city           String?
-  district       String?
-  coordinates    String?
-  rentAmount     Float?
-  notes          String?
-  createdBy      String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                        String    @id @default(cuid())
+  tenant                    Json
+  contractNumber            String
+  buildingNumber            String
+  planNumber                String?
+  locationName              String
+  area                      Float     @default(0)
+  city                      String?
+  district                  String?
+  coordinates               String?
+  rentAmount                Float?
+  notes                     String?
+  createdBy                 String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
   contractStartDate         DateTime?
   contractStartDateOriginal String?
   contractStartDateType     String?   @default("gregorian")
@@ -235,20 +235,20 @@ model LeasedBuildingOut {
 }
 
 model LeasedBuildingIn {
-  id             String   @id @default(cuid())
-  owner          Json
-  contractNumber String
-  buildingNumber String
-  locationName   String
-  area           Float    @default(0)
-  region         String?
-  city           String?
-  coordinates    String?
-  rentAmount     Float?
-  notes          String?
-  createdBy      String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                        String    @id @default(cuid())
+  owner                     Json
+  contractNumber            String
+  buildingNumber            String
+  locationName              String
+  area                      Float     @default(0)
+  region                    String?
+  city                      String?
+  coordinates               String?
+  rentAmount                Float?
+  notes                     String?
+  createdBy                 String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
   contractStartDate         DateTime?
   contractStartDateOriginal String?
   contractStartDateType     String?   @default("gregorian")
@@ -258,64 +258,64 @@ model LeasedBuildingIn {
 }
 
 model Asset {
-  id                    String    @id @default(cuid())
-  assetNumber           String?   @unique
-  itemNumber            String?   @unique
-  barcode               String?   @unique
-  name                  String
-  category              String
-  brand                 String?
-  model                 String?
-  serialNumber          String?   @unique
-  status                String    @default("available")
-  technicalCondition    String?
-  department            String?
-  building              String?
-  floor                 String?
-  room                  String?
-  custodian              String?
-  entityName            String?
-  entityCode            String?
-  assetDescription      String?
-  cardNumber            String?
-  responsibleDepartment String?
-  region                String?
-  city                  String?
-  buildingNumber        String?
-  coordinates           String?
-  classification1       String?
-  classification2       String?
-  classification3       String?
-  classification4       String?
-  classification5       String?
-  classification6       String?
-  accountingGroup       String?
-  accountingGroupCode   String?
-  assetCode             String?
-  remainingLife         Float?
-  usefulLife            Float?
-  purchaseDate          DateTime?
-  purchaseDateType      String?   @default("gregorian")
-  purchaseValue         Float?
-  vatRate               Float?    @default(15)
-  vatAmount             Float?
-  purchaseValueBeforeVat Float?
+  id                        String    @id @default(cuid())
+  assetNumber               String?   @unique
+  itemNumber                String?   @unique
+  barcode                   String?   @unique
+  name                      String
+  category                  String
+  brand                     String?
+  model                     String?
+  serialNumber              String?   @unique
+  status                    String    @default("available")
+  technicalCondition        String?
+  department                String?
+  building                  String?
+  floor                     String?
+  room                      String?
+  custodian                 String?
+  entityName                String?
+  entityCode                String?
+  assetDescription          String?
+  cardNumber                String?
+  responsibleDepartment     String?
+  region                    String?
+  city                      String?
+  buildingNumber            String?
+  coordinates               String?
+  classification1           String?
+  classification2           String?
+  classification3           String?
+  classification4           String?
+  classification5           String?
+  classification6           String?
+  accountingGroup           String?
+  accountingGroupCode       String?
+  assetCode                 String?
+  remainingLife             Float?
+  usefulLife                Float?
+  purchaseDate              DateTime?
+  purchaseDateType          String?   @default("gregorian")
+  purchaseValue             Float?
+  vatRate                   Float?    @default(15)
+  vatAmount                 Float?
+  purchaseValueBeforeVat    Float?
   purchaseValueIncludingVat Float?
-  serviceDate           DateTime?
-  serviceDateType       String?   @default("gregorian")
-  acquisitionCost       Float?
-  supportingCostDocument String?
-  archiveDocumentNumber String?
-  manufacturer          String?
-  lastInventoryDate     DateTime?
-  lastInventoryDateType String?   @default("gregorian")
-  unitOfMeasure         String?
-  quantity              Float?    @default(1)
-  excelPayload          Json?
-  notes                 String?
-  createdBy             String?
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
+  serviceDate               DateTime?
+  serviceDateType           String?   @default("gregorian")
+  acquisitionCost           Float?
+  supportingCostDocument    String?
+  archiveDocumentNumber     String?
+  manufacturer              String?
+  lastInventoryDate         DateTime?
+  lastInventoryDateType     String?   @default("gregorian")
+  unitOfMeasure             String?
+  quantity                  Float?    @default(1)
+  excelPayload              Json?
+  notes                     String?
+  createdBy                 String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
   movements       AssetMovement[]
   lossCases       AssetLossCase[]
@@ -356,20 +356,20 @@ model AssetMovement {
 }
 
 model AssetLossCase {
-  id              String   @id @default(cuid())
-  caseNumber      String   @unique
+  id              String    @id @default(cuid())
+  caseNumber      String    @unique
   assetId         String
   minutesNumber   String?
   minutesDate     DateTime?
-  minutesDateType String?  @default("gregorian")
+  minutesDateType String?   @default("gregorian")
   department      String?
   reason          String?
   assetValue      Float?
   actionTaken     String?
   notes           String?
   createdBy       String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
@@ -531,38 +531,253 @@ model SiteInspectionItem {
   @@index([status])
 }
 
-
 model ContractFollowUp {
-  id               String   @id @default(cuid())
-  contractKey      String   @unique
-  status           String   @default("not_started")
+  id               String    @id @default(cuid())
+  contractKey      String    @unique
+  status           String    @default("not_started")
   assignedTo       String?
   action           String?
   notes            String?
   nextFollowUpDate DateTime?
   updatedBy        String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@index([status])
   @@index([nextFollowUpDate])
   @@index([updatedAt])
 }
 
-
 model AssetExcelTemplate {
-  id           String   @id @default(cuid())
-  templateKey  String   @unique
-  title        String
-  fileName     String
-  driveFileId  String   @unique
-  driveUrl     String
-  mimeType     String?
-  fileSize     Float?
-  uploadedBy   String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String   @id @default(cuid())
+  templateKey String   @unique
+  title       String
+  fileName    String
+  driveFileId String   @unique
+  driveUrl    String
+  mimeType    String?
+  fileSize    Float?
+  uploadedBy  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   @@index([templateKey])
   @@index([updatedAt])
+}
+
+// ============================================================
+// University Mosques & Prayer Rooms Care Unit
+// ============================================================
+model MosqueSite {
+  id               String   @id @default(cuid())
+  publicToken      String   @unique @default(uuid())
+  name             String
+  siteType         String   @default("mosque")
+  city             String?
+  district         String?
+  campusLocation   String?
+  area             Float?
+  capacity         Int?
+  latitude         Float?
+  longitude        Float?
+  mapUrl           String?
+  status           String   @default("active")
+  imamName         String?
+  muezzinName      String?
+  khateebName      String?
+  contactPhone     String?
+  notes            String?
+  images           Json?
+  supervisorUserId String?
+  createdBy        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  personnel   MosquePersonnel[]
+  requests    MosqueRequest[]
+  tickets     MosqueTicket[]
+  leaves      MosqueLeave[]
+  assignments MosqueUserAssignment[]
+
+  @@index([siteType])
+  @@index([city])
+  @@index([district])
+  @@index([status])
+  @@index([supervisorUserId])
+}
+
+model MosquePersonnel {
+  id        String   @id @default(cuid())
+  siteId    String
+  userId    String?
+  name      String
+  role      String   @default("collaborator")
+  mobile    String?
+  email     String?
+  notes     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  site   MosqueSite    @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  leaves MosqueLeave[]
+
+  @@index([siteId])
+  @@index([userId])
+  @@index([role])
+  @@index([active])
+}
+
+model MosqueRequest {
+  id                    String    @id @default(cuid())
+  requestNumber         String    @unique
+  siteId                String
+  requestType           String
+  description           String
+  priority              String    @default("medium")
+  status                String    @default("new")
+  attachments           Json?
+  notes                 String?
+  submittedBy           String?
+  assignedTo            String?
+  rejectionReason       String?
+  returnReason          String?
+  completionEvidenceUrl String?
+  closedAt              DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  site MosqueSite @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@index([siteId])
+  @@index([requestType])
+  @@index([priority])
+  @@index([status])
+  @@index([submittedBy])
+  @@index([assignedTo])
+  @@index([createdAt])
+}
+
+model MosqueTicket {
+  id                 String    @id @default(cuid())
+  ticketNumber       String    @unique
+  trackingToken      String    @unique @default(uuid())
+  siteId             String
+  ticketType         String
+  description        String
+  reporterName       String?
+  reporterPhone      String?
+  reporterEmail      String?
+  attachmentUrl      String?
+  status             String    @default("new")
+  assignedTo         String?
+  convertedRequestId String?
+  rejectionReason    String?
+  resolutionNote     String?
+  notes              String?
+  closedAt           DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  site MosqueSite @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@index([siteId])
+  @@index([ticketType])
+  @@index([status])
+  @@index([assignedTo])
+  @@index([createdAt])
+}
+
+model MosqueLeave {
+  id                String   @id @default(cuid())
+  leaveNumber       String   @unique
+  siteId            String
+  personnelId       String?
+  applicantUserId   String?
+  requestType       String
+  startDate         DateTime
+  endDate           DateTime
+  reason            String
+  replacementName   String
+  replacementUserId String?
+  attachmentUrl     String?
+  status            String   @default("pending")
+  notes             String?
+  reviewerNote      String?
+  rejectionReason   String?
+  returnReason      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  site      MosqueSite       @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  personnel MosquePersonnel? @relation(fields: [personnelId], references: [id], onDelete: SetNull)
+
+  @@index([siteId])
+  @@index([personnelId])
+  @@index([applicantUserId])
+  @@index([replacementUserId])
+  @@index([status])
+  @@index([startDate])
+  @@index([endDate])
+}
+
+model MosqueJobApplication {
+  id                String    @id @default(cuid())
+  applicationNumber String    @unique
+  trackingToken     String    @unique @default(uuid())
+  fullName          String
+  nationalId        String
+  phone             String
+  email             String
+  qualification     String
+  experience        String?
+  jobType           String
+  preferredLocation String?
+  cvUrl             String?
+  attachments       Json?
+  status            String    @default("new")
+  internalNotes     String?
+  interviewAt       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([nationalId])
+  @@index([email])
+  @@index([jobType])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model MosqueUserAssignment {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  role          String   @default("viewer")
+  siteId        String?
+  personnelRole String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  site MosqueSite? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+
+  @@index([role])
+  @@index([siteId])
+}
+
+model MosqueNotification {
+  id         String   @id @default(cuid())
+  userId     String?
+  roleTarget String?
+  siteId     String?
+  title      String
+  message    String
+  entityType String?
+  entityId   String?
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([roleTarget])
+  @@index([siteId])
+  @@index([isRead])
+  @@index([createdAt])
 }

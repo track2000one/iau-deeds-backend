@@ -16,6 +16,7 @@ import siteInspectionsRoutes from './routes/site-inspections.routes.js';
 import assetsRoutes from './routes/assets.routes.js';
 import assetsFastRoutes from './routes/assets-fast.routes.js';
 import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';
+import mosquesRoutes, { mosquesPublicRoutes } from './routes/mosques.routes.js';
 import {
   requireAdmin,
   requireAuth,
@@ -51,6 +52,7 @@ app.get('/', (_req, res) => {
 
 app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/mosques/public', mosquesPublicRoutes);
 
 app.use('/api/audit', requireAuth, requireAdmin, auditRoutes);
 app.use('/api/users', requireAuth, auditTrail('users'), usersRoutes);
@@ -123,6 +125,14 @@ app.use(
   auditTrail('site_inspections'),
   requirePermission('site_inspections'),
   siteInspectionsRoutes
+);
+
+app.use(
+  '/api/mosques',
+  requireAuth,
+  auditTrail('mosques'),
+  requirePermission('mosques'),
+  mosquesRoutes
 );
 
 app.use(notFound);
