@@ -123,26 +123,30 @@ const queryWhere = (req) => {
           : {}
     : {};
 
-  return {
-    ...groupWhere,
+  const baseFilters = {
     ...(recordType && recordType !== 'all' ? { recordType } : {}),
     ...(committeeStatus && committeeStatus !== 'all' ? { committeeStatus } : {}),
     ...(readinessStatus && readinessStatus !== 'all' ? { readinessStatus } : {}),
-    ...(search
-      ? {
-          OR: [
-            { recordNumber: { contains: search, mode: 'insensitive' } },
-            { entityName: { contains: search, mode: 'insensitive' } },
-            { entityAssetNumber: { contains: search, mode: 'insensitive' } },
-            { mofAssetNumber: { contains: search, mode: 'insensitive' } },
-            { linkedAsset: { contains: search, mode: 'insensitive' } },
-            { assetDescription: { contains: search, mode: 'insensitive' } },
-            { accountingAssetCode: { contains: search, mode: 'insensitive' } },
-            { city: { contains: search, mode: 'insensitive' } },
-            { region: { contains: search, mode: 'insensitive' } },
-          ],
-        }
-      : {}),
+  };
+
+  const searchWhere = search
+    ? { OR: [
+        { recordNumber: { contains: search, mode: 'insensitive' } },
+        { entityName: { contains: search, mode: 'insensitive' } },
+        { entityAssetNumber: { contains: search, mode: 'insensitive' } },
+        { mofAssetNumber: { contains: search, mode: 'insensitive' } },
+        { linkedAsset: { contains: search, mode: 'insensitive' } },
+        { assetDescription: { contains: search, mode: 'insensitive' } },
+        { accountingAssetCode: { contains: search, mode: 'insensitive' } },
+        { city: { contains: search, mode: 'insensitive' } },
+        { region: { contains: search, mode: 'insensitive' } },
+      ] }
+    : {};
+
+  const clauses = [groupWhere, searchWhere].filter((part) => Object.keys(part).length);
+  return {
+    ...baseFilters,
+    ...(clauses.length > 1 ? { AND: clauses } : clauses[0] || {}),
   };
 };
 
