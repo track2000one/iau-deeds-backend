@@ -268,6 +268,58 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+router.post('/bulk-preview', async (req, res, next) => {
+  try {
+    const input = bulkImportSchema.parse(req.body);
+    const fingerprints = [];
+    const invalidIndexes = [];
+    const seen = new Set();
+    const duplicateIndexes = [];
+
+    input.items.forEach((item, index) => {
+      const payload = item.payload || {};
+      if (!hasAccountingValue(payload.B) && !hasAccountingValue(payload.E) && !hasAccountingValue(payload.G)) {
+        invalidIndexes.push(index);
+        return;
+      }
+      const fingerprint = createFingerprint(item.recordType, payload);
+      if (seen.has(fingerprint)) {
+        duplicateIndexes.push(index);
+        return;
+      }
+      seen.add(fingerprint);
+      fingerprints.push({ index, fingerprint });
+    });
+
+    const existing = fingerprints.length
+      ? await prisma.accountingTransformationRecord.findMany({
+          where: { sourceFingerprint: { in: fingerprints.map((item) => item.fingerprint) } },
+          select: { sourceFingerprint: true },
+        })
+      : [];
+    const existingSet = new Set(existing.map((item) => item.sourceFingerprint).filter(Boolean));
+    fingerprints.forEach((item) => {
+      if (existingSet.has(item.fingerprint)) duplicateIndexes.push(item.index);
+    });
+
+    const duplicateSet = new Set(duplicateIndexes);
+    const invalidSet = new Set(invalidIndexes);
+    const freshIndexes = input.items.map((_, index) => index).filter((index) => !duplicateSet.has(index) && !invalidSet.has(index));
+
+    res.json({
+      total: input.items.length,
+      fresh: freshIndexes.length,
+      duplicate: duplicateSet.size,
+      invalid: invalidSet.size,
+      freshIndexes,
+      duplicateIndexes: Array.from(duplicateSet).sort((a, b) => a - b),
+      invalidIndexes: Array.from(invalidSet).sort((a, b) => a - b),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/bulk-import', async (req, res, next) => {
   try {
     const input = bulkImportSchema.parse(req.body);
@@ -293,11 +345,7 @@ router.post('/bulk-import', async (req, res, next) => {
       const data = buildRecordData(item, req.authUser, { sourceFingerprint });
 
       if (existing) {
-        await prisma.accountingTransformationRecord.update({
-          where: { id: existing.id },
-          data,
-        });
-        updated += 1;
+        skipped += 1;
       } else {
         await prisma.accountingTransformationRecord.create({
           data: {
