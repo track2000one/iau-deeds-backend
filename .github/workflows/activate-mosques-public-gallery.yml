@@ -28,5 +28,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/routes/mosques.routes.js
           git commit -m "Add public mosque slideshow gallery API"
+          git restore --worktree .
           git pull --rebase origin main
           git push origin main
