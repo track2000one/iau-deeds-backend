@@ -94,13 +94,37 @@ const nextRecordNumber = async (offset = 0) => {
   return `ACT-${year}-${String(count + offset + 1).padStart(6, '0')}`;
 };
 
+const accountingGroupKey = (item) => {
+  const code = normalizedText(item.accountingGroupCode);
+  const label = normalizedText(item.accountingGroup);
+  if (code || label) return { key: `group:${code || label}`, label: label || code, code: code || null };
+  return item.recordType === 'land'
+    ? { key: 'type:land', label: 'الأراضي', code: null }
+    : { key: 'type:building', label: 'المباني', code: null };
+};
+
 const queryWhere = (req) => {
   const search = normalizedText(req.query.search);
   const recordType = normalizedText(req.query.recordType);
   const committeeStatus = normalizedText(req.query.committeeStatus);
   const readinessStatus = normalizedText(req.query.readinessStatus);
+  const groupKey = normalizedText(req.query.group);
+
+  const groupWhere = groupKey && groupKey !== 'all'
+    ? groupKey === 'type:land'
+      ? { recordType: 'land' }
+      : groupKey === 'type:building'
+        ? { recordType: 'building' }
+        : groupKey.startsWith('group:')
+          ? { OR: [
+              { accountingGroupCode: { equals: groupKey.slice(6), mode: 'insensitive' } },
+              { accountingGroup: { equals: groupKey.slice(6), mode: 'insensitive' } },
+            ] }
+          : {}
+    : {};
 
   return {
+    ...groupWhere,
     ...(recordType && recordType !== 'all' ? { recordType } : {}),
     ...(committeeStatus && committeeStatus !== 'all' ? { committeeStatus } : {}),
     ...(readinessStatus && readinessStatus !== 'all' ? { readinessStatus } : {}),
@@ -121,6 +145,46 @@ const queryWhere = (req) => {
       : {}),
   };
 };
+
+router.get('/groups', async (req, res, next) => {
+  try {
+    const where = queryWhere(req);
+    const records = await prisma.accountingTransformationRecord.findMany({
+      where,
+      select: {
+        recordType: true,
+        accountingGroup: true,
+        accountingGroupCode: true,
+        overallProgress: true,
+        censusProgress: true,
+        inventoryProgress: true,
+        valuationProgress: true,
+      },
+    });
+    const map = new Map();
+    for (const item of records) {
+      const group = accountingGroupKey(item);
+      const current = map.get(group.key) || {
+        key: group.key, label: group.label, code: group.code, count: 0,
+        overallTotal: 0, censusTotal: 0, inventoryTotal: 0, valuationTotal: 0,
+      };
+      current.count += 1;
+      current.overallTotal += Number(item.overallProgress || 0);
+      current.censusTotal += Number(item.censusProgress || 0);
+      current.inventoryTotal += Number(item.inventoryProgress || 0);
+      current.valuationTotal += Number(item.valuationProgress || 0);
+      map.set(group.key, current);
+    }
+    const groups = Array.from(map.values()).map((g) => ({
+      key: g.key, label: g.label, code: g.code, count: g.count,
+      averageOverall: Math.round(g.overallTotal / Math.max(1, g.count)),
+      averageCensus: Math.round(g.censusTotal / Math.max(1, g.count)),
+      averageInventory: Math.round(g.inventoryTotal / Math.max(1, g.count)),
+      averageValuation: Math.round(g.valuationTotal / Math.max(1, g.count)),
+    })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'ar'));
+    res.json(groups);
+  } catch (error) { next(error); }
+});
 
 router.get('/stats', async (_req, res, next) => {
   try {
