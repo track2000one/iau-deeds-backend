@@ -1,7 +1,10 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
+import multer from 'multer';
 import { prisma } from '../prisma.js';
+import { createAuditLog, getClientIp } from '../services/audit.service.js';
+import { uploadBufferToGoogleDrive, deleteGoogleDriveFile, downloadGoogleDriveFile } from '../services/googleDrive.js';
 import {
   ACCOUNTING_CORE_COLUMNS,
   calculateAccountingProgress,
@@ -10,6 +13,18 @@ import {
 } from '../config/accountingTransformation.js';
 
 const router = Router();
+
+const OFFICIAL_ACCOUNTING_TEMPLATE_KEY = 'official_accounting_transformation';
+const EXCEL_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const officialAccountingExcelUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const fileName = String(file.originalname || '').toLowerCase();
+    const allowed = file.mimetype === EXCEL_MIME || fileName.endsWith('.xlsx');
+    cb(allowed ? null : new Error('النموذج الرسمي يجب أن يكون ملف Excel بصيغة XLSX.'), allowed);
+  },
+});
 
 const recordTypeSchema = z.enum(['land', 'building']);
 const committeeStatusSchema = z.enum([
@@ -362,6 +377,46 @@ router.post('/bulk-import', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+router.get('/excel-template', async (_req, res, next) => {
+  try {
+    const template = await prisma.assetExcelTemplate.findUnique({ where: { templateKey: OFFICIAL_ACCOUNTING_TEMPLATE_KEY } });
+    res.json(template || null);
+  } catch (error) { next(error); }
+});
+
+router.post('/excel-template', officialAccountingExcelUpload.single('file'), async (req, res, next) => {
+  try {
+    if (req.authUser?.role !== 'admin') return res.status(403).json({ message: 'رفع أو استبدال نموذج Excel الرسمي متاح لمسؤول النظام فقط.' });
+    if (!req.file) return res.status(400).json({ message: 'لم يتم إرفاق نموذج Excel.' });
+    const previous = await prisma.assetExcelTemplate.findUnique({ where: { templateKey: OFFICIAL_ACCOUNTING_TEMPLATE_KEY } });
+    const uploaded = await uploadBufferToGoogleDrive(req.file, { fileName: 'official-accounting-transformation-template.xlsx', mimeType: EXCEL_MIME });
+    const uploadedBy = req.authUser?.email || req.authUser?.username || null;
+    const template = await prisma.assetExcelTemplate.upsert({
+      where: { templateKey: OFFICIAL_ACCOUNTING_TEMPLATE_KEY },
+      update: { title: 'نموذج التحول المحاسبي الرسمي المعتمد', fileName: req.file.originalname || uploaded.fileName, driveFileId: uploaded.driveFileId, driveUrl: uploaded.driveUrl, mimeType: uploaded.mimeType || EXCEL_MIME, fileSize: req.file.size || null, uploadedBy },
+      create: { templateKey: OFFICIAL_ACCOUNTING_TEMPLATE_KEY, title: 'نموذج التحول المحاسبي الرسمي المعتمد', fileName: req.file.originalname || uploaded.fileName, driveFileId: uploaded.driveFileId, driveUrl: uploaded.driveUrl, mimeType: uploaded.mimeType || EXCEL_MIME, fileSize: req.file.size || null, uploadedBy },
+    });
+    if (previous?.driveFileId && previous.driveFileId !== uploaded.driveFileId) {
+      deleteGoogleDriveFile(previous.driveFileId).catch((error) => console.warn('Could not delete previous accounting Excel template:', error?.message || error));
+    }
+    await createAuditLog({ user: req.authUser, action: previous ? 'update' : 'create', module: 'accounting_transformation', entity: 'accounting_excel_template', entityId: template.id, entityLabel: template.fileName, description: previous ? 'استبدال نموذج Excel الرسمي للتحول المحاسبي' : 'رفع نموذج Excel الرسمي للتحول المحاسبي', newData: template, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] });
+    res.status(previous ? 200 : 201).json(template);
+  } catch (error) { next(error); }
+});
+
+router.get('/excel-template/file', async (_req, res, next) => {
+  try {
+    const template = await prisma.assetExcelTemplate.findUnique({ where: { templateKey: OFFICIAL_ACCOUNTING_TEMPLATE_KEY } });
+    if (!template) return res.status(404).json({ message: 'لم يتم رفع نموذج Excel الرسمي للتحول المحاسبي بعد.' });
+    const downloaded = await downloadGoogleDriveFile(template.driveFileId);
+    const safeName = String(template.fileName || downloaded.fileName || 'official-accounting-transformation-template.xlsx').replace(/[\"\r\n]/g, '_');
+    res.setHeader('Content-Type', EXCEL_MIME);
+    res.setHeader('Content-Disposition', "attachment; filename*=UTF-8''" + encodeURIComponent(safeName));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(downloaded.buffer);
+  } catch (error) { next(error); }
 });
 
 router.get('/:id', async (req, res, next) => {
