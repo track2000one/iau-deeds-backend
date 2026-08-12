@@ -185,6 +185,94 @@ const publicUpload = multer({
   },
 });
 
+const PUBLIC_MOSQUE_GALLERY_SOURCES = [
+  'https://ibb.co/P2V3164',
+  'https://ibb.co/tM3nbwH6',
+  'https://ibb.co/ymtDtp20',
+  'https://ibb.co/DDTKhqCt',
+  'https://ibb.co/zh7Nf4Qq',
+  'https://ibb.co/LhQ02hFt',
+  'https://ibb.co/vxw8GYH7',
+  'https://ibb.co/PGBD1NfH',
+  'https://ibb.co/d4dCHm5T',
+  'https://ibb.co/0pBK0QK3',
+  'https://ibb.co/fdXZ1y1d',
+  'https://ibb.co/Zprjs45M',
+  'https://ibb.co/3mx1wmsp',
+  'https://ibb.co/9mfpW44C',
+  'https://ibb.co/xtyJLMdh',
+];
+
+let publicMosqueGalleryCache = { expiresAt: 0, items: [] };
+
+const normalizeGalleryImageUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const driveFile = raw.match(/drive\.google\.com\/file\/d\/([^/?#]+)/i)?.[1];
+  const driveQuery = raw.match(/[?&]id=([^&#]+)/i)?.[1];
+  const driveId = driveFile || driveQuery;
+  return driveId ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(driveId)}` : raw;
+};
+
+const decodeHtmlUrl = (value) => String(value || '')
+  .replace(/&amp;/g, '&')
+  .replace(/&#x2F;/gi, '/')
+  .replace(/&#47;/g, '/')
+  .trim();
+
+const extractOpenGraphImage = (html) => {
+  const patterns = [
+    /<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::secure_url)?["'][^>]*>/i,
+    /<link[^>]+rel=["']image_src["'][^>]+href=["']([^"']+)["'][^>]*>/i,
+  ];
+  for (const pattern of patterns) {
+    const match = String(html || '').match(pattern);
+    if (match?.[1]) return decodeHtmlUrl(match[1]);
+  }
+  return '';
+};
+
+const resolveImgBbGallerySource = async (pageUrl, index) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 7000);
+  try {
+    const response = await fetch(pageUrl, {
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'user-agent': 'Mozilla/5.0 (compatible; IAU-Mosques-Gallery/1.0)',
+        accept: 'text/html,application/xhtml+xml',
+      },
+    });
+    if (!response.ok) return null;
+    const html = await response.text();
+    const imageUrl = extractOpenGraphImage(html);
+    if (!/^https?:\/\//i.test(imageUrl)) return null;
+    return {
+      id: `external-${index + 1}`,
+      title: 'مساجد ومصليات جامعة الإمام عبدالرحمن بن فيصل',
+      imageUrl,
+      sourcePage: pageUrl,
+      source: 'external',
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const resolvePublicMosqueExternalGallery = async () => {
+  if (publicMosqueGalleryCache.expiresAt > Date.now() && publicMosqueGalleryCache.items.length) {
+    return publicMosqueGalleryCache.items;
+  }
+  const resolved = await Promise.all(PUBLIC_MOSQUE_GALLERY_SOURCES.map(resolveImgBbGallerySource));
+  const items = resolved.filter(Boolean);
+  publicMosqueGalleryCache = { expiresAt: Date.now() + 6 * 60 * 60 * 1000, items };
+  return items;
+};
+
 mosquesPublicRoutes.get('/sites', async (_req, res, next) => {
   try {
     const sites = await prisma.mosqueSite.findMany({
@@ -211,6 +299,43 @@ mosquesPublicRoutes.get('/sites/:token', async (req, res, next) => {
     if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
     res.json(site);
   } catch (error) { next(error); }
+});
+
+mosquesPublicRoutes.get('/gallery', async (_req, res, next) => {
+  try {
+    const [sites, externalItems] = await Promise.all([
+      prisma.mosqueSite.findMany({
+        where: { status: { not: 'temporarily_closed' } },
+        select: { id: true, name: true, images: true },
+        orderBy: { name: 'asc' },
+      }),
+      resolvePublicMosqueExternalGallery(),
+    ]);
+
+    const siteItems = sites.flatMap((site) => {
+      const images = Array.isArray(site.images) ? site.images : [];
+      return images.map((imageUrl, index) => ({
+        id: `site-${site.id}-${index + 1}`,
+        title: site.name,
+        imageUrl: normalizeGalleryImageUrl(imageUrl),
+        sourcePage: null,
+        source: 'site',
+      })).filter((item) => /^https?:\/\//i.test(item.imageUrl));
+    });
+
+    const seen = new Set();
+    const items = [...siteItems, ...externalItems].filter((item) => {
+      const key = String(item.imageUrl || '').trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    res.setHeader('Cache-Control', 'public, max-age=1800, s-maxage=21600, stale-while-revalidate=86400');
+    res.json(items);
+  } catch (error) {
+    next(error);
+  }
 });
 
 mosquesPublicRoutes.post('/tickets', publicUpload.single('file'), async (req, res, next) => {
