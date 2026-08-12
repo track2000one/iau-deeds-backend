@@ -17,6 +17,7 @@ import assetsRoutes from './routes/assets.routes.js';
 import assetsFastRoutes from './routes/assets-fast.routes.js';
 import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';
 import mosquesRoutes, { mosquesPublicRoutes } from './routes/mosques.routes.js';
+import accountingTransformationRoutes from './routes/accounting-transformation.routes.js';
 import {
   requireAdmin,
   requireAuth,
@@ -133,6 +134,14 @@ app.use(
   auditTrail('mosques'),
   requirePermission('mosques'),
   mosquesRoutes
+);
+
+app.use(
+  '/api/accounting-transformation',
+  requireAuth,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingTransformationRoutes
 );
 
 app.use(notFound);
