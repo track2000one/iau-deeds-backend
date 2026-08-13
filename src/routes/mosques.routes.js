@@ -698,17 +698,19 @@ router.get('/requests', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/requests', requireRoles('head', 'supervisor', 'personnel'), async (req, res, next) => {
+router.post('/requests', requireRoles('personnel'), async (req, res, next) => {
   try {
     const input = requestSchema.parse(req.body);
     const context = req.mosqueRole || await getModuleRole(req);
-    if (context.role === 'personnel') {
-      if (!context.siteId || input.siteId !== context.siteId) return res.status(403).json({ message: 'يمكن لمنسوب المسجد تقديم الطلب للموقع المرتبط بحسابه فقط' });
+    if (!context.siteId || input.siteId !== context.siteId) {
+      return res.status(403).json({ message: 'يمكن لمنسوب المسجد تقديم الطلب للمسجد أو الجامع أو المصلى المرتبط بحسابه فقط' });
     }
-    if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
     const request = await prisma.mosqueRequest.create({ data: { ...input, requestNumber: trackingNumber('REQ'), submittedBy: req.authUser.id } });
     const site = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { name: true } });
-    await notify({ roleTarget: 'supervisor', siteId: input.siteId, title: 'طلب جديد', message: `تم إنشاء الطلب ${request.requestNumber}${site?.name ? ` - ${site.name}` : ''}`, entityType: 'request', entityId: request.id });
+    await Promise.all([
+      notify({ roleTarget: 'supervisor', siteId: input.siteId, title: 'طلب صيانة/احتياج جديد', message: `تم استلام الطلب ${request.requestNumber}${site?.name ? ` - ${site.name}` : ''}`, entityType: 'request', entityId: request.id }),
+      notify({ roleTarget: 'head', siteId: input.siteId, title: 'طلب صيانة/احتياج جديد', message: `تم استلام الطلب ${request.requestNumber}${site?.name ? ` - ${site.name}` : ''}`, entityType: 'request', entityId: request.id }),
+    ]);
     res.status(201).json(request);
   } catch (error) { next(error); }
 });
@@ -795,17 +797,22 @@ router.get('/leaves', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/leaves', requireRoles('head', 'supervisor', 'personnel'), async (req, res, next) => {
+router.post('/leaves', requireRoles('personnel'), async (req, res, next) => {
   try {
     const input = leaveSchema.parse(req.body);
     if (input.endDate < input.startDate) return res.status(400).json({ message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية' });
     const context = req.mosqueRole || await getModuleRole(req);
-    if (context.role === 'personnel' && (!context.siteId || input.siteId !== context.siteId)) return res.status(403).json({ message: 'الموقع غير مرتبط بحسابك' });
-    if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
+    if (!context.siteId || input.siteId !== context.siteId) {
+      return res.status(403).json({ message: 'يمكن لمنسوب المسجد تقديم الإجازة أو الاعتذار للموقع المرتبط بحسابه فقط' });
+    }
     const overlap = await prisma.mosqueLeave.findFirst({ where: { siteId: input.siteId, replacementName: input.replacementName, status: { in: ['pending', 'under_review', 'approved'] }, startDate: { lte: input.endDate }, endDate: { gte: input.startDate } } });
     if (overlap) return res.status(409).json({ message: 'البديل المختار مرتبط بطلب آخر يتعارض مع هذه الفترة' });
     const leave = await prisma.mosqueLeave.create({ data: { ...input, leaveNumber: trackingNumber('LEV'), applicantUserId: req.authUser.id } });
-    await notify({ roleTarget: 'supervisor', siteId: input.siteId, title: 'طلب إجازة/اعتذار', message: `طلب جديد ${leave.leaveNumber}`, entityType: 'leave', entityId: leave.id });
+    const leaveSite = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { name: true } });
+    await Promise.all([
+      notify({ roleTarget: 'supervisor', siteId: input.siteId, title: 'طلب إجازة/اعتذار جديد', message: `تم استلام ${leave.leaveNumber}${leaveSite?.name ? ` - ${leaveSite.name}` : ''}`, entityType: 'leave', entityId: leave.id }),
+      notify({ roleTarget: 'head', siteId: input.siteId, title: 'طلب إجازة/اعتذار جديد', message: `تم استلام ${leave.leaveNumber}${leaveSite?.name ? ` - ${leaveSite.name}` : ''}`, entityType: 'leave', entityId: leave.id }),
+    ]);
     res.status(201).json(leave);
   } catch (error) { next(error); }
 });
