@@ -1,0 +1,85 @@
+name: Add create-user permission
+
+on:
+  push:
+    paths:
+      - '.github/workflows/add-create-user-permission.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Apply backend permission changes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'Expected text not found in {path}: {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'prisma/schema.prisma',
+              '  canPrint  Boolean @default(false)\n\n  user AppUser',
+              '  canPrint      Boolean @default(false)\n  canCreateUser Boolean @default(false)\n\n  user AppUser',
+          )
+
+          replace_once(
+              'src/security/auth.js',
+              '      canPrint: item.canPrint,\n',
+              '      canPrint: item.canPrint,\n      canCreateUser: item.canCreateUser,\n',
+          )
+
+          replace_once(
+              'src/routes/users.routes.js',
+              "  canPrint: z.boolean().default(false),\n});",
+              "  canPrint: z.boolean().default(false),\n  canCreateUser: z.boolean().default(false),\n});",
+          )
+          replace_once(
+              'src/routes/users.routes.js',
+              '      Boolean(value.canDelete) ||\n      Boolean(value.canPrint),\n',
+              '      Boolean(value.canDelete) ||\n      Boolean(value.canPrint) ||\n      Boolean(value.canCreateUser),\n',
+          )
+          replace_once(
+              'src/routes/users.routes.js',
+              '    canDelete: Boolean(value.canDelete),\n    canPrint: Boolean(value.canPrint),\n',
+              '    canDelete: Boolean(value.canDelete),\n    canPrint: Boolean(value.canPrint),\n    canCreateUser: Boolean(value.canCreateUser),\n',
+          )
+
+          replace_once(
+              'src/middleware/auth.js',
+              "  const action = actionByMethod[req.method.toUpperCase()];\n  const permission = findPermission(req.authUser, moduleName);\n",
+              "  const method = req.method.toUpperCase();\n  const requestPath = String(req.path || req.originalUrl || '');\n  const action =\n    moduleName === 'mosques' &&\n    method === 'POST' &&\n    /\\/personnel\\/account\\/?(?:\\?|$)/.test(requestPath)\n      ? 'canCreateUser'\n      : actionByMethod[method];\n  const permission = findPermission(req.authUser, moduleName);\n",
+          )
+          PY
+      - name: Install dependencies
+        run: npm ci
+      - name: Prisma and syntax verification
+        run: |
+          npx prisma generate
+          node --check src/security/auth.js
+          node --check src/middleware/auth.js
+          node --check src/routes/users.routes.js
+          node --check src/routes/mosques.routes.js
+      - name: Commit verified changes
+        run: |
+          git config user.name 'OpenAI Project Automation'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add prisma/schema.prisma src/security/auth.js src/middleware/auth.js src/routes/users.routes.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat: add create-user permission for mosque personnel'
+          git push origin main
