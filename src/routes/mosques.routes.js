@@ -170,7 +170,7 @@ const leaveSchema = z.object({
 const assignmentSchema = z.object({
   role: z.enum(['head', 'supervisor', 'personnel', 'viewer']),
   siteId: z.string().optional().nullable(),
-  personnelRole: z.enum(['imam', 'muezzin', 'khateeb', 'collaborator']).optional().nullable(),
+  personnelRole: z.enum(['imam', 'muezzin', 'khateeb', 'collaborating_khateeb', 'collaborator']).optional().nullable(),
 });
 
 const publicUpload = multer({
@@ -640,11 +640,18 @@ router.get('/personnel', async (_req, res, next) => {
 
 router.post('/personnel', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
+    const allowedPersonnelRoles = ['imam', 'muezzin', 'khateeb', 'collaborating_khateeb'];
+    const normalizedRole = String(req.body.role || 'imam').trim();
     const data = {
-      siteId: String(req.body.siteId || ''), name: String(req.body.name || '').trim(), role: String(req.body.role || 'collaborator'),
+      siteId: String(req.body.siteId || ''), name: String(req.body.name || '').trim(), role: normalizedRole,
       userId: nullableText(req.body.userId), mobile: nullableText(req.body.mobile), email: nullableText(req.body.email), notes: nullableText(req.body.notes), active: req.body.active !== false,
     };
     if (!data.siteId || data.name.length < 2) return res.status(400).json({ message: 'الموقع والاسم مطلوبان' });
+    if (!allowedPersonnelRoles.includes(data.role)) return res.status(400).json({ message: 'الصفة يجب أن تكون إمام أو مؤذن أو خطيب أو خطيب متعاون' });
+    if (data.userId) {
+      const existing = await prisma.mosquePersonnel.findFirst({ where: { userId: data.userId } });
+      if (existing) return res.status(409).json({ message: 'هذا المستخدم مرتبط مسبقًا بسجل منسوبي المساجد' });
+    }
     res.status(201).json(await prisma.mosquePersonnel.create({ data }));
   } catch (error) { next(error); }
 });
@@ -656,12 +663,43 @@ router.get('/assignments', requireRoles('head'), async (_req, res, next) => {
 router.put('/assignments/:userId', requireRoles('head'), async (req, res, next) => {
   try {
     const input = assignmentSchema.parse(req.body);
-    const assignment = await prisma.mosqueUserAssignment.upsert({
-      where: { userId: req.params.userId },
-      create: { userId: req.params.userId, ...input },
-      update: input,
-      include: { site: { select: { name: true } } },
+    const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
+    if (!user) return res.status(404).json({ message: 'المستخدم غير موجود' });
+
+    if (input.role === 'personnel') {
+      if (!input.siteId) return res.status(400).json({ message: 'يجب تحديد المسجد أو المصلى للمنسوب' });
+      if (!input.personnelRole) return res.status(400).json({ message: 'يجب تحديد الصفة: إمام أو مؤذن أو خطيب أو خطيب متعاون' });
+      if (input.personnelRole === 'collaborator') input.personnelRole = 'collaborating_khateeb';
+    } else {
+      input.personnelRole = null;
+    }
+
+    const assignment = await prisma.$transaction(async (tx) => {
+      const saved = await tx.mosqueUserAssignment.upsert({
+        where: { userId: req.params.userId },
+        create: { userId: req.params.userId, ...input },
+        update: input,
+        include: { site: { select: { name: true } } },
+      });
+
+      const existingPersonnel = await tx.mosquePersonnel.findFirst({ where: { userId: req.params.userId } });
+      if (input.role === 'personnel') {
+        const personnelData = {
+          siteId: input.siteId,
+          userId: req.params.userId,
+          name: user.username || user.email,
+          role: input.personnelRole,
+          email: user.email || null,
+          active: user.isActive !== false,
+        };
+        if (existingPersonnel) await tx.mosquePersonnel.update({ where: { id: existingPersonnel.id }, data: personnelData });
+        else await tx.mosquePersonnel.create({ data: personnelData });
+      } else if (existingPersonnel) {
+        await tx.mosquePersonnel.update({ where: { id: existingPersonnel.id }, data: { active: false } });
+      }
+      return saved;
     });
+
     res.json(assignment);
   } catch (error) { next(error); }
 });
