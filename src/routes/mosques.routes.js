@@ -996,6 +996,91 @@ router.post('/personnel', requireRoles('head', 'supervisor'), async (req, res, n
   } catch (error) { next(error); }
 });
 
+router.patch('/personnel/:id', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const current = await prisma.mosquePersonnel.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'منسوب المسجد غير موجود' });
+
+    const context = req.mosqueRole || await getModuleRole(req);
+    if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, current.siteId, context);
+
+    const allowedPersonnelRoles = ['imam', 'muezzin', 'khateeb', 'collaborating_khateeb'];
+    const siteId = String(req.body.siteId || current.siteId || '').trim();
+    const name = String(req.body.name ?? current.name ?? '').trim();
+    const personnelRole = String(req.body.role || current.role || 'imam').trim();
+    const mobile = nullableText(req.body.mobile);
+    const requestedEmail = nullableText(req.body.email);
+    const email = requestedEmail ? requestedEmail.toLowerCase() : null;
+    const active = req.body.active === undefined ? current.active : req.body.active !== false;
+
+    if (!siteId || name.length < 2) return res.status(400).json({ message: 'الموقع والاسم مطلوبان' });
+    if (!allowedPersonnelRoles.includes(personnelRole)) return res.status(400).json({ message: 'الصفة يجب أن تكون إمام أو مؤذن أو خطيب أو خطيب متعاون' });
+    if (context.role === 'supervisor' && siteId !== current.siteId) await assertSupervisorSiteAccess(req, siteId, context);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      let accountEmail = email;
+      if (current.userId) {
+        const user = await tx.appUser.findUnique({ where: { id: current.userId } });
+        if (user) {
+          if (user.role === 'admin') {
+            const error = new Error('لا يمكن تعديل حساب مسؤول النظام من سجل منسوبي المساجد');
+            error.statusCode = 409;
+            throw error;
+          }
+          accountEmail = email || user.email;
+          if (accountEmail !== user.email) {
+            const duplicate = await tx.appUser.findUnique({ where: { email: accountEmail } });
+            if (duplicate && duplicate.id !== user.id) {
+              const error = new Error('البريد الإلكتروني مستخدم في حساب آخر');
+              error.statusCode = 409;
+              throw error;
+            }
+          }
+          await tx.appUser.update({
+            where: { id: user.id },
+            data: { username: name, email: accountEmail },
+          });
+          await tx.mosqueUserAssignment.upsert({
+            where: { userId: user.id },
+            create: { userId: user.id, role: 'personnel', siteId, personnelRole },
+            update: { role: 'personnel', siteId, personnelRole },
+          });
+        }
+      }
+
+      return tx.mosquePersonnel.update({
+        where: { id: current.id },
+        data: { siteId, name, role: personnelRole, mobile, email: accountEmail, active },
+        include: { site: { select: { name: true } } },
+      });
+    });
+
+    res.json(updated);
+  } catch (error) { next(error); }
+});
+
+router.delete('/personnel/:id', requireRoles('head'), async (req, res, next) => {
+  try {
+    const current = await prisma.mosquePersonnel.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'منسوب المسجد غير موجود' });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.mosquePersonnel.delete({ where: { id: current.id } });
+      if (current.userId) {
+        const assignment = await tx.mosqueUserAssignment.findUnique({ where: { userId: current.userId } });
+        if (assignment?.role === 'personnel') {
+          await tx.mosqueUserAssignment.update({
+            where: { userId: current.userId },
+            data: { role: 'university_member', siteId: null, personnelRole: null },
+          });
+        }
+      }
+    });
+
+    res.json({ id: current.id, detachedUserId: current.userId || null });
+  } catch (error) { next(error); }
+});
+
 router.get('/staff-directory', requireRoles('head', 'supervisor'), async (_req, res, next) => {
   try {
     const [users, assignments] = await Promise.all([
