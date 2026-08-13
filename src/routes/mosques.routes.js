@@ -433,7 +433,7 @@ mosquesPublicRoutes.get('/jobs/track/:token', async (req, res, next) => {
 router.get('/me', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
-    res.json({ role: context.role, siteId: context.siteId, userId: req.authUser.id, isAdmin: req.authUser.role === 'admin' });
+    res.json({ role: context.role, siteId: context.siteId, personnelRole: context.assignment?.personnelRole || null, userId: req.authUser.id, isAdmin: req.authUser.role === 'admin' });
   } catch (error) { next(error); }
 });
 
