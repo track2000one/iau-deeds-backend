@@ -86,12 +86,39 @@ const createMosqueActivationData = () => {
 const buildMosqueActivationUrl = (plainToken) => `${MOSQUE_FRONTEND_URL}/#/activate-account?token=${encodeURIComponent(plainToken)}`;
 const normalizeMosqueRole = (role) => role === 'viewer' ? 'university_member' : role;
 
+const hasFullMosquePermission = (user) => {
+  const permission = user?.permissions?.find((item) => item.module === 'mosques');
+  return Boolean(
+    permission?.canView &&
+    permission?.canAdd &&
+    permission?.canEdit &&
+    permission?.canDelete &&
+    permission?.canPrint
+  );
+};
+
 const getModuleRole = async (req) => {
-  if (req.authUser?.role === 'admin') return { role: 'head', siteId: null, assignment: null };
+  if (req.authUser?.role === 'admin') {
+    return { role: 'head', siteId: null, assignment: null, fullPermissionAccess: true, accessSource: 'system_admin' };
+  }
+
   const assignment = await prisma.mosqueUserAssignment.findUnique({ where: { userId: req.authUser.id } });
+
+  // صلاحيات الوحدة الكاملة تمنح نطاق إدارة شامل داخل وحدة المساجد،
+  // مع إبقاء المنصب التشغيلي الرسمي منفصلًا عن الصلاحية.
+  if (hasFullMosquePermission(req.authUser)) {
+    return {
+      role: 'head',
+      siteId: null,
+      assignment,
+      fullPermissionAccess: true,
+      accessSource: 'module_permissions',
+    };
+  }
+
   return assignment
-    ? { role: normalizeMosqueRole(assignment.role), siteId: assignment.siteId || null, assignment }
-    : { role: 'university_member', siteId: null, assignment: null };
+    ? { role: normalizeMosqueRole(assignment.role), siteId: assignment.siteId || null, assignment, fullPermissionAccess: false, accessSource: 'assignment' }
+    : { role: 'university_member', siteId: null, assignment: null, fullPermissionAccess: false, accessSource: 'default' };
 };
 
 const getManagedSiteIds = async (req, context = null) => {
@@ -492,7 +519,7 @@ mosquesPublicRoutes.get('/jobs/track/:token', async (req, res, next) => {
 router.get('/me', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
-    res.json({ role: context.role, siteId: context.siteId, personnelRole: context.assignment?.personnelRole || null, userId: req.authUser.id, isAdmin: req.authUser.role === 'admin' });
+    res.json({ role: context.role, siteId: context.siteId, personnelRole: context.assignment?.personnelRole || null, userId: req.authUser.id, isAdmin: req.authUser.role === 'admin', fullPermissionAccess: Boolean(context.fullPermissionAccess), accessSource: context.accessSource || 'assignment' });
   } catch (error) { next(error); }
 });
 
