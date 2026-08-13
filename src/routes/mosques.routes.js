@@ -86,6 +86,60 @@ const createMosqueActivationData = () => {
 const buildMosqueActivationUrl = (plainToken) => `${MOSQUE_FRONTEND_URL}/#/activate-account?token=${encodeURIComponent(plainToken)}`;
 const normalizeMosqueRole = (role) => role === 'viewer' ? 'university_member' : role;
 const MOSQUE_PERSONNEL_ROLE_LABELS = { imam: 'إمام', muezzin: 'مؤذن', khateeb: 'خطيب', collaborating_khateeb: 'خطيب متعاون', collaborator: 'خطيب متعاون' };
+const MOSQUE_MODULE_ROLE_LABELS = { head: 'رئيس الوحدة', supervisor: 'مشرف الوحدة', personnel: 'منسوب المسجد أو المصلى', university_member: 'منسوب الجامعة', viewer: 'منسوب الجامعة' };
+
+const enrichMosqueApplicants = async (items, userField) => {
+  const userIds = [...new Set(items.map((item) => item?.[userField]).filter(Boolean))];
+  if (!userIds.length) return items.map((item) => ({ ...item, applicant: null }));
+
+  const [personnelRows, userRows, assignmentRows] = await Promise.all([
+    prisma.mosquePersonnel.findMany({
+      where: { userId: { in: userIds } },
+      select: { userId: true, name: true, role: true, mobile: true, email: true, active: true },
+    }),
+    prisma.appUser.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, username: true, email: true, role: true },
+    }),
+    prisma.mosqueUserAssignment.findMany({
+      where: { userId: { in: userIds } },
+      select: { userId: true, role: true, personnelRole: true },
+    }),
+  ]);
+
+  const personnelByUser = new Map(personnelRows.filter((row) => row.userId).map((row) => [row.userId, row]));
+  const userById = new Map(userRows.map((row) => [row.id, row]));
+  const assignmentByUser = new Map(assignmentRows.map((row) => [row.userId, row]));
+
+  return items.map((item) => {
+    const userId = item?.[userField];
+    if (!userId) return { ...item, applicant: null };
+    const personnel = personnelByUser.get(userId);
+    const user = userById.get(userId);
+    const assignment = assignmentByUser.get(userId);
+    const moduleRole = user?.role === 'admin' ? 'head' : normalizeMosqueRole(assignment?.role || 'university_member');
+    const personnelRole = personnel?.role || assignment?.personnelRole || null;
+    const roleLabel = personnelRole
+      ? (MOSQUE_PERSONNEL_ROLE_LABELS[personnelRole] || personnelRole)
+      : user?.role === 'admin'
+        ? 'مسؤول النظام'
+        : (MOSQUE_MODULE_ROLE_LABELS[moduleRole] || 'مستخدم');
+
+    return {
+      ...item,
+      applicant: {
+        userId,
+        name: personnel?.name || user?.username || 'مستخدم',
+        email: personnel?.email || user?.email || null,
+        mobile: personnel?.mobile || null,
+        role: personnelRole,
+        roleLabel,
+        moduleRole,
+        active: personnel?.active ?? true,
+      },
+    };
+  });
+};
 
 const hasFullMosquePermission = (user) => {
   const permission = user?.permissions?.find((item) => item.module === 'mosques');
@@ -695,7 +749,7 @@ router.get('/requests', async (req, res, next) => {
       where = { siteId: context.siteId, submittedBy: req.authUser.id };
     } else return res.status(403).json({ message: 'طلبات الصيانة والاحتياجات الداخلية متاحة لمنسوبي الوحدة والمساجد فقط' });
     const items = await prisma.mosqueRequest.findMany({ where, include: { site: { select: { name: true, siteType: true } } }, orderBy: { createdAt: 'desc' } });
-    res.json(items);
+    res.json(await enrichMosqueApplicants(items, 'submittedBy'));
   } catch (error) { next(error); }
 });
 
@@ -794,7 +848,8 @@ router.get('/leaves', async (req, res, next) => {
     } else if (context.role === 'personnel' && context.siteId) {
       where = { siteId: context.siteId, applicantUserId: req.authUser.id };
     } else return res.status(403).json({ message: 'طلبات الإجازة والاعتذار متاحة لمنسوبي المساجد والمخولين فقط' });
-    res.json(await prisma.mosqueLeave.findMany({ where, include: { site: { select: { name: true } }, personnel: true }, orderBy: { createdAt: 'desc' } }));
+    const items = await prisma.mosqueLeave.findMany({ where, include: { site: { select: { name: true } }, personnel: true }, orderBy: { createdAt: 'desc' } });
+    res.json(await enrichMosqueApplicants(items, 'applicantUserId'));
   } catch (error) { next(error); }
 });
 
@@ -808,7 +863,13 @@ router.post('/leaves', requireRoles('personnel'), async (req, res, next) => {
     }
     const overlap = await prisma.mosqueLeave.findFirst({ where: { siteId: input.siteId, replacementName: input.replacementName, status: { in: ['pending', 'under_review', 'approved'] }, startDate: { lte: input.endDate }, endDate: { gte: input.startDate } } });
     if (overlap) return res.status(409).json({ message: 'البديل المختار مرتبط بطلب آخر يتعارض مع هذه الفترة' });
-    const leave = await prisma.mosqueLeave.create({ data: { ...input, leaveNumber: trackingNumber('LEV'), applicantUserId: req.authUser.id } });
+    const applicantPersonnel = await prisma.mosquePersonnel.findFirst({
+      where: { userId: req.authUser.id, siteId: input.siteId, active: true },
+      select: { id: true },
+    });
+    const leave = await prisma.mosqueLeave.create({
+      data: { ...input, personnelId: applicantPersonnel?.id || null, leaveNumber: trackingNumber('LEV'), applicantUserId: req.authUser.id },
+    });
     const leaveSite = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { name: true } });
     await Promise.all([
       notify({ roleTarget: 'supervisor', siteId: input.siteId, title: 'طلب إجازة/اعتذار جديد', message: `تم استلام ${leave.leaveNumber}${leaveSite?.name ? ` - ${leaveSite.name}` : ''}`, entityType: 'leave', entityId: leave.id }),
