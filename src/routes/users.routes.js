@@ -49,6 +49,7 @@ const permissionSchema = z.object({
   canEdit: z.boolean().default(false),
   canDelete: z.boolean().default(false),
   canPrint: z.boolean().default(false),
+  canCreateUser: z.boolean().default(false),
 });
 
 const permissionsSchema = z.record(z.string(), permissionSchema).default({});
@@ -81,11 +82,13 @@ const normalizePermissionRows = (permissions = {}) =>
       Boolean(value.canAdd) ||
       Boolean(value.canEdit) ||
       Boolean(value.canDelete) ||
-      Boolean(value.canPrint),
+      Boolean(value.canPrint) ||
+      Boolean(value.canCreateUser),
     canAdd: Boolean(value.canAdd),
     canEdit: Boolean(value.canEdit),
     canDelete: Boolean(value.canDelete),
     canPrint: Boolean(value.canPrint),
+    canCreateUser: Boolean(value.canCreateUser),
   }));
 
 const countOtherActiveAdmins = async (userId) =>

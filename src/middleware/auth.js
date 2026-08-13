@@ -79,7 +79,14 @@ const findPermission = (user, moduleName) =>
 export const requirePermission = (moduleName) => (req, res, next) => {
   if (req.authUser?.role === 'admin') return next();
 
-  const action = actionByMethod[req.method.toUpperCase()];
+  const method = req.method.toUpperCase();
+  const requestPath = String(req.path || req.originalUrl || '');
+  const action =
+    moduleName === 'mosques' &&
+    method === 'POST' &&
+    /\/personnel\/account\/?(?:\?|$)/.test(requestPath)
+      ? 'canCreateUser'
+      : actionByMethod[method];
   const permission = findPermission(req.authUser, moduleName);
 
   if (!action || !permission?.[action]) {
