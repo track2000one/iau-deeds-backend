@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { uploadBufferToGoogleDrive } from '../services/googleDrive.js';
 import { hashPassword } from '../security/auth.js';
-import { sendAccountActivationEmail } from '../services/email.service.js';
+import { sendMosquePersonnelActivationEmail } from '../services/email.service.js';
 
 const router = Router();
 export const mosquesPublicRoutes = Router();
@@ -85,6 +85,7 @@ const createMosqueActivationData = () => {
 };
 const buildMosqueActivationUrl = (plainToken) => `${MOSQUE_FRONTEND_URL}/#/activate-account?token=${encodeURIComponent(plainToken)}`;
 const normalizeMosqueRole = (role) => role === 'viewer' ? 'university_member' : role;
+const MOSQUE_PERSONNEL_ROLE_LABELS = { imam: 'إمام', muezzin: 'مؤذن', khateeb: 'خطيب', collaborating_khateeb: 'خطيب متعاون', collaborator: 'خطيب متعاون' };
 
 const hasFullMosquePermission = (user) => {
   const permission = user?.permissions?.find((item) => item.module === 'mosques');
@@ -929,22 +930,30 @@ router.post('/personnel/account', requireRoles('head', 'supervisor'), async (req
       return { assignment, personnel };
     });
 
-    if (accountCreated) {
-      try {
-        await sendAccountActivationEmail({
-          to: user.email,
-          username: user.username,
-          initialPassword: temporaryPassword,
-          activationUrl: buildMosqueActivationUrl(activation.plainToken),
-          expiresInHours: MOSQUE_ACTIVATION_TOKEN_HOURS,
-          includePassword: true,
-        });
-      } catch (emailError) {
+    const personnelRoleLabel = MOSQUE_PERSONNEL_ROLE_LABELS[input.role] || input.role;
+    const personnelSiteName = result.personnel?.site?.name || 'الموقع المرتبط';
+    const personnelLoginUrl = `${MOSQUE_FRONTEND_URL}/#/login`;
+
+    try {
+      await sendMosquePersonnelActivationEmail({
+        to: user.email,
+        username: user.username,
+        personnelRoleLabel,
+        siteName: personnelSiteName,
+        initialPassword: temporaryPassword,
+        activationUrl: accountCreated ? buildMosqueActivationUrl(activation.plainToken) : personnelLoginUrl,
+        loginUrl: personnelLoginUrl,
+        expiresInHours: MOSQUE_ACTIVATION_TOKEN_HOURS,
+        includePassword: accountCreated,
+      });
+    } catch (emailError) {
+      // الحساب الجديد لا يعتبر مكتمل الإنشاء دون نجاح إشعار التفعيل بالبريد.
+      if (accountCreated) {
         await prisma.mosquePersonnel.deleteMany({ where: { userId: user.id } });
         await prisma.mosqueUserAssignment.deleteMany({ where: { userId: user.id } });
         await prisma.appUser.delete({ where: { id: user.id } });
-        throw emailError;
       }
+      throw emailError;
     }
 
     res.status(accountCreated ? 201 : 200).json({
@@ -952,8 +961,8 @@ router.post('/personnel/account', requireRoles('head', 'supervisor'), async (req
       user: { uid: user.id, username: user.username, email: user.email, isActive: user.isActive },
       accountCreated,
       message: accountCreated
-        ? 'تم إنشاء حساب منسوب المسجد وربطه بالموقع وإرسال رابط التفعيل إلى بريده الإلكتروني.'
-        : 'تم ربط الحساب الموجود بالمسجد والصفة التشغيلية.',
+        ? 'تم إنشاء حساب منسوب المسجد وربطه بالموقع وإرسال رابط التفعيل وبيانات الدخول إلى بريده الإلكتروني.'
+        : 'تم ربط الحساب الموجود بالمسجد والصفة التشغيلية وإرسال إشعار الدخول إلى بريده الإلكتروني.',
     });
   } catch (error) {
     if (createdUserId) {
