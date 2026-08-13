@@ -16,125 +16,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-
       - name: Apply backend changes
-        shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('src/routes/mosques.routes.js')
-          text = path.read_text(encoding='utf-8')
-          anchor = '''router.get('/staff-directory', requireRoles('head', 'supervisor'), async (_req, res, next) => {'''
-          if text.count(anchor) != 1:
-              raise SystemExit(f'expected one staff-directory anchor, found {text.count(anchor)}')
-
-          block = r'''router.patch('/personnel/:id', requireRoles('head', 'supervisor'), async (req, res, next) => {
-  try {
-    const current = await prisma.mosquePersonnel.findUnique({ where: { id: req.params.id } });
-    if (!current) return res.status(404).json({ message: 'منسوب المسجد غير موجود' });
-
-    const context = req.mosqueRole || await getModuleRole(req);
-    if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, current.siteId, context);
-
-    const allowedPersonnelRoles = ['imam', 'muezzin', 'khateeb', 'collaborating_khateeb'];
-    const siteId = String(req.body.siteId || current.siteId || '').trim();
-    const name = String(req.body.name ?? current.name ?? '').trim();
-    const personnelRole = String(req.body.role || current.role || 'imam').trim();
-    const mobile = nullableText(req.body.mobile);
-    const requestedEmail = nullableText(req.body.email);
-    const email = requestedEmail ? requestedEmail.toLowerCase() : null;
-    const active = req.body.active === undefined ? current.active : req.body.active !== false;
-
-    if (!siteId || name.length < 2) return res.status(400).json({ message: 'الموقع والاسم مطلوبان' });
-    if (!allowedPersonnelRoles.includes(personnelRole)) return res.status(400).json({ message: 'الصفة يجب أن تكون إمام أو مؤذن أو خطيب أو خطيب متعاون' });
-    if (context.role === 'supervisor' && siteId !== current.siteId) await assertSupervisorSiteAccess(req, siteId, context);
-
-    const updated = await prisma.$transaction(async (tx) => {
-      let accountEmail = email;
-      if (current.userId) {
-        const user = await tx.appUser.findUnique({ where: { id: current.userId } });
-        if (user) {
-          if (user.role === 'admin') {
-            const error = new Error('لا يمكن تعديل حساب مسؤول النظام من سجل منسوبي المساجد');
-            error.statusCode = 409;
-            throw error;
-          }
-          accountEmail = email || user.email;
-          if (accountEmail !== user.email) {
-            const duplicate = await tx.appUser.findUnique({ where: { email: accountEmail } });
-            if (duplicate && duplicate.id !== user.id) {
-              const error = new Error('البريد الإلكتروني مستخدم في حساب آخر');
-              error.statusCode = 409;
-              throw error;
-            }
-          }
-          await tx.appUser.update({
-            where: { id: user.id },
-            data: { username: name, email: accountEmail },
-          });
-          await tx.mosqueUserAssignment.upsert({
-            where: { userId: user.id },
-            create: { userId: user.id, role: 'personnel', siteId, personnelRole },
-            update: { role: 'personnel', siteId, personnelRole },
-          });
-        }
-      }
-
-      return tx.mosquePersonnel.update({
-        where: { id: current.id },
-        data: { siteId, name, role: personnelRole, mobile, email: accountEmail, active },
-        include: { site: { select: { name: true } } },
-      });
-    });
-
-    res.json(updated);
-  } catch (error) { next(error); }
-});
-
-router.delete('/personnel/:id', requireRoles('head'), async (req, res, next) => {
-  try {
-    const current = await prisma.mosquePersonnel.findUnique({ where: { id: req.params.id } });
-    if (!current) return res.status(404).json({ message: 'منسوب المسجد غير موجود' });
-
-    await prisma.$transaction(async (tx) => {
-      await tx.mosquePersonnel.delete({ where: { id: current.id } });
-      if (current.userId) {
-        const assignment = await tx.mosqueUserAssignment.findUnique({ where: { userId: current.userId } });
-        if (assignment?.role === 'personnel') {
-          await tx.mosqueUserAssignment.update({
-            where: { userId: current.userId },
-            data: { role: 'university_member', siteId: null, personnelRole: null },
-          });
-        }
-      }
-    });
-
-    res.json({ id: current.id, detachedUserId: current.userId || null });
-  } catch (error) { next(error); }
-});
-
-'''
-
-          path.write_text(text.replace(anchor, block + anchor, 1), encoding='utf-8')
-          PY
-
+          echo 'H4sIADmTfWoC/+VY3U7cRhS+36eYoCr2qhuTVLlol25RFOWiUitFpVxVFZq1Z9lp7PFmZhwgZC9SCEI8RpuKFNFShKo2fRL7bXrOjP9mMQR625UQnr8z35zvfOeMPZFpQmZUT2M+JjyZpVKTp9Ds9bCTjEzD95QMl2WaaaaWk1Q9z5gKbDP4QXn9nmbbGubikkAyGm1gh89EmEZcbI68TE/ufQrzqAinqYSZS0tLZr0MNpn2vWWl6WRyL+KShTqVO96ASPY8g+Y3acyU703BKHR6Kpsx+YKrVHr9AaFqR4TE34C5uEANiIB9+2T0BdmFHXp8QhBIEKaZ0L7dvE/ujMiDYY/AT1KuGFnbUZolT7a59ice254BBBaRVDCygIpYCwMyAXsR2b1sew5n7I3jNHwGZ5TNIcExIXhxGcCrVAgWLw95dLtDdp0RDqEB1q45TJgKpUmYSckEkkG3KNdkJrlKaGBJe1ptH0y4iNYFhz5/l2xNmWRDskt4NERIAFfSRAU8InMy768Y8+BL/05pvQ+zdCYF4gnASTpT/sP7D/sQDKkAgwlTim6CSa94UxzkF8Vh/o7kx8V+8Sa/yE/zM5L/Uxzl5wSGD/NT+DvzzEbtg6SijCpEZPGjn8irV+XRIHK+TqMsNt3onxbScjUEKawYjUauU0sDVCkm9Vo9sMY1exSGAN56uzxtoKD/y2hQQXJx0jhOt1hUu9ZwCai/83hCE6QzydjLl1zg47Mp1YyN8TFM45iOU0k1KGSjGvh+pWXa7gu21rSESQgqGKfRTgkIPeFCxB7P6wcwPfH7bVOCJqzDkOleXa3NVO1uI7P2GTusyZKeylrVtp7ospikY25MiQy9EbNvMW/UBu2wswIVw0Cv0ZOE8vjKlQxHnYWsnL9gYHWhI9DpV8CnfEwV8/tkaOy37dBQ8xesDEuzV9UDUQZpgYG0IH00Pi2Hh5cW3IEFExorVsaTUVhDJHIRxExsQhr+nHzSrbn7HZqzQisOix/z9wS0Bc38GET4BuSW/wVjoEboPPBcbXcGcsBFGGcRZCeH/P7t0OR/Fq/zXwlI/hQTwc/FAclPij2ACA+/AKpjAAfdh4jwbf4HdmMr/x3wHtklrRZMOsnfw6LDxUNcK3ty924lKXS9K52b5oRrc0E2iyjWjoXk+5GWVChkHXxTpnO9Xadw/MUMI8vUkiqwTcCulOPmcCXgDBAi4GptvTv011vr7YDOZuvQdU2udy22kn21JQ60N2p6Wy6mUQLZzZ1Wq05KU+8F2yJP8Nn3MBohFCBC90wcAJNn0Nwn+W9QHI4tvxf5W2B33xaNg/xvEyFYTAgWEBhoCktx1JSWYywuXusQ+DMYyiB9nEao3Yf3P3Pn6KlMt+zM9sC89dxFD+rUeMMhq/KTswJDrpna7a0om8U8hBC6OY3G2tAF5/JYoWmMgw7qBhb5GhqPFnFdw6MR9rv8HCR5ZhgAJe8Xe0DoOQoTaDGUnIBsz5C810hURXH+E3SfLzJ1M66uZMvly+Fu0ZlWqb57WEcbpUPIfODMgWUUp+AwZuihydODbh7aS11KakD2YoOYHinFN0Vi9DjDJHQVOqvWKxGGcAHXXRPh+giahZRcp3KvyWdubV8wab2FJv+bhfbZK1rmvfKhLCS1L5pL6iWSOpOX64GKnwqVZcfCdhAOystHJ3WDqsy3LJeVsDJu/rMY3gzwyYaClhlD9TXLqpPXl1tpXpmgDpS1wozPSYgvCMQ3Id1He+b9ybRWwFVmefkuEcGm4JUbvUz8H18fblt6F6TYHLJ09O7VYdcK7JsUaForvJ3fOzNAt4MrQX+wbjc7rbYKdaNaN81/KBldlyqvgtSdNcv0kQnQlgQV7WwkLBkzWacRe99eSCa28yYppVtqi8QNSMQ0DacsWu9Gj7dvs+Mt1InfG8w3k2BLwlHsFxB7GWWzmIbMr74e2O8DH9dfEx6ASi9/KvkXeIw3TpkRAAA=' | base64 -d | gzip -d > /tmp/patch_personnel.py
+          python3 /tmp/patch_personnel.py
       - name: Install dependencies
         run: npm ci
-
       - name: Generate Prisma client
         run: npx prisma generate
-
       - name: Syntax verification
         run: node --check src/routes/mosques.routes.js
-
       - name: Commit verified changes
-        shell: bash
         run: |
           rm -f .github/workflows/apply-personnel-admin-actions.yml
           git config user.name "OpenAI Project Automation"
