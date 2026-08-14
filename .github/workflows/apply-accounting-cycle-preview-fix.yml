@@ -1,0 +1,33 @@
+name: Apply accounting cycle preview fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-accounting-cycle-preview-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply preview patch
+        run: python scripts/fix-accounting-cycle-preview.py
+      - name: Verify backend
+        run: |
+          npm ci
+          npx prisma generate
+          find src -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Commit fix
+        run: |
+          git config user.name 'OpenAI Project Automation'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/routes/accounting-cycles.routes.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: keep accounting cycle comparison stable after import'
+          git push origin main
