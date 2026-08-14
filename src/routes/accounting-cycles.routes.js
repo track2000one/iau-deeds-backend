@@ -206,16 +206,24 @@ router.post('/:id/import-preview', async (req, res, next) => {
       // calculating removed records, even if that row was imported in an earlier batch.
       fileKeys.add(stableKey);
 
-      if (seen.has(stableKey) || targetKeys.has(stableKey)) {
+      if (seen.has(stableKey)) {
         duplicateIndexes.push(index);
         return;
       }
       seen.add(stableKey);
-      freshIndexes.push(index);
+
+      // Change classification describes the complete uploaded version and must
+      // remain stable even after one or more batches have already been saved.
       const previous = baseByKey.get(stableKey);
       if (!previous) newIndexes.push(index);
       else if (previous.sourceFingerprint === fingerprint) unchangedIndexes.push(index);
       else modifiedIndexes.push(index);
+
+      if (targetKeys.has(stableKey)) {
+        duplicateIndexes.push(index);
+        return;
+      }
+      freshIndexes.push(index);
     });
 
     const removed = baseRecords.filter((item) => item.stableKey && !fileKeys.has(item.stableKey)).length;
