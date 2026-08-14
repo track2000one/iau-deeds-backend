@@ -11,6 +11,10 @@ import {
   hasAccountingValue,
   inferAccountingOwnershipMode,
 } from '../config/accountingTransformation.js';
+import {
+  createAccountingStableKey,
+  ensureAccountingTransformationBaseline,
+} from '../services/accountingCycles.service.js';
 
 const router = Router();
 
@@ -53,7 +57,7 @@ const recordInputSchema = z.object({
 });
 
 const bulkImportSchema = z.object({
-  items: z.array(recordInputSchema).min(1).max(1500),
+  items: z.array(recordInputSchema).min(1).max(10000),
 });
 
 const normalizedText = (value) => String(value ?? '').trim();
@@ -124,6 +128,13 @@ const queryWhere = (req) => {
   const committeeStatus = normalizedText(req.query.committeeStatus);
   const readinessStatus = normalizedText(req.query.readinessStatus);
   const groupKey = normalizedText(req.query.group);
+  const cycleId = normalizedText(req.query.cycleId);
+  const includeHistory = String(req.query.includeHistory || '') === '1';
+  const cycleWhere = includeHistory
+    ? {}
+    : cycleId
+      ? { cycleId }
+      : { cycle: { isCurrent: true } };
 
   const groupWhere = groupKey && groupKey !== 'all'
     ? groupKey === 'type:land'
@@ -139,6 +150,7 @@ const queryWhere = (req) => {
     : {};
 
   const baseFilters = {
+    ...cycleWhere,
     ...(recordType && recordType !== 'all' ? { recordType } : {}),
     ...(committeeStatus && committeeStatus !== 'all' ? { committeeStatus } : {}),
     ...(readinessStatus && readinessStatus !== 'all' ? { readinessStatus } : {}),
@@ -205,8 +217,10 @@ router.get('/groups', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.get('/stats', async (_req, res, next) => {
+router.get('/stats', async (req, res, next) => {
   try {
+    const cycleId = normalizedText(req.query.cycleId);
+    const cycleWhere = cycleId ? { cycleId } : { cycle: { isCurrent: true } };
     const [
       total,
       lands,
@@ -218,15 +232,16 @@ router.get('/stats', async (_req, res, next) => {
       underReview,
       averages,
     ] = await Promise.all([
-      prisma.accountingTransformationRecord.count(),
-      prisma.accountingTransformationRecord.count({ where: { recordType: 'land' } }),
-      prisma.accountingTransformationRecord.count({ where: { recordType: 'building' } }),
-      prisma.accountingTransformationRecord.count({ where: { censusProgress: 100 } }),
-      prisma.accountingTransformationRecord.count({ where: { inventoryProgress: 100 } }),
-      prisma.accountingTransformationRecord.count({ where: { valuationProgress: 100 } }),
-      prisma.accountingTransformationRecord.count({ where: { overallProgress: { lt: 100 } } }),
-      prisma.accountingTransformationRecord.count({ where: { committeeStatus: 'under_review' } }),
+      prisma.accountingTransformationRecord.count({ where: cycleWhere }),
+      prisma.accountingTransformationRecord.count({ where: { ...cycleWhere, recordType: 'land' } }),
+      prisma.accountingTransformationRecord.count({ where: { ...cycleWhere, recordType: 'building' } }),
+      prisma.accountingTransformationRecord.count({ where: { ...cycleWhere, censusProgress: 100 } }),
+      prisma.accountingTransformationRecord.count({ where: { ...cycleWhere, inventoryProgress: 100 } }),
+      prisma.accountingTransformationRecord.count({ where: { ...cycleWhere, valuationProgress: 100 } }),
+      prisma.accountingTransformationRecord.count({ where: { ...cycleWhere, overallProgress: { lt: 100 } } }),
+      prisma.accountingTransformationRecord.count({ where: { ...cycleWhere, committeeStatus: 'under_review' } }),
       prisma.accountingTransformationRecord.aggregate({
+        where: cycleWhere,
         _avg: {
           censusProgress: true,
           inventoryProgress: true,
@@ -338,6 +353,7 @@ router.post('/bulk-preview', async (req, res, next) => {
 router.post('/bulk-import', async (req, res, next) => {
   try {
     const input = bulkImportSchema.parse(req.body);
+    const currentCycle = await ensureAccountingTransformationBaseline();
     const baseNumber = await nextRecordNumber(0);
     const baseSequence = Number(baseNumber.split('-').pop()) || 1;
     const year = new Date().getFullYear();
@@ -354,10 +370,13 @@ router.post('/bulk-import', async (req, res, next) => {
       }
 
       const sourceFingerprint = createFingerprint(item.recordType, payload);
-      const existing = await prisma.accountingTransformationRecord.findUnique({
-        where: { sourceFingerprint },
+      const stableKey = createAccountingStableKey(item.recordType, payload);
+      const existing = await prisma.accountingTransformationRecord.findFirst({
+        where: { cycleId: currentCycle.id, sourceFingerprint },
       });
-      const data = buildRecordData(item, req.authUser, { sourceFingerprint });
+      const data = buildRecordData(item, req.authUser, {
+        cycleId: currentCycle.id, sourceFingerprint, stableKey, changeType: 'manual',
+      });
 
       if (existing) {
         skipped += 1;
@@ -434,6 +453,9 @@ router.get('/:id', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const input = recordInputSchema.parse(req.body);
+    const currentCycle = await ensureAccountingTransformationBaseline();
+    const sourceFingerprint = createFingerprint(input.recordType, input.payload || {});
+    const stableKey = createAccountingStableKey(input.recordType, input.payload || {});
     let record = null;
 
     for (let attempt = 0; attempt < 5 && !record; attempt += 1) {
@@ -441,7 +463,9 @@ router.post('/', async (req, res, next) => {
       try {
         record = await prisma.accountingTransformationRecord.create({
           data: {
-            ...buildRecordData(input, req.authUser),
+            ...buildRecordData(input, req.authUser, {
+              cycleId: currentCycle.id, sourceFingerprint, stableKey, changeType: 'manual',
+            }),
             recordNumber,
             createdBy: req.authUser?.email || req.authUser?.username || null,
           },
@@ -463,13 +487,20 @@ router.put('/:id', async (req, res, next) => {
     const input = recordInputSchema.parse(req.body);
     const current = await prisma.accountingTransformationRecord.findUnique({
       where: { id: req.params.id },
-      select: { id: true },
+      include: { cycle: true },
     });
     if (!current) return res.status(404).json({ message: 'سجل التحول المحاسبي غير موجود' });
+    if (current.cycle && current.cycle.status === 'archived') {
+      return res.status(409).json({ message: 'الدورات المؤرشفة للعرض التاريخي فقط ولا يمكن تعديل بياناتها' });
+    }
+    const sourceFingerprint = createFingerprint(input.recordType, input.payload || {});
+    const stableKey = createAccountingStableKey(input.recordType, input.payload || {});
 
     const record = await prisma.accountingTransformationRecord.update({
       where: { id: req.params.id },
-      data: buildRecordData(input, req.authUser),
+      data: buildRecordData(input, req.authUser, {
+        cycleId: current.cycleId, sourceFingerprint, stableKey, changeType: current.changeType || 'manual',
+      }),
     });
     res.json(record);
   } catch (error) {
@@ -479,6 +510,13 @@ router.put('/:id', async (req, res, next) => {
 
 router.delete('/:id', async (req, res, next) => {
   try {
+    const current = await prisma.accountingTransformationRecord.findUnique({
+      where: { id: req.params.id }, include: { cycle: true },
+    });
+    if (!current) return res.status(404).json({ message: 'سجل التحول المحاسبي غير موجود' });
+    if (current.cycle && current.cycle.status === 'archived') {
+      return res.status(409).json({ message: 'الدورات المؤرشفة محفوظة كسجل تاريخي ولا يمكن حذف بياناتها' });
+    }
     await prisma.accountingTransformationRecord.delete({ where: { id: req.params.id } });
     res.status(204).send();
   } catch (error) {

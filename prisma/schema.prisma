@@ -74,13 +74,13 @@ model PasswordResetToken {
 }
 
 model UserPermission {
-  id        String  @id @default(cuid())
-  userId    String
-  module    String
-  canView   Boolean @default(false)
-  canAdd    Boolean @default(false)
-  canEdit   Boolean @default(false)
-  canDelete Boolean @default(false)
+  id            String  @id @default(cuid())
+  userId        String
+  module        String
+  canView       Boolean @default(false)
+  canAdd        Boolean @default(false)
+  canEdit       Boolean @default(false)
+  canDelete     Boolean @default(false)
   canPrint      Boolean @default(false)
   canCreateUser Boolean @default(false)
 
@@ -786,9 +786,41 @@ model MosqueNotification {
 // ============================================================
 // Accounting Transformation Requirements Follow-up Committee
 // ============================================================
+model AccountingTransformationCycle {
+  id             String    @id @default(cuid())
+  cycleNumber    Int       @unique
+  name           String
+  description    String?
+  status         String    @default("draft")
+  isCurrent      Boolean   @default(false)
+  basedOnCycleId String?
+  sourceFileName String?
+  importedAt     DateTime?
+  importedBy     String?
+  reviewedAt     DateTime?
+  reviewedBy     String?
+  approvedAt     DateTime?
+  approvedBy     String?
+  archivedAt     DateTime?
+  createdBy      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  records AccountingTransformationRecord[]
+
+  @@index([status])
+  @@index([isCurrent])
+  @@index([cycleNumber])
+  @@index([createdAt])
+}
+
 model AccountingTransformationRecord {
   id                  String   @id @default(cuid())
   recordNumber        String   @unique
+  cycleId             String?
+  stableKey           String?
+  changeType          String   @default("manual")
+  previousRecordId    String?
   recordType          String
   ownershipMode       String   @default("owned")
   committeeStatus     String   @default("not_reviewed")
@@ -808,7 +840,7 @@ model AccountingTransformationRecord {
   valuationProgress   Int      @default(0)
   overallProgress     Int      @default(0)
   readinessStatus     String   @default("needs_data")
-  sourceFingerprint   String?  @unique
+  sourceFingerprint   String?
   payload             Json
   attachments         Json?
   notes               String?
@@ -817,6 +849,12 @@ model AccountingTransformationRecord {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
+  cycle AccountingTransformationCycle? @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+
+  @@unique([cycleId, sourceFingerprint])
+  @@index([cycleId])
+  @@index([stableKey])
+  @@index([changeType])
   @@index([recordType])
   @@index([committeeStatus])
   @@index([readinessStatus])

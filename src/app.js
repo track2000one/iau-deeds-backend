@@ -18,6 +18,7 @@ import assetsFastRoutes from './routes/assets-fast.routes.js';
 import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';
 import mosquesRoutes, { mosquesPublicRoutes } from './routes/mosques.routes.js';
 import accountingTransformationRoutes from './routes/accounting-transformation.routes.js';
+import accountingCyclesRoutes from './routes/accounting-cycles.routes.js';
 import {
   requireAdmin,
   requireAuth,
@@ -134,6 +135,14 @@ app.use(
   auditTrail('mosques'),
   requirePermission('mosques'),
   mosquesRoutes
+);
+
+app.use(
+  '/api/accounting-transformation/cycles',
+  requireAuth,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingCyclesRoutes
 );
 
 app.use(
