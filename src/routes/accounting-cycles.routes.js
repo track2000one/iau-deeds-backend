@@ -8,7 +8,6 @@ import {
   createAccountingStableKey,
   ensureAccountingTransformationBaseline,
   getAccountingCycleComparison,
-  getCurrentAccountingCycle,
   nextAccountingRecordNumber,
 } from '../services/accountingCycles.service.js';
 import { hasAccountingValue } from '../config/accountingTransformation.js';
@@ -65,9 +64,14 @@ const getCycleOr404 = async (req, res) => {
   return cycle;
 };
 
-const assertWritableCycle = (cycle, res) => {
-  if (!['draft', 'under_review'].includes(cycle.status) || cycle.isCurrent) {
-    res.status(409).json({ message: 'لا يمكن تعديل هذه الدورة بعد اعتمادها أو أرشفتها' });
+const assertDraftCycle = (cycle, res) => {
+  if (cycle.status !== 'draft' || cycle.isCurrent) {
+    res.status(409).json({
+      message:
+        cycle.status === 'under_review'
+          ? 'الدورة تحت المراجعة ومجمّدة. أعدها إلى المسودة قبل تعديل بياناتها.'
+          : 'لا يمكن تعديل هذه الدورة بعد اعتمادها أو أرشفتها',
+    });
     return false;
   }
   return true;
@@ -166,7 +170,7 @@ router.post('/:id/import-preview', async (req, res, next) => {
   try {
     const input = importSchema.parse(req.body);
     const cycle = await getCycleOr404(req, res);
-    if (!cycle || !assertWritableCycle(cycle, res)) return;
+    if (!cycle || !assertDraftCycle(cycle, res)) return;
 
     const baseRecords = cycle.basedOnCycleId
       ? await prisma.accountingTransformationRecord.findMany({
@@ -197,12 +201,16 @@ router.post('/:id/import-preview', async (req, res, next) => {
       }
       const stableKey = createAccountingStableKey(item.recordType, item.payload || {});
       const fingerprint = createAccountingFingerprint(item.recordType, item.payload || {});
+
+      // A key present anywhere in the uploaded file must count as present when
+      // calculating removed records, even if that row was imported in an earlier batch.
+      fileKeys.add(stableKey);
+
       if (seen.has(stableKey) || targetKeys.has(stableKey)) {
         duplicateIndexes.push(index);
         return;
       }
       seen.add(stableKey);
-      fileKeys.add(stableKey);
       freshIndexes.push(index);
       const previous = baseByKey.get(stableKey);
       if (!previous) newIndexes.push(index);
@@ -237,7 +245,7 @@ router.post('/:id/import', async (req, res, next) => {
   try {
     const input = importSchema.parse(req.body);
     const cycle = await getCycleOr404(req, res);
-    if (!cycle || !assertWritableCycle(cycle, res)) return;
+    if (!cycle || !assertDraftCycle(cycle, res)) return;
 
     const baseRecords = cycle.basedOnCycleId
       ? await prisma.accountingTransformationRecord.findMany({
@@ -339,7 +347,7 @@ router.post('/:id/review', async (req, res, next) => {
   try {
     if (!canEditCycles(req)) return res.status(403).json({ message: 'اعتماد مرحلة المراجعة يتطلب صلاحية التعديل' });
     const cycle = await getCycleOr404(req, res);
-    if (!cycle || !assertWritableCycle(cycle, res)) return;
+    if (!cycle || !assertDraftCycle(cycle, res)) return;
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن إرسال دورة فارغة للمراجعة' });
 
     const updated = await prisma.accountingTransformationCycle.update({
@@ -374,7 +382,9 @@ router.post('/:id/approve', async (req, res, next) => {
     if (!canEditCycles(req)) return res.status(403).json({ message: 'اعتماد دورة التحديث يتطلب صلاحية التعديل' });
     const cycle = await getCycleOr404(req, res);
     if (!cycle) return;
-    if (!['draft', 'under_review'].includes(cycle.status) || cycle.isCurrent) return res.status(409).json({ message: 'هذه الدورة غير متاحة للاعتماد' });
+    if (cycle.status !== 'under_review' || cycle.isCurrent) {
+      return res.status(409).json({ message: 'يجب إرسال الدورة للمراجعة قبل اعتمادها' });
+    }
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن اعتماد دورة لا تحتوي على بيانات' });
 
     const comparison = await getAccountingCycleComparison(cycle);
