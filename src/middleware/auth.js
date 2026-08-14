@@ -81,12 +81,26 @@ export const requirePermission = (moduleName) => (req, res, next) => {
 
   const method = req.method.toUpperCase();
   const requestPath = String(req.path || req.originalUrl || '');
-  const action =
+  let action = actionByMethod[method];
+
+  if (
     moduleName === 'mosques' &&
     method === 'POST' &&
     /\/personnel\/account\/?(?:\?|$)/.test(requestPath)
-      ? 'canCreateUser'
-      : actionByMethod[method];
+  ) {
+    action = 'canCreateUser';
+  }
+
+  // Lifecycle actions for accounting data cycles are approvals/reviews,
+  // therefore they require edit authority rather than generic add authority.
+  if (
+    moduleName === 'accounting_transformation' &&
+    method === 'POST' &&
+    /\/(review|reopen|approve)\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canEdit';
+  }
+
   const permission = findPermission(req.authUser, moduleName);
 
   if (!action || !permission?.[action]) {
