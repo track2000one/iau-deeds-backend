@@ -91,23 +91,19 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canCreateUser';
   }
 
-  // Lifecycle actions for accounting data cycles are approvals/reviews,
-  // therefore they require edit authority rather than generic add authority.
+  // Data-cycle administration uses dedicated high-impact permissions.
+  // Creating a cycle and approving it are deliberately separated from generic Add/Edit.
   if (
-    moduleName === 'accounting_transformation' &&
-    method === 'POST' &&
-    /\/(review|reopen|approve)\/?(?:\?|$)/.test(requestPath)
+    ['assets', 'accounting_transformation'].includes(moduleName) &&
+    method === 'POST'
   ) {
-    action = 'canEdit';
-  }
-
-  // Lifecycle actions for asset data cycles are review/approval actions.
-  if (
-    moduleName === 'assets' &&
-    method === 'POST' &&
-    /\/(review|reopen|approve)\/?(?:\?|$)/.test(requestPath)
-  ) {
-    action = 'canEdit';
+    if (/^\/?$/.test(requestPath)) {
+      action = 'canCreateCycle';
+    } else if (/\/approve\/?(?:\?|$)/.test(requestPath)) {
+      action = 'canApproveCycle';
+    } else if (/\/(review|reopen)\/?(?:\?|$)/.test(requestPath)) {
+      action = 'canEdit';
+    }
   }
 
   const permission = findPermission(req.authUser, moduleName);

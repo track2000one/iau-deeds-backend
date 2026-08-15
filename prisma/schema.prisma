@@ -81,8 +81,10 @@ model UserPermission {
   canAdd        Boolean @default(false)
   canEdit       Boolean @default(false)
   canDelete     Boolean @default(false)
-  canPrint      Boolean @default(false)
-  canCreateUser Boolean @default(false)
+  canPrint        Boolean @default(false)
+  canCreateUser   Boolean @default(false)
+  canCreateCycle  Boolean @default(false)
+  canApproveCycle Boolean @default(false)
 
   user AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
 

@@ -36,6 +36,7 @@ const importSchema = z.object({
 const userLabel = (req) => req.authUser?.email || req.authUser?.username || null;
 const assetPermission = (req) => req.authUser?.permissions?.find((item) => item.module === 'assets');
 const canEditCycles = (req) => req.authUser?.role === 'admin' || Boolean(assetPermission(req)?.canEdit);
+const canApproveCycles = (req) => req.authUser?.role === 'admin' || Boolean(assetPermission(req)?.canApproveCycle);
 
 const serializeCycle = (cycle, comparison = null) => ({
   ...cycle,
@@ -419,7 +420,7 @@ router.post('/:id/reopen', async (req, res, next) => {
 
 router.post('/:id/approve', async (req, res, next) => {
   try {
-    if (!canEditCycles(req)) return res.status(403).json({ message: 'اعتماد دورة الأصول يتطلب صلاحية التعديل.' });
+    if (!canApproveCycles(req)) return res.status(403).json({ message: 'اعتماد دورة الأصول يتطلب صلاحية «اعتماد دورة».' });
     const cycle = await getCycleOr404(req, res);
     if (!cycle) return;
     if (cycle.status !== 'under_review' || cycle.isCurrent) return res.status(409).json({ message: 'يجب إرسال الدورة للمراجعة قبل اعتمادها.' });

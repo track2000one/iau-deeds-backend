@@ -44,6 +44,7 @@ const importSchema = z.object({
 const userLabel = (req) => req.authUser?.email || req.authUser?.username || null;
 const accountingPermission = (req) => req.authUser?.permissions?.find((item) => item.module === 'accounting_transformation');
 const canEditCycles = (req) => req.authUser?.role === 'admin' || Boolean(accountingPermission(req)?.canEdit);
+const canApproveCycles = (req) => req.authUser?.role === 'admin' || Boolean(accountingPermission(req)?.canApproveCycle);
 
 const serializeCycle = (cycle, comparison = null) => ({
   ...cycle,
@@ -387,7 +388,7 @@ router.post('/:id/reopen', async (req, res, next) => {
 
 router.post('/:id/approve', async (req, res, next) => {
   try {
-    if (!canEditCycles(req)) return res.status(403).json({ message: 'اعتماد دورة التحديث يتطلب صلاحية التعديل' });
+    if (!canApproveCycles(req)) return res.status(403).json({ message: 'اعتماد دورة التحديث يتطلب صلاحية «اعتماد دورة»' });
     const cycle = await getCycleOr404(req, res);
     if (!cycle) return;
     if (cycle.status !== 'under_review' || cycle.isCurrent) {
