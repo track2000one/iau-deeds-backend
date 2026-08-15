@@ -1,0 +1,109 @@
+name: Integrate asset data cycles
+
+# Temporary helper for the asset cycle feature.
+on:
+  push:
+    paths:
+      - '.github/workflows/add-asset-cycles.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Patch Prisma schema and backend wiring
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          schema = Path('prisma/schema.prisma')
+          s = schema.read_text()
+          old = '''  notes                     String?\n  createdBy                 String?\n  createdAt                 DateTime  @default(now())\n  updatedAt                 DateTime  @updatedAt\n\n  movements       AssetMovement[]\n'''
+          new = '''  notes                     String?\n  stableKey                 String?\n  isInCurrentCycle          Boolean   @default(true)\n  cycleState                String    @default("current")\n  lastApprovedCycleId       String?\n  createdBy                 String?\n  createdAt                 DateTime  @default(now())\n  updatedAt                 DateTime  @updatedAt\n\n  movements       AssetMovement[]\n'''
+          if old not in s:
+              raise SystemExit('Asset fields marker not found')
+          s = s.replace(old, new, 1)
+
+          old = '''  @@index([building])\n  @@index([createdAt])\n}\n\nmodel AssetMovement {\n'''
+          new = '''  @@index([building])\n  @@index([stableKey])\n  @@index([isInCurrentCycle])\n  @@index([lastApprovedCycleId])\n  @@index([createdAt])\n}\n\nmodel AssetUpdateCycle {\n  id              String   @id @default(cuid())\n  cycleNumber     Int      @unique\n  name            String\n  description     String?\n  status          String   @default("draft")\n  isCurrent       Boolean  @default(false)\n  basedOnCycleId  String?\n  sourceFileNames Json?\n  importedAt      DateTime?\n  importedBy      String?\n  reviewedAt      DateTime?\n  reviewedBy      String?\n  approvedAt      DateTime?\n  approvedBy      String?\n  archivedAt      DateTime?\n  createdBy       String?\n  createdAt       DateTime @default(now())\n  updatedAt       DateTime @updatedAt\n\n  records AssetCycleRecord[]\n\n  @@index([status])\n  @@index([isCurrent])\n  @@index([cycleNumber])\n  @@index([createdAt])\n}\n\nmodel AssetCycleRecord {\n  id                String   @id @default(cuid())\n  cycleId           String\n  assetId           String?\n  stableKey         String\n  sourceFingerprint String?\n  changeType        String   @default("manual")\n  reviewStatus      String   @default("auto")\n  previousRecordId  String?\n  itemNumber        String?\n  assetNumber       String?\n  barcode           String?\n  serialNumber      String?\n  cardNumber        String?\n  name              String\n  category          String\n  department        String?\n  building          String?\n  changedFields     Json?\n  payload           Json\n  sourceFileName    String?\n  sourceFileHash    String?\n  sourceSheet       String?\n  sourceRow         Int?\n  reviewedBy        String?\n  reviewedAt        DateTime?\n  createdAt         DateTime @default(now())\n  updatedAt         DateTime @updatedAt\n\n  cycle AssetUpdateCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)\n\n  @@index([cycleId])\n  @@index([assetId])\n  @@index([stableKey])\n  @@index([changeType])\n  @@index([reviewStatus])\n  @@index([itemNumber])\n  @@index([barcode])\n  @@index([serialNumber])\n  @@index([department])\n  @@index([createdAt])\n}\n\nmodel AssetMovement {\n'''
+          if old not in s:
+              raise SystemExit('Asset model end marker not found')
+          s = s.replace(old, new, 1)
+          schema.write_text(s)
+
+          app = Path('src/app.js')
+          s = app.read_text()
+          old = "import assetsRoutes from './routes/assets.routes.js';\nimport assetsFastRoutes from './routes/assets-fast.routes.js';"
+          new = "import assetsRoutes from './routes/assets.routes.js';\nimport assetCyclesRoutes from './routes/asset-cycles.routes.js';\nimport assetsFastRoutes from './routes/assets-fast.routes.js';"
+          if old not in s:
+              raise SystemExit('app import marker not found')
+          s = s.replace(old, new, 1)
+          old = "app.use(\n  '/api/assets-fast',\n  requireAuth,\n  requirePermission('assets'),\n  assetsFastRoutes\n);\n\napp.use(\n  '/api/assets',"
+          new = "app.use(\n  '/api/assets-fast',\n  requireAuth,\n  requirePermission('assets'),\n  assetsFastRoutes\n);\n\napp.use(\n  '/api/assets/cycles',\n  requireAuth,\n  auditTrail('assets'),\n  requirePermission('assets'),\n  assetCyclesRoutes\n);\n\napp.use(\n  '/api/assets',"
+          if old not in s:
+              raise SystemExit('app assets mount marker not found')
+          s = s.replace(old, new, 1)
+          app.write_text(s)
+
+          auth = Path('src/middleware/auth.js')
+          s = auth.read_text()
+          marker = '''  if (\n    moduleName === 'accounting_transformation' &&\n    method === 'POST' &&\n    /\\/(review|reopen|approve)\\/?(?:\\?|$)/.test(requestPath)\n  ) {\n    action = 'canEdit';\n  }\n'''
+          insert = marker + '''\n  // Lifecycle actions for asset data cycles are review/approval actions.\n  if (\n    moduleName === 'assets' &&\n    method === 'POST' &&\n    /\\/(review|reopen|approve)\\/?(?:\\?|$)/.test(requestPath)\n  ) {\n    action = 'canEdit';\n  }\n'''
+          if marker not in s:
+              raise SystemExit('auth lifecycle marker not found')
+          s = s.replace(marker, insert, 1)
+          auth.write_text(s)
+
+          fast = Path('src/routes/assets-fast.routes.js')
+          s = fast.read_text()
+          old = '''  return {\n    ...(category && category !== 'all' ? { category } : {}),\n'''
+          new = '''  return {\n    isInCurrentCycle: true,\n    ...(category && category !== 'all' ? { category } : {}),\n'''
+          if old not in s:
+              raise SystemExit('assets-fast baseWhere marker not found')
+          s = s.replace(old, new, 1)
+          fast.write_text(s)
+
+          assets = Path('src/routes/assets.routes.js')
+          s = assets.read_text()
+          replacements = [
+            ("      prisma.asset.count(),\n      prisma.asset.count({ where: { status: { in: ['available', 'active', 'stored'] } } }),\n      prisma.asset.count({ where: { status: { in: ['in_use', 'assigned'] } } }),\n      prisma.asset.count({ where: { status: 'maintenance' } }),\n      prisma.asset.count({ where: { status: { in: ['lost', 'damaged'] } } }),\n      prisma.asset.count({ where: { status: 'disposed' } }),",
+             "      prisma.asset.count({ where: { isInCurrentCycle: true } }),\n      prisma.asset.count({ where: { isInCurrentCycle: true, status: { in: ['available', 'active', 'stored'] } } }),\n      prisma.asset.count({ where: { isInCurrentCycle: true, status: { in: ['in_use', 'assigned'] } } }),\n      prisma.asset.count({ where: { isInCurrentCycle: true, status: 'maintenance' } }),\n      prisma.asset.count({ where: { isInCurrentCycle: true, status: { in: ['lost', 'damaged'] } } }),\n      prisma.asset.count({ where: { isInCurrentCycle: true, status: 'disposed' } }),"),
+            ("      where: { OR: [{ barcode: code }, { itemNumber: code }, { assetNumber: code }] },",
+             "      where: { isInCurrentCycle: true, OR: [{ barcode: code }, { itemNumber: code }, { assetNumber: code }] },"),
+            ("    const where = {\n      ...(category ? { category } : {}),",
+             "    const where = {\n      isInCurrentCycle: true,\n      ...(category ? { category } : {}),"),
+          ]
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit(f'assets route marker not found: {old[:60]}')
+              s = s.replace(old, new, 1)
+          assets.write_text(s)
+          PY
+
+      - name: Verify backend
+        run: |
+          npm ci
+          npx prisma generate
+          find src -name '*.js' -type f -print0 | xargs -0 -n1 node --check
+
+      - name: Commit feature integration and cleanup
+        run: |
+          git config user.name 'OpenAI Project Automation'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .github/workflows/add-asset-cycles.yml
+          git add prisma/schema.prisma src/app.js src/middleware/auth.js src/routes/assets.routes.js src/routes/assets-fast.routes.js src/routes/asset-cycles.routes.js src/services/assetCycles.service.js .github/workflows/add-asset-cycles.yml
+          git commit -m 'feat: integrate asset data update cycles'
+          git push origin main
