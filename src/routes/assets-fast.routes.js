@@ -138,6 +138,7 @@ const baseWhere = ({ search, category, status, dateFrom = '', dateTo = '' }) => 
   };
 
   return {
+    isInCurrentCycle: true,
     ...(category && category !== 'all' ? { category } : {}),
     ...(status && status !== 'all' ? { status } : {}),
     ...(Object.keys(createdAt).length ? { createdAt } : {}),

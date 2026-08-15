@@ -639,12 +639,12 @@ router.post('/extract-data', smartExtractionUpload.fields([{ name: 'files', maxC
 router.get('/stats', async (_req, res, next) => {
   try {
     const [total, available, inUse, maintenance, lost, disposed, inventoryCount] = await Promise.all([
-      prisma.asset.count(),
-      prisma.asset.count({ where: { status: { in: ['available', 'active', 'stored'] } } }),
-      prisma.asset.count({ where: { status: { in: ['in_use', 'assigned'] } } }),
-      prisma.asset.count({ where: { status: 'maintenance' } }),
-      prisma.asset.count({ where: { status: { in: ['lost', 'damaged'] } } }),
-      prisma.asset.count({ where: { status: 'disposed' } }),
+      prisma.asset.count({ where: { isInCurrentCycle: true } }),
+      prisma.asset.count({ where: { isInCurrentCycle: true, status: { in: ['available', 'active', 'stored'] } } }),
+      prisma.asset.count({ where: { isInCurrentCycle: true, status: { in: ['in_use', 'assigned'] } } }),
+      prisma.asset.count({ where: { isInCurrentCycle: true, status: 'maintenance' } }),
+      prisma.asset.count({ where: { isInCurrentCycle: true, status: { in: ['lost', 'damaged'] } } }),
+      prisma.asset.count({ where: { isInCurrentCycle: true, status: 'disposed' } }),
       prisma.assetInventoryEvent.count(),
     ]);
     res.json({ total, available, inUse, maintenance, lost, disposed, inventoryCount });
@@ -657,7 +657,7 @@ router.get('/lookup/:code', async (req, res, next) => {
   try {
     const code = String(req.params.code || '').trim();
     const record = await prisma.asset.findFirst({
-      where: { OR: [{ barcode: code }, { itemNumber: code }, { assetNumber: code }] },
+      where: { isInCurrentCycle: true, OR: [{ barcode: code }, { itemNumber: code }, { assetNumber: code }] },
     });
     if (!record) return res.status(404).json({ message: 'لم يتم العثور على أصل بهذا الرقم أو الباركود' });
     const [result] = await withAttachments([record]);
@@ -673,6 +673,7 @@ router.get('/', async (req, res, next) => {
     const category = String(req.query.category || '').trim();
     const status = String(req.query.status || '').trim();
     const where = {
+      isInCurrentCycle: true,
       ...(category ? { category } : {}),
       ...(status ? { status } : {}),
       ...(search ? {

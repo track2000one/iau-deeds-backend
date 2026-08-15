@@ -14,6 +14,7 @@ import usersRoutes from './routes/users.routes.js';
 import auditRoutes from './routes/audit.routes.js';
 import siteInspectionsRoutes from './routes/site-inspections.routes.js';
 import assetsRoutes from './routes/assets.routes.js';
+import assetCyclesRoutes from './routes/asset-cycles.routes.js';
 import assetsFastRoutes from './routes/assets-fast.routes.js';
 import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';
 import mosquesRoutes, { mosquesPublicRoutes } from './routes/mosques.routes.js';
@@ -72,6 +73,14 @@ app.use(
   requireAuth,
   requirePermission('assets'),
   assetsFastRoutes
+);
+
+app.use(
+  '/api/assets/cycles',
+  requireAuth,
+  auditTrail('assets'),
+  requirePermission('assets'),
+  assetCyclesRoutes
 );
 
 app.use(

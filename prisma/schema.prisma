@@ -314,6 +314,10 @@ model Asset {
   quantity                  Float?    @default(1)
   excelPayload              Json?
   notes                     String?
+  stableKey                 String?
+  isInCurrentCycle          Boolean   @default(true)
+  cycleState                String    @default("current")
+  lastApprovedCycleId       String?
   createdBy                 String?
   createdAt                 DateTime  @default(now())
   updatedAt                 DateTime  @updatedAt
@@ -329,6 +333,80 @@ model Asset {
   @@index([technicalCondition])
   @@index([department])
   @@index([building])
+  @@index([stableKey])
+  @@index([isInCurrentCycle])
+  @@index([lastApprovedCycleId])
+  @@index([createdAt])
+}
+
+model AssetUpdateCycle {
+  id              String   @id @default(cuid())
+  cycleNumber     Int      @unique
+  name            String
+  description     String?
+  status          String   @default("draft")
+  isCurrent       Boolean  @default(false)
+  basedOnCycleId  String?
+  sourceFileNames Json?
+  importedAt      DateTime?
+  importedBy      String?
+  reviewedAt      DateTime?
+  reviewedBy      String?
+  approvedAt      DateTime?
+  approvedBy      String?
+  archivedAt      DateTime?
+  createdBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  records AssetCycleRecord[]
+
+  @@index([status])
+  @@index([isCurrent])
+  @@index([cycleNumber])
+  @@index([createdAt])
+}
+
+model AssetCycleRecord {
+  id                String   @id @default(cuid())
+  cycleId           String
+  assetId           String?
+  stableKey         String
+  sourceFingerprint String?
+  changeType        String   @default("manual")
+  reviewStatus      String   @default("auto")
+  previousRecordId  String?
+  itemNumber        String?
+  assetNumber       String?
+  barcode           String?
+  serialNumber      String?
+  cardNumber        String?
+  name              String
+  category          String
+  department        String?
+  building          String?
+  changedFields     Json?
+  payload           Json
+  sourceFileName    String?
+  sourceFileHash    String?
+  sourceSheet       String?
+  sourceRow         Int?
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  cycle AssetUpdateCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+
+  @@index([cycleId])
+  @@index([assetId])
+  @@index([stableKey])
+  @@index([changeType])
+  @@index([reviewStatus])
+  @@index([itemNumber])
+  @@index([barcode])
+  @@index([serialNumber])
+  @@index([department])
   @@index([createdAt])
 }
 

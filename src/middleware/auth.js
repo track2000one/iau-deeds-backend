@@ -101,6 +101,15 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canEdit';
   }
 
+  // Lifecycle actions for asset data cycles are review/approval actions.
+  if (
+    moduleName === 'assets' &&
+    method === 'POST' &&
+    /\/(review|reopen|approve)\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canEdit';
+  }
+
   const permission = findPermission(req.authUser, moduleName);
 
   if (!action || !permission?.[action]) {
