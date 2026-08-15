@@ -1,0 +1,86 @@
+name: Add cycle permissions
+on:
+  push:
+    paths:
+      - '.github/workflows/add-cycle-permissions.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Apply backend permission changes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'pattern not found in {path}: {old[:120]!r}')
+              p.write_text(s.replace(old, new, 1))
+
+          replace_once('prisma/schema.prisma',
+          '''  canPrint      Boolean @default(false)\n  canCreateUser Boolean @default(false)\n''',
+          '''  canPrint        Boolean @default(false)\n  canCreateUser   Boolean @default(false)\n  canCreateCycle  Boolean @default(false)\n  canApproveCycle Boolean @default(false)\n''')
+
+          replace_once('src/routes/users.routes.js',
+          '''  canPrint: z.boolean().default(false),\n  canCreateUser: z.boolean().default(false),\n});''',
+          '''  canPrint: z.boolean().default(false),\n  canCreateUser: z.boolean().default(false),\n  canCreateCycle: z.boolean().default(false),\n  canApproveCycle: z.boolean().default(false),\n});''')
+
+          replace_once('src/routes/users.routes.js',
+          '''      Boolean(value.canPrint) ||\n      Boolean(value.canCreateUser),\n    canAdd: Boolean(value.canAdd),''',
+          '''      Boolean(value.canPrint) ||\n      Boolean(value.canCreateUser) ||\n      Boolean(value.canCreateCycle) ||\n      Boolean(value.canApproveCycle),\n    canAdd: Boolean(value.canAdd),''')
+
+          replace_once('src/routes/users.routes.js',
+          '''    canPrint: Boolean(value.canPrint),\n    canCreateUser: Boolean(value.canCreateUser),\n  }));''',
+          '''    canPrint: Boolean(value.canPrint),\n    canCreateUser: Boolean(value.canCreateUser),\n    canCreateCycle: Boolean(value.canCreateCycle),\n    canApproveCycle: Boolean(value.canApproveCycle),\n  }));''')
+
+          replace_once('src/security/auth.js',
+          '''      canPrint: item.canPrint,\n      canCreateUser: item.canCreateUser,\n    };''',
+          '''      canPrint: item.canPrint,\n      canCreateUser: item.canCreateUser,\n      canCreateCycle: item.canCreateCycle,\n      canApproveCycle: item.canApproveCycle,\n    };''')
+
+          old = '''  // Lifecycle actions for accounting data cycles are approvals/reviews,\n  // therefore they require edit authority rather than generic add authority.\n  if (\n    moduleName === 'accounting_transformation' &&\n    method === 'POST' &&\n    /\\/(review|reopen|approve)\\/?(?:\\?|$)/.test(requestPath)\n  ) {\n    action = 'canEdit';\n  }\n\n  // Lifecycle actions for asset data cycles are review/approval actions.\n  if (\n    moduleName === 'assets' &&\n    method === 'POST' &&\n    /\\/(review|reopen|approve)\\/?(?:\\?|$)/.test(requestPath)\n  ) {\n    action = 'canEdit';\n  }\n'''
+          new = '''  // Data-cycle administration uses dedicated high-impact permissions.\n  // Creating a cycle and approving it are deliberately separated from generic Add/Edit.\n  if (\n    ['assets', 'accounting_transformation'].includes(moduleName) &&\n    method === 'POST'\n  ) {\n    if (/^\\/?$/.test(requestPath)) {\n      action = 'canCreateCycle';\n    } else if (/\\/approve\\/?(?:\\?|$)/.test(requestPath)) {\n      action = 'canApproveCycle';\n    } else if (/\\/(review|reopen)\\/?(?:\\?|$)/.test(requestPath)) {\n      action = 'canEdit';\n    }\n  }\n'''
+          replace_once('src/middleware/auth.js', old, new)
+
+          replace_once('src/routes/asset-cycles.routes.js',
+          '''const canEditCycles = (req) => req.authUser?.role === 'admin' || Boolean(assetPermission(req)?.canEdit);\n''',
+          '''const canEditCycles = (req) => req.authUser?.role === 'admin' || Boolean(assetPermission(req)?.canEdit);\nconst canApproveCycles = (req) => req.authUser?.role === 'admin' || Boolean(assetPermission(req)?.canApproveCycle);\n''')
+
+          replace_once('src/routes/asset-cycles.routes.js',
+          '''    if (!canEditCycles(req)) return res.status(403).json({ message: 'اعتماد دورة الأصول يتطلب صلاحية التعديل.' });''',
+          '''    if (!canApproveCycles(req)) return res.status(403).json({ message: 'اعتماد دورة الأصول يتطلب صلاحية «اعتماد دورة».' });''')
+
+          replace_once('src/routes/accounting-cycles.routes.js',
+          '''const canEditCycles = (req) => req.authUser?.role === 'admin' || Boolean(accountingPermission(req)?.canEdit);\n''',
+          '''const canEditCycles = (req) => req.authUser?.role === 'admin' || Boolean(accountingPermission(req)?.canEdit);\nconst canApproveCycles = (req) => req.authUser?.role === 'admin' || Boolean(accountingPermission(req)?.canApproveCycle);\n''')
+
+          replace_once('src/routes/accounting-cycles.routes.js',
+          '''    if (!canEditCycles(req)) return res.status(403).json({ message: 'اعتماد دورة التحديث يتطلب صلاحية التعديل' });''',
+          '''    if (!canApproveCycles(req)) return res.status(403).json({ message: 'اعتماد دورة التحديث يتطلب صلاحية «اعتماد دورة»' });''')
+          PY
+      - name: Verify backend
+        run: |
+          npm ci
+          npx prisma generate
+          node --check src/middleware/auth.js
+          node --check src/security/auth.js
+          node --check src/routes/users.routes.js
+          node --check src/routes/asset-cycles.routes.js
+          node --check src/routes/accounting-cycles.routes.js
+      - name: Commit and clean helper
+        run: |
+          rm .github/workflows/add-cycle-permissions.yml
+          git config user.name "OpenAI Project Automation"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add prisma/schema.prisma src/middleware/auth.js src/security/auth.js src/routes/users.routes.js src/routes/asset-cycles.routes.js src/routes/accounting-cycles.routes.js .github/workflows/add-cycle-permissions.yml
+          git commit -m "feat: add dedicated cycle permissions"
+          git push
