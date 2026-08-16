@@ -11,6 +11,7 @@ import recordsRoutes from './routes/records.routes.js';
 import archiveRoutes from './routes/archive.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import usersRoutes from './routes/users.routes.js';
+import organizationRoutes from './routes/organization.routes.js';
 import auditRoutes from './routes/audit.routes.js';
 import siteInspectionsRoutes from './routes/site-inspections.routes.js';
 import assetsRoutes from './routes/assets.routes.js';
@@ -59,6 +60,12 @@ app.use('/api/mosques/public', mosquesPublicRoutes);
 
 app.use('/api/audit', requireAuth, requireAdmin, auditRoutes);
 app.use('/api/users', requireAuth, auditTrail('users'), usersRoutes);
+app.use(
+  '/api/organization-units',
+  requireAuth,
+  auditTrail('organization_units'),
+  organizationRoutes
+);
 
 app.use(
   '/api/deeds',
