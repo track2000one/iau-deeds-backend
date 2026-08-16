@@ -62,19 +62,29 @@ const permissionMap = (permissions = []) =>
     return output;
   }, {});
 
-export const serializeUser = (user) => ({
-  uid: user.id,
-  email: user.email,
-  username: user.username,
-  role: user.role,
-  isActive: user.isActive,
-  activationPending:
-    !user.isActive && Boolean(user.activationTokenHash),
-  activationExpires: user.activationExpires || null,
-  activationSentAt: user.activationSentAt || null,
-  activatedAt: user.activatedAt || null,
-  permissions: permissionMap(user.permissions),
-  createdAt: user.createdAt,
-  updatedAt: user.updatedAt,
-  lastLoginAt: user.lastLoginAt,
-});
+export const serializeUser = (user) => {
+  const assignment = user.organizationAssignment || null;
+
+  return {
+    uid: user.id,
+    email: user.email,
+    username: user.username,
+    role: user.role,
+    isActive: user.isActive,
+    activationPending:
+      !user.isActive && Boolean(user.activationTokenHash),
+    activationExpires: user.activationExpires || null,
+    activationSentAt: user.activationSentAt || null,
+    activatedAt: user.activatedAt || null,
+    permissions: permissionMap(user.permissions),
+    organizationUnitId: assignment?.organizationUnitId || null,
+    organizationRole: assignment?.organizationRole || null,
+    permissionScope:
+      assignment?.permissionScope ||
+      (user.role === 'admin' ? 'university' : 'department'),
+    organizationUnit: assignment?.organizationUnit || null,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    lastLoginAt: user.lastLoginAt,
+  };
+};
