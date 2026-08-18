@@ -1,3 +1,4 @@
+# trigger: apply after workflow is present on main
 name: Apply accounting asset classification backend
 
 on:
