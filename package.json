@@ -12,6 +12,9 @@
     "prisma:deploy": "prisma migrate deploy",
     "postinstall": "prisma generate"
   },
+  "prisma": {
+    "schema": "prisma"
+  },
   "dependencies": {
     "@getbrevo/brevo": "^6.0.2",
     "@prisma/client": "^6.19.0",
