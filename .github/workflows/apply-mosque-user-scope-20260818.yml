@@ -1,0 +1,75 @@
+name: Apply mosque user visibility boundary
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-mosque-user-scope-20260818.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Restrict platform user directory to system admin
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/routes/mosques.routes.js')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  """    const ids = context.role === 'head' ? null : await getManagedSiteIds(req, context);\n    const where = ids === null ? {} : { siteId: { in: ids || [] } };\n    res.json(await prisma.mosquePersonnel.findMany({ where, include: { site: { select: { name: true } } }, orderBy: { name: 'asc' } }));""",
+                  """    const ids = context.role === 'head' ? null : await getManagedSiteIds(req, context);\n    const allowedPersonnelRoles = ['imam', 'muezzin', 'khateeb', 'collaborating_khateeb'];\n    const where = ids === null\n      ? { role: { in: allowedPersonnelRoles } }\n      : { siteId: { in: ids || [] }, role: { in: allowedPersonnelRoles } };\n    res.json(await prisma.mosquePersonnel.findMany({ where, include: { site: { select: { name: true } } }, orderBy: { name: 'asc' } }));"""
+              ),
+              (
+                  "router.get('/staff-directory', requireRoles('head', 'supervisor'), async (_req, res, next) => {\n  try {",
+                  "router.get('/staff-directory', async (req, res, next) => {\n  if (req.authUser?.role !== 'admin') {\n    return res.status(403).json({ message: 'دليل مستخدمي المنصة متاح لمسؤول النظام فقط' });\n  }\n  try {"
+              ),
+              (
+                  "router.get('/assignments', requireRoles('head'), async (_req, res, next) => {\n  try { res.json(await prisma.mosqueUserAssignment.findMany({ include: { site: { select: { name: true } } }, orderBy: { createdAt: 'asc' } })); } catch (error) { next(error); }\n});",
+                  "router.get('/assignments', async (req, res, next) => {\n  if (req.authUser?.role !== 'admin') {\n    return res.status(403).json({ message: 'إدارة الأدوار التشغيلية لمستخدمي المنصة متاحة لمسؤول النظام فقط' });\n  }\n  try { res.json(await prisma.mosqueUserAssignment.findMany({ include: { site: { select: { name: true } } }, orderBy: { createdAt: 'asc' } })); } catch (error) { next(error); }\n});"
+              ),
+              (
+                  "router.put('/assignments/:userId', requireRoles('head'), async (req, res, next) => {\n  try {",
+                  "router.put('/assignments/:userId', async (req, res, next) => {\n  if (req.authUser?.role !== 'admin') {\n    return res.status(403).json({ message: 'تعديل الأدوار التشغيلية لمستخدمي المنصة متاح لمسؤول النظام فقط' });\n  }\n  try {"
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one backend marker, found {count}: {old[:90]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify mosque route syntax
+        run: node --check src/routes/mosques.routes.js
+
+      - name: Commit verified backend permission fix
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-mosque-user-scope-20260818.yml
+          git config user.name "OpenAI Project Automation"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/routes/mosques.routes.js .github/workflows/apply-mosque-user-scope-20260818.yml
+          git commit -m "fix: restrict mosque platform user directory to admin"
+          git push origin HEAD:main
