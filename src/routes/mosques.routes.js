@@ -917,7 +917,10 @@ router.get('/personnel', requireRoles('head', 'supervisor'), async (req, res, ne
   try {
     const context = req.mosqueRole || await getModuleRole(req);
     const ids = context.role === 'head' ? null : await getManagedSiteIds(req, context);
-    const where = ids === null ? {} : { siteId: { in: ids || [] } };
+    const allowedPersonnelRoles = ['imam', 'muezzin', 'khateeb', 'collaborating_khateeb'];
+    const where = ids === null
+      ? { role: { in: allowedPersonnelRoles } }
+      : { siteId: { in: ids || [] }, role: { in: allowedPersonnelRoles } };
     res.json(await prisma.mosquePersonnel.findMany({ where, include: { site: { select: { name: true } } }, orderBy: { name: 'asc' } }));
   } catch (error) { next(error); }
 });
@@ -1142,7 +1145,10 @@ router.delete('/personnel/:id', requireRoles('head'), async (req, res, next) => 
   } catch (error) { next(error); }
 });
 
-router.get('/staff-directory', requireRoles('head', 'supervisor'), async (_req, res, next) => {
+router.get('/staff-directory', async (req, res, next) => {
+  if (req.authUser?.role !== 'admin') {
+    return res.status(403).json({ message: 'دليل مستخدمي المنصة متاح لمسؤول النظام فقط' });
+  }
   try {
     const [users, assignments] = await Promise.all([
       prisma.appUser.findMany({
@@ -1165,11 +1171,17 @@ router.get('/staff-directory', requireRoles('head', 'supervisor'), async (_req, 
   } catch (error) { next(error); }
 });
 
-router.get('/assignments', requireRoles('head'), async (_req, res, next) => {
+router.get('/assignments', async (req, res, next) => {
+  if (req.authUser?.role !== 'admin') {
+    return res.status(403).json({ message: 'إدارة الأدوار التشغيلية لمستخدمي المنصة متاحة لمسؤول النظام فقط' });
+  }
   try { res.json(await prisma.mosqueUserAssignment.findMany({ include: { site: { select: { name: true } } }, orderBy: { createdAt: 'asc' } })); } catch (error) { next(error); }
 });
 
-router.put('/assignments/:userId', requireRoles('head'), async (req, res, next) => {
+router.put('/assignments/:userId', async (req, res, next) => {
+  if (req.authUser?.role !== 'admin') {
+    return res.status(403).json({ message: 'تعديل الأدوار التشغيلية لمستخدمي المنصة متاح لمسؤول النظام فقط' });
+  }
   try {
     const input = assignmentSchema.parse(req.body);
     if (input.role === 'viewer') input.role = 'university_member';
