@@ -1,0 +1,89 @@
+// ============================================================
+// Accounting Transformation - Asset Classification & Coding Master Data
+// ============================================================
+model AccountingAssetClassificationVersion {
+  id                  String   @id @default(cuid())
+  versionLabel        String
+  title               String   @default("دليل تصنيف وترميز الأصول")
+  sourceFileName      String
+  isCurrent           Boolean  @default(false)
+  classificationCount Int      @default(0)
+  usefulLifeCount     Int      @default(0)
+  importedBy          String?
+  importedAt          DateTime @default(now())
+  notes               String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  classifications AccountingAssetClassification[]
+  usefulLives     AccountingAssetUsefulLife[]
+
+  @@index([isCurrent])
+  @@index([importedAt])
+  @@index([versionLabel])
+}
+
+model AccountingAssetClassification {
+  id                   String   @id @default(cuid())
+  versionId            String
+  level1Code           String
+  level1Ar             String
+  level1En             String?
+  level2Code           String
+  level2Ar             String
+  level2En             String?
+  level3Code           String
+  level3Ar             String
+  level3En             String?
+  accountingGroupCode  String
+  accountingGroupAr    String
+  accountingGroupEn    String?
+  accountingAssetCode  String
+  assetCostAccountCode String?
+  assetCostAccountName String?
+  clearingAccountCode  String?
+  clearingAccountName  String?
+  lifecycleStatus      String?
+  sourceRow            Int?
+  createdAt            DateTime @default(now())
+
+  version AccountingAssetClassificationVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@index([versionId])
+  @@index([level1Code])
+  @@index([level2Code])
+  @@index([level3Code])
+  @@index([accountingGroupCode])
+  @@index([accountingAssetCode])
+  @@index([assetCostAccountCode])
+  @@index([lifecycleStatus])
+}
+
+model AccountingAssetUsefulLife {
+  id                     String   @id @default(cuid())
+  versionId              String
+  stableKey              String
+  level1Ar               String
+  level1En               String?
+  level2Ar               String
+  level2En               String?
+  level3Ar               String
+  level3En               String?
+  capitalizationLimit    Float?
+  capitalizationLimitRaw String?
+  minimumUsefulLife      Float?
+  maximumUsefulLife      Float?
+  defaultUsefulLife      Float?
+  lifecycleStatus        String?
+  sourceRow              Int?
+  createdAt              DateTime @default(now())
+
+  version AccountingAssetClassificationVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, stableKey])
+  @@index([versionId])
+  @@index([level1Ar])
+  @@index([level2Ar])
+  @@index([level3Ar])
+  @@index([lifecycleStatus])
+}
