@@ -22,6 +22,7 @@ import mosquesRoutes, { mosquesPublicRoutes } from './routes/mosques.routes.js';
 import accountingTransformationRoutes from './routes/accounting-transformation.routes.js';
 import accountingCyclesRoutes from './routes/accounting-cycles.routes.js';
 import accountingCycleReimportRoutes from './routes/accounting-cycle-reimport.routes.js';
+import accountingCycleReviewPolicyRoutes from './routes/accounting-cycle-review-policy.routes.js';
 import accountingAssetClassificationRoutes from './routes/accounting-asset-classification.routes.js';
 import accountingHierarchyRoutes from './routes/accounting-hierarchy.routes.js';
 import {
@@ -173,6 +174,17 @@ app.use(
   auditTrail('accounting_transformation'),
   requirePermission('accounting_transformation'),
   accountingCycleReimportRoutes
+);
+
+// Review policy runs before the legacy cycle actions. It auto-resolves records
+// that are unchanged from the approved base cycle while keeping new/modified
+// records in the human review workflow.
+app.use(
+  '/api/accounting-transformation/cycles',
+  requireAuth,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingCycleReviewPolicyRoutes
 );
 
 app.use(
