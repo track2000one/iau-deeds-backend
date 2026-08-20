@@ -336,7 +336,8 @@ export const getAssetCycleComparison = async (cycle) => {
     baseline: counts.baseline || 0,
     manual: counts.manual || 0,
     needsReview: counts.needsReview || 0,
-    removed: removedRecords.length,
-    removedRecords: removedRecords.slice(0, 250),
+    removed: 0,
+    notSupplied: removedRecords.length,
+    removedRecords: [],
   };
 };
