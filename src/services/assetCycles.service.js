@@ -160,6 +160,53 @@ export const normalizeAssetCycleInput = (input = {}) => {
   return snapshot;
 };
 
+const hasMergeValue = (value) => {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  return true;
+};
+
+const excelSourceKeys = (input) => {
+  const payload = input?.excelPayload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return [];
+  return Object.keys(payload).filter((key) => !key.startsWith('__'));
+};
+
+const sourceHas = (keys, patterns) => keys.some((key) => patterns.some((pattern) => pattern.test(key)));
+
+export const mergeAssetCycleSnapshots = (previous = {}, incoming = {}) => {
+  const before = normalizeAssetCycleInput(previous);
+  const merged = { ...before };
+  const sourceKeys = excelSourceKeys(incoming);
+  const fromExcel = sourceKeys.length > 0;
+  const guardedBySource = {
+    name: [/وصف الأصل/i, /asset description/i],
+    status: [/حالة استغلال/i, /asset utilization/i],
+    quantity: [/^العدد$/i, /^quantity$/i],
+    notes: [/ملاحظات/i, /^notes?$/i],
+  };
+
+  for (const field of ASSET_FIELDS) {
+    const value = incoming[field];
+    if (!hasMergeValue(value)) continue;
+    if (fromExcel && guardedBySource[field] && !sourceHas(sourceKeys, guardedBySource[field])) continue;
+    if (field === 'purchaseDateType' && !hasMergeValue(incoming.purchaseDate)) continue;
+    if (field === 'serviceDateType' && !hasMergeValue(incoming.serviceDate)) continue;
+    if (field === 'lastInventoryDateType' && !hasMergeValue(incoming.lastInventoryDate)) continue;
+    merged[field] = value;
+  }
+
+  if (incoming.excelPayload && typeof incoming.excelPayload === 'object' && !Array.isArray(incoming.excelPayload)) {
+    merged.excelPayload = { ...(before.excelPayload || {}), ...incoming.excelPayload };
+  }
+
+  const clearFields = Array.isArray(incoming.__clearFields) ? incoming.__clearFields : [];
+  for (const field of clearFields) {
+    if (ASSET_FIELDS.includes(field)) merged[field] = null;
+  }
+  return normalizeAssetCycleInput(merged);
+};
+
 const comparableSnapshot = (snapshot) => {
   const normalized = normalizeAssetCycleInput(snapshot);
   return {
@@ -336,7 +383,8 @@ export const getAssetCycleComparison = async (cycle) => {
     baseline: counts.baseline || 0,
     manual: counts.manual || 0,
     needsReview: counts.needsReview || 0,
-    removed: removedRecords.length,
-    removedRecords: removedRecords.slice(0, 250),
+    removed: 0,
+    notSupplied: removedRecords.length,
+    removedRecords: [],
   };
 };
