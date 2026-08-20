@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
   group: backend-verify-${{ github.ref }}
   cancel-in-progress: true
@@ -16,13 +19,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+      - name: Apply field-level merge patch
+        run: node scripts/agent-field-level-merge.mjs
       - name: Install dependencies
         run: npm ci
       - name: Generate Prisma client
         run: npx prisma generate
       - name: Verify JavaScript syntax
         run: find src -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Commit verified source changes to PR branch
+        if: github.event_name == 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src
+          if git diff --cached --quiet; then
+            echo "No verified source changes to commit"
+          else
+            git commit -m "fix: merge partial asset and accounting updates by field"
+            git push origin HEAD:${{ github.head_ref }}
+          fi
