@@ -57,23 +57,58 @@ export const archiveCurrentAccountingTemplate = async (current) => {
   });
 };
 
-export const accountingTemplateSnapshotData = (template) => template ? ({
-  officialTemplateId: template.id,
-  officialTemplateFileName: template.fileName,
-  officialTemplateVersion: Number(template.versionNumber || 1),
-  officialTemplateDriveFileId: template.driveFileId,
-  officialTemplateAttachedAt: new Date(),
-}) : ({});
+export const createCycleTemplateSnapshot = async (cycleId, template = null) => {
+  const source = template || await getCurrentAccountingTemplateWithVersion();
+  if (!source) return null;
+  return prisma.accountingCycleTemplateSnapshot.upsert({
+    where: { cycleId },
+    update: {},
+    create: {
+      cycleId,
+      templateId: source.id,
+      fileName: source.fileName,
+      versionNumber: Number(source.versionNumber || 1),
+      driveFileId: source.driveFileId,
+      attachedAt: new Date(),
+    },
+  });
+};
 
-export const attachCurrentAccountingTemplateToOpenCycles = async () => {
+export const getCycleTemplateSnapshot = async (cycle, { attachForOpenCycle = false } = {}) => {
+  let snapshot = await prisma.accountingCycleTemplateSnapshot.findUnique({ where: { cycleId: cycle.id } });
+  if (!snapshot && attachForOpenCycle && ['draft', 'under_review'].includes(cycle.status)) {
+    snapshot = await createCycleTemplateSnapshot(cycle.id);
+  }
+  return snapshot;
+};
+
+export const attachCurrentAccountingTemplateToOpenCycles = async (cycles = null) => {
+  const openCycles = cycles || await prisma.accountingTransformationCycle.findMany({
+    where: { status: { in: ['draft', 'under_review'] } },
+    select: { id: true, status: true },
+  });
+  if (!openCycles.length) return 0;
   const current = await getCurrentAccountingTemplateWithVersion();
   if (!current) return 0;
-  const result = await prisma.accountingTransformationCycle.updateMany({
-    where: {
-      status: { in: ['draft', 'under_review'] },
-      officialTemplateDriveFileId: null,
-    },
-    data: accountingTemplateSnapshotData(current),
+  const existing = await prisma.accountingCycleTemplateSnapshot.findMany({
+    where: { cycleId: { in: openCycles.map((cycle) => cycle.id) } },
+    select: { cycleId: true },
   });
-  return result.count;
+  const existingIds = new Set(existing.map((item) => item.cycleId));
+  let attached = 0;
+  for (const cycle of openCycles) {
+    if (existingIds.has(cycle.id)) continue;
+    await createCycleTemplateSnapshot(cycle.id, current);
+    attached += 1;
+  }
+  return attached;
+};
+
+export const decorateCyclesWithTemplateSnapshot = async (cycles) => {
+  if (!cycles.length) return cycles;
+  const snapshots = await prisma.accountingCycleTemplateSnapshot.findMany({
+    where: { cycleId: { in: cycles.map((cycle) => cycle.id) } },
+  });
+  const byCycle = new Map(snapshots.map((item) => [item.cycleId, item]));
+  return cycles.map((cycle) => ({ ...cycle, officialTemplate: byCycle.get(cycle.id) || null }));
 };
