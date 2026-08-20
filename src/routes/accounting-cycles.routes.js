@@ -83,6 +83,35 @@ const itemIsValid = (item) => {
   return hasAccountingValue(payload.B) || hasAccountingValue(payload.E) || hasAccountingValue(payload.G);
 };
 
+const carryForwardUnchangedAccountingRecords = async (cycle) => {
+  if (!cycle.basedOnCycleId) return 0;
+  const [baseRecords, targetRecords] = await Promise.all([
+    prisma.accountingTransformationRecord.findMany({ where: { cycleId: cycle.basedOnCycleId } }),
+    prisma.accountingTransformationRecord.findMany({ where: { cycleId: cycle.id }, select: { stableKey: true } }),
+  ]);
+  const targetKeys = new Set(targetRecords.map((item) => item.stableKey).filter(Boolean));
+  const missing = baseRecords.filter((record) => record.stableKey && !targetKeys.has(record.stableKey));
+  if (!missing.length) return 0;
+
+  const baseNumber = await nextAccountingRecordNumber();
+  const baseSequence = Number(baseNumber.split('-').pop()) || 1;
+  const year = new Date().getFullYear();
+  const rows = missing.map((record, index) => {
+    const { id, recordNumber, cycleId: _cycleId, createdAt, updatedAt, ...rest } = record;
+    return {
+      ...rest,
+      cycleId: cycle.id,
+      recordNumber: 'ACT-' + year + '-' + String(baseSequence + index).padStart(6, '0'),
+      changeType: 'unchanged',
+      previousRecordId: id,
+    };
+  });
+  for (let index = 0; index < rows.length; index += 750) {
+    await prisma.accountingTransformationRecord.createMany({ data: rows.slice(index, index + 750) });
+  }
+  return rows.length;
+};
+
 router.get('/', async (_req, res, next) => {
   try {
     await ensureAccountingTransformationBaseline();
@@ -240,7 +269,8 @@ router.post('/:id/import-preview', async (req, res, next) => {
       new: newIndexes.length,
       modified: modifiedIndexes.length,
       unchanged: unchangedIndexes.length,
-      removed,
+      removed: 0,
+      notSupplied: removed,
       newIndexes,
       modifiedIndexes,
       unchangedIndexes,
@@ -272,6 +302,7 @@ router.post('/:id/import', async (req, res, next) => {
     const baseSequence = Number(baseNumber.split('-').pop()) || 1;
     const year = new Date().getFullYear();
     const seen = new Set();
+    const createdRows = [];
     let created = 0;
     let skipped = 0;
     let createdNew = 0;
@@ -300,18 +331,22 @@ router.post('/:id/import', async (req, res, next) => {
         previousRecordId: previous?.id || null,
       });
 
-      await prisma.accountingTransformationRecord.create({
-        data: {
-          ...data,
-          recordNumber: `ACT-${year}-${String(baseSequence + created).padStart(6, '0')}`,
-          createdBy: userLabel(req),
-        },
+      createdRows.push({
+        ...data,
+        recordNumber: `ACT-${year}-${String(baseSequence + created).padStart(6, '0')}`,
+        createdBy: userLabel(req),
       });
       targetKeys.add(stableKey);
       created += 1;
       if (changeType === 'new') createdNew += 1;
       else if (changeType === 'modified') createdModified += 1;
       else createdUnchanged += 1;
+    }
+
+    if (createdRows.length) {
+      for (let index = 0; index < createdRows.length; index += 750) {
+        await prisma.accountingTransformationRecord.createMany({ data: createdRows.slice(index, index + 750) });
+      }
     }
 
     const updatedCycle = await prisma.accountingTransformationCycle.update({
@@ -396,6 +431,14 @@ router.post('/:id/approve', async (req, res, next) => {
     }
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن اعتماد دورة لا تحتوي على بيانات' });
 
+    const unresolved = await prisma.accountingTransformationRecord.count({
+      where: { cycleId: cycle.id, committeeStatus: { in: ['not_reviewed', 'under_review', 'needs_update'] } },
+    });
+    if (unresolved) {
+      return res.status(409).json({ message: `لا يمكن اعتماد الدورة: يوجد ${unresolved} سجل لم تُحسم مراجعته أو يحتاج تحديثًا.` });
+    }
+
+    const carriedForward = await carryForwardUnchangedAccountingRecords(cycle);
     const comparison = await getAccountingCycleComparison(cycle);
     const approvedBy = userLabel(req);
     const approvedAt = new Date();
@@ -424,7 +467,7 @@ router.post('/:id/approve', async (req, res, next) => {
       entityId: cycle.id,
       entityLabel: cycle.name,
       description: 'اعتماد دورة تحديث وجعلها البيانات الحالية',
-      newData: { cycle: updated, comparison },
+      newData: { cycle: updated, comparison, carriedForward },
       ipAddress: getClientIp(req),
       userAgent: req.headers['user-agent'],
     });
