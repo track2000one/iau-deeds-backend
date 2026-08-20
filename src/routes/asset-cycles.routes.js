@@ -182,6 +182,34 @@ const findLiveAssetForRecord = async (tx, record) => {
   });
 };
 
+const carryForwardUnchangedAssetRecords = async (cycle) => {
+  if (!cycle.basedOnCycleId) return 0;
+  const [baseRecords, targetRecords] = await Promise.all([
+    prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.basedOnCycleId } }),
+    prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.id }, select: { stableKey: true } }),
+  ]);
+  const targetKeys = new Set(targetRecords.map((item) => item.stableKey).filter(Boolean));
+  const carryRows = baseRecords
+    .filter((record) => record.stableKey && !targetKeys.has(record.stableKey))
+    .map((record) => {
+      const { id, cycleId: _cycleId, createdAt, updatedAt, ...rest } = record;
+      return {
+        ...rest,
+        cycleId: cycle.id,
+        changeType: 'unchanged',
+        reviewStatus: rest.reviewStatus === 'needs_review' ? 'needs_review' : 'auto',
+        previousRecordId: id,
+        reviewedAt: null,
+        reviewedBy: null,
+      };
+    });
+  for (let index = 0; index < carryRows.length; index += 750) {
+    await prisma.assetCycleRecord.createMany({ data: carryRows.slice(index, index + 750) });
+  }
+  return carryRows.length;
+};
+
+
 router.get('/', async (_req, res, next) => {
   try {
     await ensureAssetBaselineCycle();
@@ -189,10 +217,9 @@ router.get('/', async (_req, res, next) => {
       orderBy: { cycleNumber: 'desc' },
       include: { _count: { select: { records: true } } },
     });
-    const response = [];
-    for (const cycle of cycles) {
-      response.push(serializeCycle(cycle, await getAssetCycleComparison(cycle)));
-    }
+    const response = await Promise.all(
+      cycles.map(async (cycle) => serializeCycle(cycle, await getAssetCycleComparison(cycle)))
+    );
     res.json(response);
   } catch (error) { next(error); }
 });
@@ -425,9 +452,9 @@ router.post('/:id/approve', async (req, res, next) => {
     if (!cycle) return;
     if (cycle.status !== 'under_review' || cycle.isCurrent) return res.status(409).json({ message: 'يجب إرسال الدورة للمراجعة قبل اعتمادها.' });
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن اعتماد دورة لا تحتوي على بيانات.' });
+    const carriedForward = await carryForwardUnchangedAssetRecords(cycle);
     const pendingReview = await prisma.assetCycleRecord.count({ where: { cycleId: cycle.id, reviewStatus: 'needs_review' } });
     if (pendingReview) return res.status(409).json({ message: `يوجد ${pendingReview} سجل يحتاج مراجعة وتأكيد قبل اعتماد الدورة.` });
-
     const comparison = await getAssetCycleComparison(cycle);
     const records = await prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.id } });
     const baseRecords = cycle.basedOnCycleId ? await prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.basedOnCycleId } }) : [];
@@ -479,7 +506,7 @@ router.post('/:id/approve', async (req, res, next) => {
     await createAuditLog({
       user: req.authUser, action: 'approve_cycle', module: 'assets', entity: 'asset_cycle', entityId: cycle.id,
       entityLabel: cycle.name, description: 'اعتماد دورة تحديث الأصول وجعلها البيانات الحالية',
-      newData: { cycle: updated, comparison }, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'],
+      newData: { cycle: updated, comparison, carriedForward }, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'],
     });
     res.json({ cycle: serializeCycle(updated), comparison });
   } catch (error) { next(error); }
