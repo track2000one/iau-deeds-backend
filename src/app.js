@@ -22,6 +22,7 @@ import mosquesRoutes, { mosquesPublicRoutes } from './routes/mosques.routes.js';
 import accountingTransformationRoutes from './routes/accounting-transformation.routes.js';
 import accountingCyclesRoutes from './routes/accounting-cycles.routes.js';
 import accountingAssetClassificationRoutes from './routes/accounting-asset-classification.routes.js';
+import accountingHierarchyRoutes from './routes/accounting-hierarchy.routes.js';
 import {
   requireAdmin,
   requireAuth,
@@ -168,6 +169,14 @@ app.use(
   auditTrail('accounting_transformation'),
   requirePermission('accounting_transformation'),
   accountingCyclesRoutes
+);
+
+app.use(
+  '/api/accounting-transformation/hierarchy',
+  requireAuth,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingHierarchyRoutes
 );
 
 app.use(
