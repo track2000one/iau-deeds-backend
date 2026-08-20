@@ -5,6 +5,7 @@ import {
   calculateAccountingProgress,
   inferAccountingOwnershipMode,
 } from '../config/accountingTransformation.js';
+import { calculateModelBDerivedPayload, validateModelBPayload } from '../config/fixedAssetModelB.js';
 
 export const normalizeAccountingText = (value) =>
   String(value ?? '')
@@ -21,35 +22,63 @@ const normalizeKeyPart = (value) =>
 export const accountingCoreFromPayload = (recordType, payload = {}) => {
   const map = ACCOUNTING_CORE_COLUMNS[recordType] || ACCOUNTING_CORE_COLUMNS.land;
   return {
-    entityName: normalizeAccountingText(payload.B) || null,
-    entityCode: normalizeAccountingText(payload.C) || null,
-    mofAssetNumber: normalizeAccountingText(payload.D) || null,
-    entityAssetNumber: normalizeAccountingText(payload.E) || null,
-    linkedAsset: normalizeAccountingText(payload.F) || null,
-    assetDescription: normalizeAccountingText(payload.G) || null,
-    accountingGroup: normalizeAccountingText(payload.Q) || null,
-    accountingGroupCode: normalizeAccountingText(payload.S) || null,
-    accountingAssetCode: normalizeAccountingText(payload.T) || null,
+    entityName: normalizeAccountingText(payload[map.entityName]) || null,
+    entityCode: normalizeAccountingText(payload[map.entityCode]) || null,
+    mofAssetNumber: normalizeAccountingText(payload[map.mofAssetNumber]) || null,
+    entityAssetNumber: normalizeAccountingText(payload[map.entityAssetNumber]) || null,
+    linkedAsset: normalizeAccountingText(payload[map.linkedAsset]) || null,
+    assetDescription: normalizeAccountingText(payload[map.assetDescription]) || null,
+    accountingGroup: normalizeAccountingText(payload[map.accountingGroup]) || null,
+    accountingGroupCode: normalizeAccountingText(payload[map.accountingGroupCode]) || null,
+    accountingAssetCode: normalizeAccountingText(payload[map.accountingAssetCode]) || null,
     region: normalizeAccountingText(payload[map.region]) || null,
     city: normalizeAccountingText(payload[map.city]) || null,
   };
 };
 
+const fingerprintPayload = (recordType, payload = {}) =>
+  recordType === 'fixed_asset' ? calculateModelBDerivedPayload(payload) : payload;
+
 export const createAccountingFingerprint = (recordType, payload = {}) =>
   crypto
     .createHash('sha256')
-    .update(`${recordType}:${JSON.stringify(payload)}`)
+    .update(`${recordType}:${JSON.stringify(fingerprintPayload(recordType, payload))}`)
     .digest('hex');
+
+export const canonicalizeAccountingStableKey = (stableKey) => {
+  const key = String(stableKey || '').trim();
+  if (!key) return '';
+  const strong = key.match(/^(?:land|building|fixed_asset|asset):(mof|entity):(.+)$/);
+  if (strong) return `asset:${strong[1]}:${strong[2]}`;
+  return key;
+};
 
 export const createAccountingStableKey = (recordType, payload = {}, coreInput = null) => {
   const core = coreInput || accountingCoreFromPayload(recordType, payload);
-  const type = recordType === 'building' ? 'building' : 'land';
   const entityCode = normalizeKeyPart(core.entityCode);
   const entityAsset = normalizeKeyPart(core.entityAssetNumber);
   const mof = normalizeKeyPart(core.mofAssetNumber);
+
+  if (recordType === 'fixed_asset') {
+    if (mof) return `asset:mof:${mof}`;
+    if (entityAsset) return `asset:entity:${entityCode || 'na'}:${entityAsset}`;
+    const tag = normalizeKeyPart(payload.AB);
+    if (tag) return `asset:tag:${tag}`;
+    const fallback = [
+      core.entityName,
+      core.assetDescription,
+      payload.E,
+      payload.H,
+      payload.K,
+      core.region,
+      core.city,
+    ].map(normalizeKeyPart).join('|');
+    return `asset:fallback:${crypto.createHash('sha256').update(fallback || JSON.stringify(payload)).digest('hex').slice(0, 32)}`;
+  }
+
+  const type = recordType === 'building' ? 'building' : 'land';
   const accounting = normalizeKeyPart(core.accountingAssetCode);
   const linked = normalizeKeyPart(core.linkedAsset);
-
   if (mof) return `${type}:mof:${mof}`;
   if (entityAsset) return `${type}:entity:${entityCode || 'na'}:${entityAsset}`;
   if (accounting) return `${type}:accounting:${accounting}`;
@@ -63,22 +92,27 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
     core.region,
     core.city,
   ].map(normalizeKeyPart).join('|');
-
   return `${type}:fallback:${crypto.createHash('sha256').update(fallback).digest('hex').slice(0, 32)}`;
 };
 
 export const buildAccountingSnapshotData = (input, authUser, extra = {}) => {
-  const payload = input.payload || {};
+  const sourcePayload = input.payload || {};
+  const modelBValidation = input.recordType === 'fixed_asset' ? validateModelBPayload(sourcePayload) : null;
+  const payload = modelBValidation?.payload || sourcePayload;
   const ownershipMode = input.ownershipMode || inferAccountingOwnershipMode(input.recordType, payload);
   const progress = calculateAccountingProgress(input.recordType, payload, ownershipMode);
   const core = accountingCoreFromPayload(input.recordType, payload);
   const sourceFingerprint = extra.sourceFingerprint || createAccountingFingerprint(input.recordType, payload);
   const stableKey = extra.stableKey || createAccountingStableKey(input.recordType, payload, core);
+  const requestedStatus = input.committeeStatus || 'not_reviewed';
+  const committeeStatus = modelBValidation && !modelBValidation.complete && requestedStatus === 'not_reviewed'
+    ? 'needs_update'
+    : requestedStatus;
 
   return {
     recordType: input.recordType,
     ownershipMode,
-    committeeStatus: input.committeeStatus || 'not_reviewed',
+    committeeStatus,
     ...core,
     ...progress,
     payload,
@@ -106,7 +140,6 @@ export const ensureAccountingTransformationBaseline = async () => {
       where: { status: { in: ['approved', 'archived'] } },
       orderBy: [{ cycleNumber: 'desc' }],
     });
-
     if (preferred) {
       await prisma.accountingTransformationCycle.updateMany({ data: { isCurrent: false } });
       current = await prisma.accountingTransformationCycle.update({
@@ -132,9 +165,10 @@ export const ensureAccountingTransformationBaseline = async () => {
   }
 
   if (!current) {
+    const aggregate = await prisma.accountingTransformationCycle.aggregate({ _max: { cycleNumber: true } });
     current = await prisma.accountingTransformationCycle.create({
       data: {
-        cycleNumber: (await prisma.accountingTransformationCycle.aggregate({ _max: { cycleNumber: true } }))._max.cycleNumber + 1,
+        cycleNumber: Number(aggregate._max.cycleNumber || 0) + 1,
         name: 'البيانات الحالية',
         status: 'approved',
         isCurrent: true,
@@ -148,22 +182,10 @@ export const ensureAccountingTransformationBaseline = async () => {
   const legacyRecords = await prisma.accountingTransformationRecord.findMany({
     where: { cycleId: null },
     select: {
-      id: true,
-      recordType: true,
-      payload: true,
-      entityName: true,
-      entityCode: true,
-      mofAssetNumber: true,
-      entityAssetNumber: true,
-      linkedAsset: true,
-      assetDescription: true,
-      accountingGroup: true,
-      accountingGroupCode: true,
-      accountingAssetCode: true,
-      region: true,
-      city: true,
-      sourceFingerprint: true,
-      stableKey: true,
+      id: true, recordType: true, payload: true, entityName: true, entityCode: true,
+      mofAssetNumber: true, entityAssetNumber: true, linkedAsset: true, assetDescription: true,
+      accountingGroup: true, accountingGroupCode: true, accountingAssetCode: true, region: true,
+      city: true, sourceFingerprint: true, stableKey: true, changeType: true,
     },
   });
 
@@ -196,37 +218,30 @@ export const nextAccountingRecordNumber = async (offset = 0) => {
 };
 
 export const getAccountingCycleComparison = async (cycle) => {
-  const targetRecords = await prisma.accountingTransformationRecord.findMany({
-    where: { cycleId: cycle.id },
-    select: {
-      id: true,
-      stableKey: true,
-      changeType: true,
-      recordNumber: true,
-      recordType: true,
-      entityName: true,
-      entityAssetNumber: true,
-      assetDescription: true,
-    },
+  const [targetRecords, baseRecords] = await Promise.all([
+    prisma.accountingTransformationRecord.findMany({
+      where: { cycleId: cycle.id },
+      select: {
+        id: true, stableKey: true, changeType: true, recordNumber: true, recordType: true,
+        entityName: true, entityAssetNumber: true, assetDescription: true,
+      },
+    }),
+    cycle.basedOnCycleId
+      ? prisma.accountingTransformationRecord.findMany({
+          where: { cycleId: cycle.basedOnCycleId },
+          select: {
+            id: true, stableKey: true, recordNumber: true, recordType: true,
+            entityName: true, entityAssetNumber: true, assetDescription: true,
+          },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const targetKeys = new Set(targetRecords.map((item) => canonicalizeAccountingStableKey(item.stableKey)).filter(Boolean));
+  const removedRecords = baseRecords.filter((item) => {
+    const key = canonicalizeAccountingStableKey(item.stableKey);
+    return key && !targetKeys.has(key);
   });
-
-  const baseRecords = cycle.basedOnCycleId
-    ? await prisma.accountingTransformationRecord.findMany({
-        where: { cycleId: cycle.basedOnCycleId },
-        select: {
-          id: true,
-          stableKey: true,
-          recordNumber: true,
-          recordType: true,
-          entityName: true,
-          entityAssetNumber: true,
-          assetDescription: true,
-        },
-      })
-    : [];
-
-  const targetKeys = new Set(targetRecords.map((item) => item.stableKey).filter(Boolean));
-  const removedRecords = baseRecords.filter((item) => item.stableKey && !targetKeys.has(item.stableKey));
   const countByType = targetRecords.reduce((acc, item) => {
     const key = item.changeType || 'new';
     acc[key] = (acc[key] || 0) + 1;

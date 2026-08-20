@@ -4,6 +4,7 @@ import { prisma } from '../prisma.js';
 import { createAuditLog, getClientIp } from '../services/audit.service.js';
 import {
   buildAccountingSnapshotData,
+  canonicalizeAccountingStableKey,
   createAccountingFingerprint,
   createAccountingStableKey,
   ensureAccountingTransformationBaseline,
@@ -23,7 +24,7 @@ const attachmentSchema = z.object({
 });
 
 const recordInputSchema = z.object({
-  recordType: z.enum(['land', 'building']),
+  recordType: z.enum(['land', 'building', 'fixed_asset']),
   ownershipMode: z.enum(['owned', 'leased', 'other']).optional(),
   committeeStatus: z.enum(['not_reviewed', 'under_review', 'needs_update', 'approved', 'completed']).default('not_reviewed'),
   payload: z.record(z.string(), z.unknown()).default({}),
@@ -68,10 +69,9 @@ const getCycleOr404 = async (req, res) => {
 const assertDraftCycle = (cycle, res) => {
   if (cycle.status !== 'draft' || cycle.isCurrent) {
     res.status(409).json({
-      message:
-        cycle.status === 'under_review'
-          ? 'الدورة تحت المراجعة ومجمّدة. أعدها إلى المسودة قبل تعديل بياناتها.'
-          : 'لا يمكن تعديل هذه الدورة بعد اعتمادها أو أرشفتها',
+      message: cycle.status === 'under_review'
+        ? 'الدورة تحت المراجعة ومجمّدة. أعدها إلى المسودة قبل تعديل بياناتها.'
+        : 'لا يمكن تعديل هذه الدورة بعد اعتمادها أو أرشفتها',
     });
     return false;
   }
@@ -93,8 +93,13 @@ const mergeAccountingPayload = (previous = {}, incoming = {}) => {
 
 const itemIsValid = (item) => {
   const payload = item.payload || {};
+  if (item.recordType === 'fixed_asset') {
+    return ['Y', 'Z', 'AA', 'AB'].some((column) => hasAccountingValue(payload[column]));
+  }
   return hasAccountingValue(payload.B) || hasAccountingValue(payload.D) || hasAccountingValue(payload.E) || hasAccountingValue(payload.G);
 };
+
+const canonicalKey = (value) => canonicalizeAccountingStableKey(value);
 
 const carryForwardUnchangedAccountingRecords = async (cycle) => {
   if (!cycle.basedOnCycleId) return 0;
@@ -102,8 +107,11 @@ const carryForwardUnchangedAccountingRecords = async (cycle) => {
     prisma.accountingTransformationRecord.findMany({ where: { cycleId: cycle.basedOnCycleId } }),
     prisma.accountingTransformationRecord.findMany({ where: { cycleId: cycle.id }, select: { stableKey: true } }),
   ]);
-  const targetKeys = new Set(targetRecords.map((item) => item.stableKey).filter(Boolean));
-  const missing = baseRecords.filter((record) => record.stableKey && !targetKeys.has(record.stableKey));
+  const targetKeys = new Set(targetRecords.map((item) => canonicalKey(item.stableKey)).filter(Boolean));
+  const missing = baseRecords.filter((record) => {
+    const key = canonicalKey(record.stableKey);
+    return key && !targetKeys.has(key);
+  });
   if (!missing.length) return 0;
 
   const baseNumber = await nextAccountingRecordNumber();
@@ -133,9 +141,7 @@ router.get('/', async (_req, res, next) => {
       include: { _count: { select: { records: true } } },
     });
     res.json(cycles.map((cycle) => serializeCycle(cycle)));
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.get('/current', async (_req, res, next) => {
@@ -146,9 +152,7 @@ router.get('/current', async (_req, res, next) => {
       include: { _count: { select: { records: true } } },
     });
     res.json(serializeCycle(cycle));
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.get('/:id/comparison', async (req, res, next) => {
@@ -156,9 +160,7 @@ router.get('/:id/comparison', async (req, res, next) => {
     const cycle = await getCycleOr404(req, res);
     if (!cycle) return;
     res.json(await getAccountingCycleComparison(cycle));
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.post('/', async (req, res, next) => {
@@ -169,12 +171,10 @@ router.post('/', async (req, res, next) => {
       where: { status: { in: ['draft', 'under_review'] } },
       orderBy: { cycleNumber: 'desc' },
     });
-    if (openCycle) {
-      return res.status(409).json({
-        message: `توجد دورة تحديث مفتوحة بالفعل: ${openCycle.name}. أكملها أو احذفها قبل إنشاء دورة جديدة.`,
-        cycleId: openCycle.id,
-      });
-    }
+    if (openCycle) return res.status(409).json({
+      message: `توجد دورة تحديث مفتوحة بالفعل: ${openCycle.name}. أكملها أو احذفها قبل إنشاء دورة جديدة.`,
+      cycleId: openCycle.id,
+    });
 
     const max = await prisma.accountingTransformationCycle.aggregate({ _max: { cycleNumber: true } });
     const cycle = await prisma.accountingTransformationCycle.create({
@@ -182,31 +182,17 @@ router.post('/', async (req, res, next) => {
         cycleNumber: Number(max._max.cycleNumber || 0) + 1,
         name: input.name,
         description: input.description || null,
-        status: 'draft',
-        isCurrent: false,
-        basedOnCycleId: current.id,
-        createdBy: userLabel(req),
+        status: 'draft', isCurrent: false, basedOnCycleId: current.id, createdBy: userLabel(req),
       },
       include: { _count: { select: { records: true } } },
     });
-
     await createAuditLog({
-      user: req.authUser,
-      action: 'create_cycle',
-      module: 'accounting_transformation',
-      entity: 'accounting_cycle',
-      entityId: cycle.id,
-      entityLabel: cycle.name,
-      description: 'إنشاء دورة تحديث جديدة لبيانات التحول المحاسبي',
-      newData: cycle,
-      ipAddress: getClientIp(req),
-      userAgent: req.headers['user-agent'],
+      user: req.authUser, action: 'create_cycle', module: 'accounting_transformation', entity: 'accounting_cycle', entityId: cycle.id,
+      entityLabel: cycle.name, description: 'إنشاء دورة تحديث جديدة لبيانات التحول المحاسبي', newData: cycle,
+      ipAddress: getClientIp(req), userAgent: req.headers['user-agent'],
     });
-
     res.status(201).json(serializeCycle(cycle));
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.post('/:id/import-preview', async (req, res, next) => {
@@ -218,16 +204,19 @@ router.post('/:id/import-preview', async (req, res, next) => {
     const baseRecords = cycle.basedOnCycleId
       ? await prisma.accountingTransformationRecord.findMany({
           where: { cycleId: cycle.basedOnCycleId },
-          select: { stableKey: true, sourceFingerprint: true, payload: true },
+          select: { id: true, stableKey: true, sourceFingerprint: true, payload: true, recordType: true },
         })
       : [];
     const targetRecords = await prisma.accountingTransformationRecord.findMany({
-      where: { cycleId: cycle.id },
-      select: { stableKey: true },
+      where: { cycleId: cycle.id }, select: { stableKey: true },
     });
 
-    const baseByKey = new Map(baseRecords.filter((item) => item.stableKey).map((item) => [item.stableKey, item]));
-    const targetKeys = new Set(targetRecords.map((item) => item.stableKey).filter(Boolean));
+    const baseByKey = new Map();
+    for (const record of baseRecords) {
+      const key = canonicalKey(record.stableKey);
+      if (key && !baseByKey.has(key)) baseByKey.set(key, record);
+    }
+    const targetKeys = new Set(targetRecords.map((item) => canonicalKey(item.stableKey)).filter(Boolean));
     const seen = new Set();
     const fileKeys = new Set();
     const invalidIndexes = [];
@@ -243,55 +232,42 @@ router.post('/:id/import-preview', async (req, res, next) => {
         return;
       }
       const stableKey = createAccountingStableKey(item.recordType, item.payload || {});
-      const previous = baseByKey.get(stableKey);
-      const mergedPayload = previous ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
+      const matchKey = canonicalKey(stableKey);
+      const previous = baseByKey.get(matchKey);
+      const canMerge = previous && previous.recordType === item.recordType;
+      const mergedPayload = canMerge ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
       const fingerprint = createAccountingFingerprint(item.recordType, mergedPayload);
+      fileKeys.add(matchKey);
 
-      // A key present anywhere in the uploaded file must count as present when
-      // calculating removed records, even if that row was imported in an earlier batch.
-      fileKeys.add(stableKey);
-
-      if (seen.has(stableKey)) {
+      if (seen.has(matchKey)) {
         duplicateIndexes.push(index);
         return;
       }
-      seen.add(stableKey);
+      seen.add(matchKey);
 
-      // Change classification describes the complete uploaded version and must
-      // remain stable even after one or more batches have already been saved.
       if (!previous) newIndexes.push(index);
-      else if (previous.sourceFingerprint === fingerprint) unchangedIndexes.push(index);
+      else if (previous.recordType === item.recordType && previous.sourceFingerprint === fingerprint) unchangedIndexes.push(index);
       else modifiedIndexes.push(index);
 
-      if (targetKeys.has(stableKey)) {
+      if (targetKeys.has(matchKey)) {
         duplicateIndexes.push(index);
         return;
       }
       freshIndexes.push(index);
     });
 
-    const removed = baseRecords.filter((item) => item.stableKey && !fileKeys.has(item.stableKey)).length;
+    const notSupplied = baseRecords.filter((item) => {
+      const key = canonicalKey(item.stableKey);
+      return key && !fileKeys.has(key);
+    }).length;
 
     res.json({
-      total: input.items.length,
-      fresh: freshIndexes.length,
-      duplicate: duplicateIndexes.length,
-      invalid: invalidIndexes.length,
-      freshIndexes,
-      duplicateIndexes,
-      invalidIndexes,
-      new: newIndexes.length,
-      modified: modifiedIndexes.length,
-      unchanged: unchangedIndexes.length,
-      removed: 0,
-      notSupplied: removed,
-      newIndexes,
-      modifiedIndexes,
-      unchangedIndexes,
+      total: input.items.length, fresh: freshIndexes.length, duplicate: duplicateIndexes.length, invalid: invalidIndexes.length,
+      freshIndexes, duplicateIndexes, invalidIndexes,
+      new: newIndexes.length, modified: modifiedIndexes.length, unchanged: unchangedIndexes.length,
+      removed: 0, notSupplied, newIndexes, modifiedIndexes, unchangedIndexes,
     });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.post('/:id/import', async (req, res, next) => {
@@ -303,41 +279,43 @@ router.post('/:id/import', async (req, res, next) => {
     const baseRecords = cycle.basedOnCycleId
       ? await prisma.accountingTransformationRecord.findMany({
           where: { cycleId: cycle.basedOnCycleId },
-          select: { id: true, stableKey: true, sourceFingerprint: true, payload: true },
+          select: { id: true, stableKey: true, sourceFingerprint: true, payload: true, recordType: true },
         })
       : [];
-    const baseByKey = new Map(baseRecords.filter((item) => item.stableKey).map((item) => [item.stableKey, item]));
+    const baseByKey = new Map();
+    for (const record of baseRecords) {
+      const key = canonicalKey(record.stableKey);
+      if (key && !baseByKey.has(key)) baseByKey.set(key, record);
+    }
     const targetRecords = await prisma.accountingTransformationRecord.findMany({
-      where: { cycleId: cycle.id },
-      select: { stableKey: true },
+      where: { cycleId: cycle.id }, select: { stableKey: true },
     });
-    const targetKeys = new Set(targetRecords.map((item) => item.stableKey).filter(Boolean));
+    const targetKeys = new Set(targetRecords.map((item) => canonicalKey(item.stableKey)).filter(Boolean));
     const baseNumber = await nextAccountingRecordNumber();
     const baseSequence = Number(baseNumber.split('-').pop()) || 1;
     const year = new Date().getFullYear();
     const seen = new Set();
     const createdRows = [];
-    let created = 0;
     let skipped = 0;
     let createdNew = 0;
     let createdModified = 0;
     let createdUnchanged = 0;
 
     for (const item of input.items) {
-      if (!itemIsValid(item)) {
-        skipped += 1;
-        continue;
-      }
+      if (!itemIsValid(item)) { skipped += 1; continue; }
       const stableKey = createAccountingStableKey(item.recordType, item.payload || {});
-      if (seen.has(stableKey) || targetKeys.has(stableKey)) {
-        skipped += 1;
-        continue;
-      }
-      seen.add(stableKey);
-      const previous = baseByKey.get(stableKey);
-      const mergedPayload = previous ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
+      const matchKey = canonicalKey(stableKey);
+      if (seen.has(matchKey) || targetKeys.has(matchKey)) { skipped += 1; continue; }
+      seen.add(matchKey);
+      const previous = baseByKey.get(matchKey);
+      const canMerge = previous && previous.recordType === item.recordType;
+      const mergedPayload = canMerge ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
       const sourceFingerprint = createAccountingFingerprint(item.recordType, mergedPayload);
-      const changeType = !previous ? 'new' : previous.sourceFingerprint === sourceFingerprint ? 'unchanged' : 'modified';
+      const changeType = !previous
+        ? 'new'
+        : previous.recordType === item.recordType && previous.sourceFingerprint === sourceFingerprint
+          ? 'unchanged'
+          : 'modified';
       const data = buildAccountingSnapshotData({ ...item, payload: mergedPayload }, req.authUser, {
         cycleId: cycle.id,
         stableKey,
@@ -345,14 +323,13 @@ router.post('/:id/import', async (req, res, next) => {
         changeType,
         previousRecordId: previous?.id || null,
       });
-
+      const sequence = baseSequence + createdRows.length;
       createdRows.push({
         ...data,
-        recordNumber: `ACT-${year}-${String(baseSequence + created).padStart(6, '0')}`,
+        recordNumber: `ACT-${year}-${String(sequence).padStart(6, '0')}`,
         createdBy: userLabel(req),
       });
-      targetKeys.add(stableKey);
-      created += 1;
+      targetKeys.add(matchKey);
       if (changeType === 'new') createdNew += 1;
       else if (changeType === 'modified') createdModified += 1;
       else createdUnchanged += 1;
@@ -366,40 +343,20 @@ router.post('/:id/import', async (req, res, next) => {
 
     const updatedCycle = await prisma.accountingTransformationCycle.update({
       where: { id: cycle.id },
-      data: {
-        sourceFileName: input.fileName || cycle.sourceFileName || null,
-        importedAt: new Date(),
-        importedBy: userLabel(req),
-      },
+      data: { sourceFileName: input.fileName || cycle.sourceFileName || null, importedAt: new Date(), importedBy: userLabel(req) },
       include: { _count: { select: { records: true } } },
     });
-
     await createAuditLog({
-      user: req.authUser,
-      action: 'cycle_import',
-      module: 'accounting_transformation',
-      entity: 'accounting_cycle',
-      entityId: cycle.id,
-      entityLabel: cycle.name,
-      description: `استيراد بيانات إلى دورة التحديث: ${created} سجل`,
-      newData: { created, skipped, new: createdNew, modified: createdModified, unchanged: createdUnchanged, fileName: input.fileName || null },
-      ipAddress: getClientIp(req),
-      userAgent: req.headers['user-agent'],
+      user: req.authUser, action: 'cycle_import', module: 'accounting_transformation', entity: 'accounting_cycle', entityId: cycle.id,
+      entityLabel: cycle.name, description: `استيراد بيانات إلى دورة التحديث: ${createdRows.length} سجل`,
+      newData: { created: createdRows.length, skipped, new: createdNew, modified: createdModified, unchanged: createdUnchanged, fileName: input.fileName || null },
+      ipAddress: getClientIp(req), userAgent: req.headers['user-agent'],
     });
-
     res.status(201).json({
-      created,
-      updated: 0,
-      skipped,
-      total: input.items.length,
-      new: createdNew,
-      modified: createdModified,
-      unchanged: createdUnchanged,
-      cycle: serializeCycle(updatedCycle),
+      created: createdRows.length, updated: 0, skipped, total: input.items.length,
+      new: createdNew, modified: createdModified, unchanged: createdUnchanged, cycle: serializeCycle(updatedCycle),
     });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.post('/:id/review', async (req, res, next) => {
@@ -408,16 +365,12 @@ router.post('/:id/review', async (req, res, next) => {
     const cycle = await getCycleOr404(req, res);
     if (!cycle || !assertDraftCycle(cycle, res)) return;
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن إرسال دورة فارغة للمراجعة' });
-
     const updated = await prisma.accountingTransformationCycle.update({
-      where: { id: cycle.id },
-      data: { status: 'under_review', reviewedAt: new Date(), reviewedBy: userLabel(req) },
+      where: { id: cycle.id }, data: { status: 'under_review', reviewedAt: new Date(), reviewedBy: userLabel(req) },
       include: { _count: { select: { records: true } } },
     });
     res.json(serializeCycle(updated));
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.post('/:id/reopen', async (req, res, next) => {
@@ -426,14 +379,10 @@ router.post('/:id/reopen', async (req, res, next) => {
     const cycle = await getCycleOr404(req, res);
     if (!cycle || cycle.isCurrent || cycle.status !== 'under_review') return res.status(409).json({ message: 'يمكن إعادة الدورات تحت المراجعة فقط' });
     const updated = await prisma.accountingTransformationCycle.update({
-      where: { id: cycle.id },
-      data: { status: 'draft' },
-      include: { _count: { select: { records: true } } },
+      where: { id: cycle.id }, data: { status: 'draft' }, include: { _count: { select: { records: true } } },
     });
     res.json(serializeCycle(updated));
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.post('/:id/approve', async (req, res, next) => {
@@ -441,55 +390,37 @@ router.post('/:id/approve', async (req, res, next) => {
     if (!canApproveCycles(req)) return res.status(403).json({ message: 'اعتماد دورة التحديث يتطلب صلاحية «اعتماد دورة»' });
     const cycle = await getCycleOr404(req, res);
     if (!cycle) return;
-    if (cycle.status !== 'under_review' || cycle.isCurrent) {
-      return res.status(409).json({ message: 'يجب إرسال الدورة للمراجعة قبل اعتمادها' });
-    }
+    if (cycle.status !== 'under_review' || cycle.isCurrent) return res.status(409).json({ message: 'يجب إرسال الدورة للمراجعة قبل اعتمادها' });
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن اعتماد دورة لا تحتوي على بيانات' });
 
     const carriedForward = await carryForwardUnchangedAccountingRecords(cycle);
     const unresolved = await prisma.accountingTransformationRecord.count({
       where: { cycleId: cycle.id, committeeStatus: { in: ['not_reviewed', 'under_review', 'needs_update'] } },
     });
-    if (unresolved) {
-      return res.status(409).json({ message: `لا يمكن اعتماد الدورة: يوجد ${unresolved} سجل لم تُحسم مراجعته أو يحتاج تحديثًا.` });
-    }
+    if (unresolved) return res.status(409).json({ message: `لا يمكن اعتماد الدورة: يوجد ${unresolved} سجل لم تُحسم مراجعته أو يحتاج تحديثًا.` });
+
     const comparison = await getAccountingCycleComparison(cycle);
     const approvedBy = userLabel(req);
     const approvedAt = new Date();
-
     await prisma.$transaction(async (tx) => {
       await tx.accountingTransformationCycle.updateMany({
-        where: { isCurrent: true, id: { not: cycle.id } },
-        data: { isCurrent: false, status: 'archived', archivedAt: approvedAt },
+        where: { isCurrent: true, id: { not: cycle.id } }, data: { isCurrent: false, status: 'archived', archivedAt: approvedAt },
       });
       await tx.accountingTransformationCycle.update({
-        where: { id: cycle.id },
-        data: { isCurrent: true, status: 'approved', approvedAt, approvedBy },
+        where: { id: cycle.id }, data: { isCurrent: true, status: 'approved', approvedAt, approvedBy },
       });
     });
 
     const updated = await prisma.accountingTransformationCycle.findUnique({
-      where: { id: cycle.id },
-      include: { _count: { select: { records: true } } },
+      where: { id: cycle.id }, include: { _count: { select: { records: true } } },
     });
-
     await createAuditLog({
-      user: req.authUser,
-      action: 'approve_cycle',
-      module: 'accounting_transformation',
-      entity: 'accounting_cycle',
-      entityId: cycle.id,
-      entityLabel: cycle.name,
-      description: 'اعتماد دورة تحديث وجعلها البيانات الحالية',
-      newData: { cycle: updated, comparison, carriedForward },
-      ipAddress: getClientIp(req),
-      userAgent: req.headers['user-agent'],
+      user: req.authUser, action: 'approve_cycle', module: 'accounting_transformation', entity: 'accounting_cycle', entityId: cycle.id,
+      entityLabel: cycle.name, description: 'اعتماد دورة تحديث وجعلها البيانات الحالية',
+      newData: { cycle: updated, comparison, carriedForward }, ipAddress: getClientIp(req), userAgent: req.headers['user-agent'],
     });
-
     res.json({ cycle: serializeCycle(updated), comparison });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 router.delete('/:id', async (req, res, next) => {
@@ -501,9 +432,7 @@ router.delete('/:id', async (req, res, next) => {
     }
     await prisma.accountingTransformationCycle.delete({ where: { id: cycle.id } });
     res.status(204).send();
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 export default router;
