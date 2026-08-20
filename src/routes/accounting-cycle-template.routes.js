@@ -68,4 +68,16 @@ router.get('/:id/template/file', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Let the legacy delete handler remove the cycle itself, but clean the detached
+// snapshot first only when the cycle is actually eligible for deletion.
+router.delete('/:id', async (req, _res, next) => {
+  try {
+    const cycle = await getCycle(req.params.id);
+    if (cycle && !cycle.isCurrent && ['draft', 'under_review'].includes(cycle.status)) {
+      await prisma.accountingCycleTemplateSnapshot.deleteMany({ where: { cycleId: cycle.id } });
+    }
+    next();
+  } catch (error) { next(error); }
+});
+
 export default router;
