@@ -34,6 +34,16 @@ const baseWhere = (req) => {
   return { ...cycleWhere, ...(filters.length ? { AND: filters } : {}) };
 };
 
+const mergeWhere = (base, extra) => {
+  if (!extra) return base;
+  const { AND: baseAnd = [], ...baseRest } = base || {};
+  const { AND: extraAnd = [], ...extraRest } = extra || {};
+  const normalizedBase = Array.isArray(baseAnd) ? baseAnd : [baseAnd];
+  const normalizedExtra = Array.isArray(extraAnd) ? extraAnd : [extraAnd];
+  const clauses = [...normalizedBase, ...normalizedExtra].filter((part) => part && Object.keys(part).length);
+  return { ...baseRest, ...extraRest, ...(clauses.length ? { AND: clauses } : {}) };
+};
+
 const legacyClassification = (payload = {}) => ({
   level1Code: valueOr(payload.J),
   level1Label: valueOr(payload.H),
@@ -229,28 +239,49 @@ const leafWhere = (key) => {
 
 const matchesLeafExactly = (record, key) => hierarchyIdentity(record).leafKey === key;
 
+const exactUnclassifiedPage = async (where, key, page, limit) => {
+  const start = (page - 1) * limit;
+  const items = [];
+  let total = 0;
+  let cursor = null;
+
+  for (;;) {
+    const rows = await prisma.accountingTransformationRecord.findMany({
+      where,
+      orderBy: { id: 'asc' },
+      take: BATCH_SIZE,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    if (!rows.length) break;
+    for (const record of rows) {
+      if (!matchesLeafExactly(record, key)) continue;
+      if (total >= start && items.length < limit) items.push(record);
+      total += 1;
+    }
+    cursor = rows[rows.length - 1].id;
+    if (rows.length < BATCH_SIZE) break;
+  }
+  return { items, total };
+};
+
 router.get('/records', async (req, res, next) => {
   try {
     const key = text(req.query.key);
     if (!key) return res.status(400).json({ message: 'مفتاح المجموعة مطلوب.' });
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(72, Math.max(12, Number(req.query.limit) || 36));
+    const base = baseWhere(req);
     const structuredWhere = leafWhere(key);
-    const where = { ...baseWhere(req), ...(structuredWhere || {}) };
+    const where = mergeWhere(base, structuredWhere);
 
     if (key.includes('unclassified')) {
-      const candidates = await prisma.accountingTransformationRecord.findMany({
-        where: baseWhere(req),
-        orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
-      });
-      const exact = candidates.filter((record) => matchesLeafExactly(record, key));
-      const start = (page - 1) * limit;
+      const exact = await exactUnclassifiedPage(base, key, page, limit);
       return res.json({
-        items: exact.slice(start, start + limit),
+        items: exact.items,
         page,
         limit,
-        total: exact.length,
-        totalPages: Math.max(1, Math.ceil(exact.length / limit)),
+        total: exact.total,
+        totalPages: Math.max(1, Math.ceil(exact.total / limit)),
       });
     }
 
