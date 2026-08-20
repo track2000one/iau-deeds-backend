@@ -10,6 +10,7 @@ import {
   createAssetStableKey,
   ensureAssetBaselineCycle,
   getAssetCycleComparison,
+  mergeAssetCycleSnapshots,
   normalizeAssetCycleInput,
 } from '../services/assetCycles.service.js';
 
@@ -315,14 +316,15 @@ router.post('/:id/import-preview', async (req, res, next) => {
     const seen = new Set();
     const result = { total: input.items.length, fresh: 0, duplicate: 0, invalid: 0, new: 0, modified: 0, unchanged: 0, needsReview: 0 };
     for (const row of input.items) {
-      const snapshot = normalizeAssetCycleInput(row.input);
+      const incomingSnapshot = normalizeAssetCycleInput(row.input);
+      const identity = createAssetStableKey(incomingSnapshot);
+      const previous = baseByKey.get(identity.key);
+      const snapshot = previous ? mergeAssetCycleSnapshots(previous.payload || {}, row.input) : incomingSnapshot;
       if (!isSnapshotValid(snapshot)) { result.invalid += 1; continue; }
-      const identity = createAssetStableKey(snapshot);
       const fingerprint = createAssetFingerprint(snapshot);
       if (seen.has(identity.key) || targetKeys.has(identity.key)) { result.duplicate += 1; continue; }
       seen.add(identity.key);
       result.fresh += 1;
-      const previous = baseByKey.get(identity.key);
       if (!previous) result.new += 1;
       else if (previous.sourceFingerprint === fingerprint) result.unchanged += 1;
       else result.modified += 1;
@@ -354,13 +356,14 @@ router.post('/:id/import', async (req, res, next) => {
     let needsReview = 0;
 
     for (const row of input.items) {
-      const snapshot = normalizeAssetCycleInput(row.input);
-      if (!isSnapshotValid(snapshot)) { invalid += 1; continue; }
-      const identity = createAssetStableKey(snapshot);
+      const incomingSnapshot = normalizeAssetCycleInput(row.input);
+      const identity = createAssetStableKey(incomingSnapshot);
       if (seen.has(identity.key) || targetKeys.has(identity.key)) { skipped += 1; continue; }
+      const previous = baseByKey.get(identity.key);
+      const snapshot = previous ? mergeAssetCycleSnapshots(previous.payload || {}, row.input) : incomingSnapshot;
+      if (!isSnapshotValid(snapshot)) { invalid += 1; continue; }
       seen.add(identity.key);
       const fingerprint = createAssetFingerprint(snapshot);
-      const previous = baseByKey.get(identity.key);
       const changeType = !previous ? 'new' : previous.sourceFingerprint === fingerprint ? 'unchanged' : 'modified';
       const changedFields = previous && changeType === 'modified' ? compareAssetSnapshots(previous.payload || {}, snapshot) : [];
       const reviewStatus = identity.confidence === 'fallback' ? 'needs_review' : 'auto';

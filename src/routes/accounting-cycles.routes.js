@@ -78,9 +78,22 @@ const assertDraftCycle = (cycle, res) => {
   return true;
 };
 
+const mergeAccountingPayload = (previous = {}, incoming = {}) => {
+  const merged = { ...(previous || {}) };
+  const clearFields = Array.isArray(incoming?.__clearFields) ? incoming.__clearFields.map(String) : [];
+  for (const [key, value] of Object.entries(incoming || {})) {
+    if (key === '__clearFields') continue;
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    merged[key] = value;
+  }
+  for (const field of clearFields) merged[field] = '';
+  return merged;
+};
+
 const itemIsValid = (item) => {
   const payload = item.payload || {};
-  return hasAccountingValue(payload.B) || hasAccountingValue(payload.E) || hasAccountingValue(payload.G);
+  return hasAccountingValue(payload.B) || hasAccountingValue(payload.D) || hasAccountingValue(payload.E) || hasAccountingValue(payload.G);
 };
 
 const carryForwardUnchangedAccountingRecords = async (cycle) => {
@@ -205,7 +218,7 @@ router.post('/:id/import-preview', async (req, res, next) => {
     const baseRecords = cycle.basedOnCycleId
       ? await prisma.accountingTransformationRecord.findMany({
           where: { cycleId: cycle.basedOnCycleId },
-          select: { stableKey: true, sourceFingerprint: true },
+          select: { stableKey: true, sourceFingerprint: true, payload: true },
         })
       : [];
     const targetRecords = await prisma.accountingTransformationRecord.findMany({
@@ -230,7 +243,9 @@ router.post('/:id/import-preview', async (req, res, next) => {
         return;
       }
       const stableKey = createAccountingStableKey(item.recordType, item.payload || {});
-      const fingerprint = createAccountingFingerprint(item.recordType, item.payload || {});
+      const previous = baseByKey.get(stableKey);
+      const mergedPayload = previous ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
+      const fingerprint = createAccountingFingerprint(item.recordType, mergedPayload);
 
       // A key present anywhere in the uploaded file must count as present when
       // calculating removed records, even if that row was imported in an earlier batch.
@@ -244,7 +259,6 @@ router.post('/:id/import-preview', async (req, res, next) => {
 
       // Change classification describes the complete uploaded version and must
       // remain stable even after one or more batches have already been saved.
-      const previous = baseByKey.get(stableKey);
       if (!previous) newIndexes.push(index);
       else if (previous.sourceFingerprint === fingerprint) unchangedIndexes.push(index);
       else modifiedIndexes.push(index);
@@ -289,7 +303,7 @@ router.post('/:id/import', async (req, res, next) => {
     const baseRecords = cycle.basedOnCycleId
       ? await prisma.accountingTransformationRecord.findMany({
           where: { cycleId: cycle.basedOnCycleId },
-          select: { id: true, stableKey: true, sourceFingerprint: true },
+          select: { id: true, stableKey: true, sourceFingerprint: true, payload: true },
         })
       : [];
     const baseByKey = new Map(baseRecords.filter((item) => item.stableKey).map((item) => [item.stableKey, item]));
@@ -320,10 +334,11 @@ router.post('/:id/import', async (req, res, next) => {
         continue;
       }
       seen.add(stableKey);
-      const sourceFingerprint = createAccountingFingerprint(item.recordType, item.payload || {});
       const previous = baseByKey.get(stableKey);
+      const mergedPayload = previous ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
+      const sourceFingerprint = createAccountingFingerprint(item.recordType, mergedPayload);
       const changeType = !previous ? 'new' : previous.sourceFingerprint === sourceFingerprint ? 'unchanged' : 'modified';
-      const data = buildAccountingSnapshotData(item, req.authUser, {
+      const data = buildAccountingSnapshotData({ ...item, payload: mergedPayload }, req.authUser, {
         cycleId: cycle.id,
         stableKey,
         sourceFingerprint,
