@@ -1,1 +1,0 @@
-Temporary branch note for cycle-specific report/template verification. Remove before merge.
