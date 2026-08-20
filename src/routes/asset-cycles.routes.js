@@ -452,10 +452,9 @@ router.post('/:id/approve', async (req, res, next) => {
     if (!cycle) return;
     if (cycle.status !== 'under_review' || cycle.isCurrent) return res.status(409).json({ message: 'يجب إرسال الدورة للمراجعة قبل اعتمادها.' });
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن اعتماد دورة لا تحتوي على بيانات.' });
+    const carriedForward = await carryForwardUnchangedAssetRecords(cycle);
     const pendingReview = await prisma.assetCycleRecord.count({ where: { cycleId: cycle.id, reviewStatus: 'needs_review' } });
     if (pendingReview) return res.status(409).json({ message: `يوجد ${pendingReview} سجل يحتاج مراجعة وتأكيد قبل اعتماد الدورة.` });
-
-    const carriedForward = await carryForwardUnchangedAssetRecords(cycle);
     const comparison = await getAssetCycleComparison(cycle);
     const records = await prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.id } });
     const baseRecords = cycle.basedOnCycleId ? await prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.basedOnCycleId } }) : [];

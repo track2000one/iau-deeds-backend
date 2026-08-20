@@ -431,14 +431,13 @@ router.post('/:id/approve', async (req, res, next) => {
     }
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن اعتماد دورة لا تحتوي على بيانات' });
 
+    const carriedForward = await carryForwardUnchangedAccountingRecords(cycle);
     const unresolved = await prisma.accountingTransformationRecord.count({
       where: { cycleId: cycle.id, committeeStatus: { in: ['not_reviewed', 'under_review', 'needs_update'] } },
     });
     if (unresolved) {
       return res.status(409).json({ message: `لا يمكن اعتماد الدورة: يوجد ${unresolved} سجل لم تُحسم مراجعته أو يحتاج تحديثًا.` });
     }
-
-    const carriedForward = await carryForwardUnchangedAccountingRecords(cycle);
     const comparison = await getAccountingCycleComparison(cycle);
     const approvedBy = userLabel(req);
     const approvedAt = new Date();
