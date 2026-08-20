@@ -70,6 +70,8 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
       payload.E,
       payload.H,
       payload.K,
+      core.accountingAssetCode,
+      core.linkedAsset,
       core.region,
       core.city,
     ].map(normalizeKeyPart).join('|');
@@ -81,18 +83,23 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
   const linked = normalizeKeyPart(core.linkedAsset);
   if (mof) return `${type}:mof:${mof}`;
   if (entityAsset) return `${type}:entity:${entityCode || 'na'}:${entityAsset}`;
-  if (accounting) return `${type}:accounting:${accounting}`;
-  if (linked) return `${type}:linked:${linked}`;
 
+  // Accounting/classification codes and linked-parent references are not unique
+  // asset identifiers. They may repeat across many assets, so they can only
+  // contribute to a composite fallback signature and must never identify a row
+  // by themselves.
   const fallback = [
     type,
+    entityCode,
     core.entityName,
     core.assetDescription,
+    linked,
+    accounting,
     core.accountingGroupCode,
     core.region,
     core.city,
   ].map(normalizeKeyPart).join('|');
-  return `${type}:fallback:${crypto.createHash('sha256').update(fallback).digest('hex').slice(0, 32)}`;
+  return `${type}:fallback:${crypto.createHash('sha256').update(fallback || JSON.stringify(payload)).digest('hex').slice(0, 32)}`;
 };
 
 export const buildAccountingSnapshotData = (input, authUser, extra = {}) => {
