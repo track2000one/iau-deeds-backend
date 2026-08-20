@@ -21,6 +21,7 @@ import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';
 import mosquesRoutes, { mosquesPublicRoutes } from './routes/mosques.routes.js';
 import accountingTransformationRoutes from './routes/accounting-transformation.routes.js';
 import accountingCyclesRoutes from './routes/accounting-cycles.routes.js';
+import accountingCycleReimportRoutes from './routes/accounting-cycle-reimport.routes.js';
 import accountingAssetClassificationRoutes from './routes/accounting-asset-classification.routes.js';
 import accountingHierarchyRoutes from './routes/accounting-hierarchy.routes.js';
 import {
@@ -161,6 +162,17 @@ app.use(
   auditTrail('accounting_transformation'),
   requirePermission('accounting_transformation'),
   accountingAssetClassificationRoutes
+);
+
+// Draft re-import reconciliation must run before the legacy cycle router so that
+// repeated departmental files can update existing draft rows instead of being
+// treated as unconditional duplicates.
+app.use(
+  '/api/accounting-transformation/cycles',
+  requireAuth,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingCycleReimportRoutes
 );
 
 app.use(
