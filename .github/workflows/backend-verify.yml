@@ -25,10 +25,8 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - name: Apply governance and performance patch
-        run: |
-          node scripts/agent-cycle-governance-performance.mjs
-          node scripts/agent-cycle-final-review-gates.mjs
+      - name: Apply final merged-cycle review gates
+        run: node scripts/agent-cycle-final-review-gates.mjs
       - name: Install dependencies
         run: npm ci
       - name: Generate Prisma client
