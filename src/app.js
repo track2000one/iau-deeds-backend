@@ -23,6 +23,8 @@ import accountingTransformationRoutes from './routes/accounting-transformation.r
 import accountingCyclesRoutes from './routes/accounting-cycles.routes.js';
 import accountingCycleReimportRoutes from './routes/accounting-cycle-reimport.routes.js';
 import accountingCycleReviewPolicyRoutes from './routes/accounting-cycle-review-policy.routes.js';
+import accountingCycleTemplateRoutes from './routes/accounting-cycle-template.routes.js';
+import accountingTemplateVersionsRoutes from './routes/accounting-template-versions.routes.js';
 import accountingAssetClassificationRoutes from './routes/accounting-asset-classification.routes.js';
 import accountingHierarchyRoutes from './routes/accounting-hierarchy.routes.js';
 import {
@@ -165,6 +167,16 @@ app.use(
   accountingAssetClassificationRoutes
 );
 
+// Template snapshots are resolved before generic cycle handlers so every open
+// cycle is permanently tied to the official Excel version in use at that time.
+app.use(
+  '/api/accounting-transformation/cycles',
+  requireAuth,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingCycleTemplateRoutes
+);
+
 // Draft re-import reconciliation must run before the legacy cycle router so that
 // repeated departmental files can update existing draft rows instead of being
 // treated as unconditional duplicates.
@@ -201,6 +213,16 @@ app.use(
   auditTrail('accounting_transformation'),
   requirePermission('accounting_transformation'),
   accountingHierarchyRoutes
+);
+
+// Versioned official-template management must run before the legacy transformation
+// router, whose original template endpoints remain only as a compatibility fallback.
+app.use(
+  '/api/accounting-transformation',
+  requireAuth,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingTemplateVersionsRoutes
 );
 
 app.use(
