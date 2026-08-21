@@ -3,6 +3,8 @@ name: Verify Cycle Template Upload
 on:
   push:
     branches: [agent/cycle-upload-new-template-version]
+  pull_request:
+    branches: [main]
 
 jobs:
   verify:
