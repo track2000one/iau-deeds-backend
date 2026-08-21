@@ -77,7 +77,10 @@ router.post('/:id/template/new-version', upload.single('file'), async (req, res,
     }
     if (!req.file) return res.status(400).json({ message: 'لم يتم إرفاق ملف Excel للإصدار الجديد.' });
 
-    const current = await getCurrentAccountingTemplateWithVersion();
+    const [current, previousSnapshot] = await Promise.all([
+      getCurrentAccountingTemplateWithVersion(),
+      prisma.accountingCycleTemplateSnapshot.findUnique({ where: { cycleId: cycle.id } }),
+    ]);
     uploaded = await uploadBufferToGoogleDrive(req.file, {
       fileName: `official-accounting-transformation-template-${Date.now()}.xlsx`,
       mimeType: EXCEL_MIME,
@@ -142,7 +145,7 @@ router.post('/:id/template/new-version', upload.single('file'), async (req, res,
       entityId: cycle.id,
       entityLabel: `الدورة #${cycle.cycleNumber} — ${cycle.name}`,
       description: `رفع الإصدار ${nextVersion} من النموذج الرسمي وتثبيته على الدورة #${cycle.cycleNumber}`,
-      previousData: await prisma.accountingCycleTemplateSnapshot.findUnique({ where: { cycleId: cycle.id } }),
+      previousData: previousSnapshot,
       newData: response,
       ipAddress: getClientIp(req),
       userAgent: req.headers['user-agent'],
