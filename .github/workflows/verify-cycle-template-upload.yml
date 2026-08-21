@@ -1,0 +1,19 @@
+name: Verify Cycle Template Upload
+
+on:
+  push:
+    branches: [agent/cycle-upload-new-template-version]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate --schema prisma
+      - run: node --check src/routes/accounting-cycle-template.routes.js
+      - run: node --check src/app.js
