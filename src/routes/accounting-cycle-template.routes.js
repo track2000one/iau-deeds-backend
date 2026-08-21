@@ -1,15 +1,28 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { prisma } from '../prisma.js';
-import { downloadGoogleDriveFile } from '../services/googleDrive.js';
+import { createAuditLog, getClientIp } from '../services/audit.service.js';
+import { deleteGoogleDriveFile, downloadGoogleDriveFile, uploadBufferToGoogleDrive } from '../services/googleDrive.js';
 import { ensureAccountingTransformationBaseline } from '../services/accountingCycles.service.js';
 import {
+  OFFICIAL_ACCOUNTING_TEMPLATE_KEY,
   attachCurrentAccountingTemplateToOpenCycles,
   decorateCyclesWithTemplateSnapshot,
+  getCurrentAccountingTemplateWithVersion,
   getCycleTemplateSnapshot,
 } from '../services/accountingTemplateVersions.service.js';
 
 const router = Router();
 const EXCEL_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const fileName = String(file.originalname || '').toLowerCase();
+    const allowed = file.mimetype === EXCEL_MIME || fileName.endsWith('.xlsx');
+    cb(allowed ? null : new Error('الإصدار الجديد يجب أن يكون ملف Excel بصيغة XLSX.'), allowed);
+  },
+});
 
 const serializeCycle = (cycle) => ({
   ...cycle,
@@ -51,6 +64,97 @@ router.get('/:id/template', async (req, res, next) => {
     const snapshot = await getCycleTemplateSnapshot(cycle, { attachForOpenCycle: true });
     res.json(snapshot || null);
   } catch (error) { next(error); }
+});
+
+router.post('/:id/template/new-version', upload.single('file'), async (req, res, next) => {
+  let uploaded = null;
+  try {
+    if (req.authUser?.role !== 'admin') return res.status(403).json({ message: 'رفع إصدار جديد من النموذج الرسمي متاح لمسؤول النظام فقط.' });
+    const cycle = await getCycle(req.params.id);
+    if (!cycle) return res.status(404).json({ message: 'دورة التحديث غير موجودة' });
+    if (!['draft', 'under_review'].includes(cycle.status)) {
+      return res.status(409).json({ message: 'لا يمكن تغيير نسخة النموذج لدورة معتمدة أو مؤرشفة. النسخة التاريخية لهذه الدورة مقفلة.' });
+    }
+    if (!req.file) return res.status(400).json({ message: 'لم يتم إرفاق ملف Excel للإصدار الجديد.' });
+
+    const [current, previousSnapshot] = await Promise.all([
+      getCurrentAccountingTemplateWithVersion(),
+      prisma.accountingCycleTemplateSnapshot.findUnique({ where: { cycleId: cycle.id } }),
+    ]);
+    uploaded = await uploadBufferToGoogleDrive(req.file, {
+      fileName: `official-accounting-transformation-template-${Date.now()}.xlsx`,
+      mimeType: EXCEL_MIME,
+    });
+    const uploadedBy = req.authUser?.email || req.authUser?.username || null;
+    const nextVersion = current ? Number(current.versionNumber || 1) + 1 : 1;
+
+    const result = await prisma.$transaction(async (tx) => {
+      if (current) {
+        await tx.assetExcelTemplate.update({
+          where: { id: current.id },
+          data: {
+            templateKey: `${OFFICIAL_ACCOUNTING_TEMPLATE_KEY}:v${current.versionNumber}`,
+            title: `نموذج التحول المحاسبي الرسمي — الإصدار ${current.versionNumber}`,
+          },
+        });
+      }
+
+      const template = await tx.assetExcelTemplate.create({
+        data: {
+          templateKey: OFFICIAL_ACCOUNTING_TEMPLATE_KEY,
+          title: `نموذج التحول المحاسبي الرسمي المعتمد — الإصدار ${nextVersion}`,
+          fileName: req.file.originalname || uploaded.fileName,
+          driveFileId: uploaded.driveFileId,
+          driveUrl: uploaded.driveUrl,
+          mimeType: uploaded.mimeType || EXCEL_MIME,
+          fileSize: req.file.size || null,
+          uploadedBy,
+        },
+      });
+
+      const snapshot = await tx.accountingCycleTemplateSnapshot.upsert({
+        where: { cycleId: cycle.id },
+        update: {
+          templateId: template.id,
+          fileName: template.fileName,
+          versionNumber: nextVersion,
+          driveFileId: template.driveFileId,
+          attachedAt: new Date(),
+        },
+        create: {
+          cycleId: cycle.id,
+          templateId: template.id,
+          fileName: template.fileName,
+          versionNumber: nextVersion,
+          driveFileId: template.driveFileId,
+          attachedAt: new Date(),
+        },
+      });
+      return { template, snapshot };
+    });
+
+    const response = {
+      template: { ...result.template, versionNumber: nextVersion, isCurrent: true },
+      snapshot: result.snapshot,
+    };
+    await createAuditLog({
+      user: req.authUser,
+      action: 'create_version',
+      module: 'accounting_transformation',
+      entity: 'accounting_cycle_template',
+      entityId: cycle.id,
+      entityLabel: `الدورة #${cycle.cycleNumber} — ${cycle.name}`,
+      description: `رفع الإصدار ${nextVersion} من النموذج الرسمي وتثبيته على الدورة #${cycle.cycleNumber}`,
+      previousData: previousSnapshot,
+      newData: response,
+      ipAddress: getClientIp(req),
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(201).json(response);
+  } catch (error) {
+    if (uploaded?.driveFileId) deleteGoogleDriveFile(uploaded.driveFileId).catch(() => {});
+    next(error);
+  }
 });
 
 router.get('/:id/template/file', async (req, res, next) => {
