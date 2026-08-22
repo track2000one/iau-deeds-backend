@@ -103,7 +103,19 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
   const accounting = normalizeKeyPart(core.accountingAssetCode);
   const linked = normalizeKeyPart(core.linkedAsset);
   if (mof) return `${type}:mof:${mof}`;
-  if (entityAsset) return `${type}:entity:${entityCode || 'na'}:${entityAsset}`;
+  if (entityAsset) {
+    if (type === 'building') {
+      // Legacy building files sometimes reuse human-readable building numbers (A4,
+      // villa model names, etc.). Combine them with physical discriminators instead
+      // of treating the repeated label alone as a universally unique identifier.
+      const discriminator = [payload.BC, payload.G, payload.AP, payload.AN]
+        .map(normalizeKeyPart)
+        .filter(Boolean)
+        .join(':');
+      return `building:entity:${entityCode || 'na'}:${entityAsset}:${linked || 'na'}:${discriminator || 'na'}`;
+    }
+    return `${type}:entity:${entityCode || 'na'}:${entityAsset}`;
+  }
 
   // Placeholder values such as "غير متوفر" are not identities. For Legacy rows
   // without a strong asset number, use physical/location attributes as part of
