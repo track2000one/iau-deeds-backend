@@ -10,6 +10,11 @@ import {
 } from '../services/accountingCycles.service.js';
 import { getCurrentAccountingTemplateWithVersion } from '../services/accountingTemplateVersions.service.js';
 import { hasAccountingValue } from '../config/accountingTransformation.js';
+import {
+  ACCOUNTING_BASELINE_SOURCE_SHEETS,
+  isAccountingBaselineSource,
+  normalizeAccountingSheetName,
+} from '../config/accountingBaselineSources.js';
 
 const router = Router();
 
@@ -24,6 +29,8 @@ const itemSchema = z.object({
   payload: z.record(z.string(), z.unknown()).default({}),
   attachments: z.array(z.unknown()).default([]),
   notes: z.string().trim().nullable().optional(),
+  sourceSheet: z.string().trim().min(1).max(180),
+  sourceRow: z.number().int().positive(),
 });
 
 const previewSchema = z.object({
@@ -57,13 +64,21 @@ const prepareItems = (items) => {
   const seen = new Set();
   let invalid = 0;
   let duplicate = 0;
+  let rejectedSource = 0;
   const typeCounts = { land: 0, building: 0, fixed_asset: 0 };
+  const sourceSheetCounts = {};
 
   for (const item of items) {
+    if (!isAccountingBaselineSource(item.recordType, item.sourceSheet)) {
+      rejectedSource += 1;
+      continue;
+    }
     if (!itemIsValid(item)) {
       invalid += 1;
       continue;
     }
+
+    const normalizedSourceSheet = normalizeAccountingSheetName(item.sourceSheet);
     const payload = item.payload || {};
     const stableKey = createAccountingStableKey(item.recordType, payload);
     const normalizedKey = String(stableKey || '').trim().toLowerCase();
@@ -74,15 +89,31 @@ const prepareItems = (items) => {
     seen.add(normalizedKey);
     const sourceFingerprint = createAccountingFingerprint(item.recordType, payload);
     typeCounts[item.recordType] += 1;
-    prepared.push({ item, stableKey, sourceFingerprint });
+    sourceSheetCounts[normalizedSourceSheet] = (sourceSheetCounts[normalizedSourceSheet] || 0) + 1;
+    prepared.push({
+      item: { ...item, sourceSheet: normalizedSourceSheet },
+      stableKey,
+      sourceFingerprint,
+    });
   }
 
   const datasetFingerprint = crypto
     .createHash('sha256')
-    .update(prepared.map((entry) => `${entry.stableKey}:${entry.sourceFingerprint}`).sort().join('|'))
+    .update(prepared
+      .map((entry) => `${entry.item.sourceSheet}:${entry.item.sourceRow}:${entry.stableKey}:${entry.sourceFingerprint}`)
+      .sort()
+      .join('|'))
     .digest('hex');
 
-  return { prepared, invalid, duplicate, typeCounts, datasetFingerprint };
+  return {
+    prepared,
+    invalid,
+    duplicate,
+    rejectedSource,
+    typeCounts,
+    sourceSheetCounts,
+    datasetFingerprint,
+  };
 };
 
 const getImpact = async (client = prisma) => {
@@ -140,6 +171,11 @@ router.post('/reset-baseline/preview', async (req, res, next) => {
 
     const input = previewSchema.parse(req.body);
     const preparedResult = prepareItems(input.items);
+    if (preparedResult.rejectedSource > 0) {
+      return res.status(400).json({
+        message: `تم رفض ${preparedResult.rejectedSource} سجلًا لأنها ليست من ورقتي الأساس الثابتتين: «${ACCOUNTING_BASELINE_SOURCE_SHEETS.land}» و«${ACCOUNTING_BASELINE_SOURCE_SHEETS.building}».`,
+      });
+    }
     if (!preparedResult.prepared.length) {
       return res.status(400).json({ message: 'لم يتم العثور على سجلات صالحة يمكن اعتمادها كأساس جديد.' });
     }
@@ -154,6 +190,8 @@ router.post('/reset-baseline/preview', async (req, res, next) => {
       invalid: preparedResult.invalid,
       duplicate: preparedResult.duplicate,
       typeCounts: preparedResult.typeCounts,
+      sourceSheetCounts: preparedResult.sourceSheetCounts,
+      baselineSourceSheets: ACCOUNTING_BASELINE_SOURCE_SHEETS,
       datasetFingerprint: preparedResult.datasetFingerprint,
       suggestedCycleName: DEFAULT_BASELINE_NAME,
       impact,
@@ -180,6 +218,11 @@ router.post('/reset-baseline', async (req, res, next) => {
     }
 
     const preparedResult = prepareItems(input.items);
+    if (preparedResult.rejectedSource > 0) {
+      return res.status(400).json({
+        message: 'تحتوي بيانات إعادة التأسيس على مصادر غير مسموحة. لم يتم حذف أي شيء. أعد رفع ملف الأساس ومعاينته.',
+      });
+    }
     if (!preparedResult.prepared.length) {
       return res.status(400).json({ message: 'لم يتم العثور على سجلات صالحة يمكن اعتمادها كأساس جديد.' });
     }
@@ -211,7 +254,7 @@ router.post('/reset-baseline', async (req, res, next) => {
         data: {
           cycleNumber: 1,
           name: input.cycleName || DEFAULT_BASELINE_NAME,
-          description: `دورة أساس رسمية أُعيد تأسيسها من ملف Excel: ${input.fileName}`,
+          description: `دورة أساس رسمية أُعيد تأسيسها من ملف Excel: ${input.fileName}. مصادر السجلات: ${ACCOUNTING_BASELINE_SOURCE_SHEETS.land} و${ACCOUNTING_BASELINE_SOURCE_SHEETS.building}.`,
           status: 'approved',
           isCurrent: true,
           basedOnCycleId: null,
@@ -279,7 +322,7 @@ router.post('/reset-baseline', async (req, res, next) => {
           entityId: createdCycle.id,
           entityLabel: createdCycle.name,
           status: 'success',
-          description: `إعادة تأسيس بيانات لجنة التحول المحاسبي من ${input.fileName} واعتماد ${preparedResult.prepared.length} سجلًا كأساس رسمي جديد`,
+          description: `إعادة تأسيس بيانات لجنة التحول المحاسبي من ${input.fileName} واعتماد ${preparedResult.prepared.length} سجلًا كأساس رسمي جديد من ورقتي البيانات الثابتتين`,
           previousData: liveImpact,
           newData: {
             cycleNumber: 1,
@@ -289,6 +332,8 @@ router.post('/reset-baseline', async (req, res, next) => {
             invalid: preparedResult.invalid,
             duplicate: preparedResult.duplicate,
             typeCounts: preparedResult.typeCounts,
+            sourceSheetCounts: preparedResult.sourceSheetCounts,
+            baselineSourceSheets: ACCOUNTING_BASELINE_SOURCE_SHEETS,
             officialTemplateVersion: templateSnapshot?.versionNumber || null,
           },
           ipAddress,
@@ -300,13 +345,14 @@ router.post('/reset-baseline', async (req, res, next) => {
     }, { timeout: 120000, isolationLevel: 'Serializable' });
 
     return res.status(201).json({
-      message: 'تم حذف بيانات الدورات السابقة وإعادة تأسيس اللجنة من ملف Excel بنجاح.',
+      message: 'تم حذف بيانات الدورات السابقة وإعادة تأسيس اللجنة من ورقتي Excel الأساسيتين بنجاح.',
       cycle: transactionResult.cycle,
       deleted: transactionResult.deletedImpact.destructive,
       imported: preparedResult.prepared.length,
       invalid: preparedResult.invalid,
       duplicate: preparedResult.duplicate,
       typeCounts: preparedResult.typeCounts,
+      sourceSheetCounts: preparedResult.sourceSheetCounts,
       officialTemplate: transactionResult.templateSnapshot,
     });
   } catch (error) {
