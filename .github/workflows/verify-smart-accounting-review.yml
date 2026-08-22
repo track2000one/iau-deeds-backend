@@ -2,6 +2,8 @@ name: Verify Smart Accounting Review Backend
 on:
   push:
     branches: [agent/accounting-smart-review]
+  pull_request:
+    branches: [main]
 jobs:
   verify:
     runs-on: ubuntu-latest
