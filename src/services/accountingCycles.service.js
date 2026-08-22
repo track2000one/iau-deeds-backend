@@ -82,9 +82,12 @@ export const canonicalizeAccountingStableKey = (stableKey) => {
   // a strong identifier, remove those legacy-only discriminators so the same
   // asset can match a later Model B row even if the sheet/column layout changed.
   const buildingEntity = key.match(/^building:entity:([^:]+):([^:]+):(.+)$/);
-  if (buildingEntity && looksLikeStrongEntityAssetIdentity(buildingEntity[2])) {
+if (buildingEntity) {
+  if (looksLikeStrongEntityAssetIdentity(buildingEntity[2])) {
     return `asset:entity:${buildingEntity[1]}:${buildingEntity[2]}`;
   }
+  return key;
+}
 
   const strong = key.match(/^(?:land|building|fixed_asset|asset):(mof|entity):(.+)$/);
   if (strong) return `asset:${strong[1]}:${strong[2]}`;
