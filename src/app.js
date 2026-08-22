@@ -28,6 +28,7 @@ import accountingCycleTemplateRoutes from './routes/accounting-cycle-template.ro
 import accountingTemplateVersionsRoutes from './routes/accounting-template-versions.routes.js';
 import accountingAssetClassificationRoutes from './routes/accounting-asset-classification.routes.js';
 import accountingHierarchyRoutes from './routes/accounting-hierarchy.routes.js';
+import accountingBaselineResetRoutes from './routes/accounting-baseline-reset.routes.js';
 import {
   requireAdmin,
   requireAuth,
@@ -222,6 +223,17 @@ app.use(
   auditTrail('accounting_transformation'),
   requirePermission('accounting_transformation'),
   accountingHierarchyRoutes
+);
+
+// Destructive baseline reset is isolated under /admin and also checks role=admin
+// inside the route. It preserves official templates, permissions and audit history.
+app.use(
+  '/api/accounting-transformation/admin',
+  requireAuth,
+  requireAdmin,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingBaselineResetRoutes
 );
 
 // Versioned official-template management must run before the legacy transformation
