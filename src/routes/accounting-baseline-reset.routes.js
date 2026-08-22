@@ -7,6 +7,7 @@ import {
   createAccountingFingerprint,
   createAccountingStableKey,
 } from '../services/accountingCycles.service.js';
+import { createCycleTemplateSnapshot } from '../services/accountingTemplateVersions.service.js';
 import { hasAccountingValue } from '../config/accountingTransformation.js';
 
 const router = Router();
@@ -53,6 +54,7 @@ router.post('/reset-baseline', async (req, res, next) => {
     const before = await Promise.all([
       prisma.accountingTransformationCycle.count(),
       prisma.accountingTransformationRecord.count(),
+      prisma.accountingCycleTemplateSnapshot.count(),
     ]);
 
     const prepared = [];
@@ -85,7 +87,9 @@ router.post('/reset-baseline', async (req, res, next) => {
     }
 
     const cycle = await prisma.$transaction(async (tx) => {
-      // Delete committee operational data only. Official templates, permissions and audit logs are preserved.
+      // Delete committee operational history only. Official template versions,
+      // permissions and audit logs are deliberately preserved.
+      await tx.accountingCycleTemplateSnapshot.deleteMany({});
       await tx.accountingTransformationRecord.deleteMany({});
       await tx.accountingTransformationCycle.deleteMany({});
 
@@ -139,6 +143,10 @@ router.post('/reset-baseline', async (req, res, next) => {
       return createdCycle;
     }, { timeout: 120000 });
 
+    // Attach the currently approved official output template to the new baseline,
+    // while keeping the uploaded university workbook as the baseline data source.
+    const templateSnapshot = await createCycleTemplateSnapshot(cycle.id).catch(() => null);
+
     await createAuditLog({
       user: req.authUser,
       action: 'reset_accounting_transformation_baseline',
@@ -147,7 +155,7 @@ router.post('/reset-baseline', async (req, res, next) => {
       entityId: cycle.id,
       entityLabel: cycle.name,
       description: `إعادة تأسيس بيانات لجنة التحول المحاسبي من ${input.fileName} واعتماد ${prepared.length} سجلًا كأساس جديد`,
-      previousData: { cycles: before[0], records: before[1] },
+      previousData: { cycles: before[0], records: before[1], cycleTemplateSnapshots: before[2] },
       newData: {
         cycleNumber: 1,
         cycleId: cycle.id,
@@ -156,6 +164,7 @@ router.post('/reset-baseline', async (req, res, next) => {
         invalid,
         duplicate,
         typeCounts,
+        officialTemplateVersion: templateSnapshot?.versionNumber || null,
       },
       ipAddress: getClientIp(req),
       userAgent: req.headers['user-agent'],
@@ -164,11 +173,12 @@ router.post('/reset-baseline', async (req, res, next) => {
     return res.status(201).json({
       message: 'تم حذف بيانات الدورات السابقة وإعادة تأسيس اللجنة من ملف Excel بنجاح.',
       cycle,
-      deleted: { cycles: before[0], records: before[1] },
+      deleted: { cycles: before[0], records: before[1], cycleTemplateSnapshots: before[2] },
       imported: prepared.length,
       invalid,
       duplicate,
       typeCounts,
+      officialTemplate: templateSnapshot,
     });
   } catch (error) {
     next(error);
