@@ -5,7 +5,7 @@ import { prisma } from '../prisma.js';
 const router = Router();
 
 const batchSchema = z.object({
-  rows: z.array(z.record(z.unknown())).min(1).max(5000),
+  rows: z.array(z.object({}).passthrough()).min(1).max(5000),
   sourceFileName: z.string().trim().max(255).optional().nullable(),
   sourceSheet: z.string().trim().max(255).optional().nullable(),
 });
