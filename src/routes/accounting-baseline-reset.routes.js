@@ -104,9 +104,9 @@ const getImpact = async (client = prisma) => {
     client.accountingTransformationCycle.groupBy({ by: ['status'], _count: { _all: true } }),
     client.accountingTransformationCycle.findFirst({
       where: { isCurrent: true },
-      select: { id: true, cycleNumber: true, name: true, status: true, recordCount: false },
+      select: { id: true, cycleNumber: true, name: true, status: true },
       orderBy: [{ approvedAt: 'desc' }, { updatedAt: 'desc' }],
-    }).catch(() => null),
+    }),
   ]);
 
   const statuses = statusGroups.reduce((acc, item) => {
