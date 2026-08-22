@@ -15,25 +15,26 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           p = Path('src/services/accountingCycles.service.js')
           s = p.read_text()
-          old = '''  const buildingEntity = key.match(/^building:entity:([^:]+):([^:]+):(.+)$/);
-          if (buildingEntity && looksLikeStrongEntityAssetIdentity(buildingEntity[2])) {
-            return `asset:entity:${buildingEntity[1]}:${buildingEntity[2]}`;
-          }
-
-          const strong = key.match(/^(?:land|building|fixed_asset|asset):(mof|entity):(.+)$/);'''.replace('          ', '')
-          new = '''  const buildingEntity = key.match(/^building:entity:([^:]+):([^:]+):(.+)$/);
+          pattern = re.compile(
+              r"  const buildingEntity = key\.match\(/\^building:entity:\(\[\^:\]\+\):\(\[\^:\]\+\):\(\.\+\)\$/\);\n"
+              r"  if \(buildingEntity && looksLikeStrongEntityAssetIdentity\(buildingEntity\[2\]\)\) \{\n"
+              r"    return `asset:entity:\$\{buildingEntity\[1\]\}:\$\{buildingEntity\[2\]\}`;\n"
+              r"  \}"
+          )
+          replacement = '''  const buildingEntity = key.match(/^building:entity:([^:]+):([^:]+):(.+)$/);
           if (buildingEntity) {
             if (looksLikeStrongEntityAssetIdentity(buildingEntity[2])) {
               return `asset:entity:${buildingEntity[1]}:${buildingEntity[2]}`;
             }
             return key;
-          }
-
-          const strong = key.match(/^(?:land|building|fixed_asset|asset):(mof|entity):(.+)$/);'''.replace('          ', '')
-          assert old in s
-          p.write_text(s.replace(old, new, 1))
+          }'''.replace('          ', '')
+          updated, count = pattern.subn(replacement, s, count=1)
+          if count != 1:
+              raise SystemExit(f'expected one canonical building block, found {count}')
+          p.write_text(updated)
           PY
           node --check src/services/accountingCycles.service.js
       - name: Commit
