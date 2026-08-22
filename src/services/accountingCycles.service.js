@@ -19,6 +19,24 @@ const normalizeKeyPart = (value) =>
     .replace(/[\u064B-\u065F\u0670]/g, '')
     .replace(/[^\p{L}\p{N}]+/gu, '-');
 
+const UNAVAILABLE_IDENTITY_VALUES = new Set([
+  'غير-متوفر',
+  'غير-متاح',
+  'لا-يوجد',
+  'بدون',
+  'not-available',
+  'not-applicable',
+  'n-a',
+  'na',
+  'none',
+  'null',
+]);
+
+const normalizeIdentityPart = (value) => {
+  const normalized = normalizeKeyPart(value);
+  return normalized && !UNAVAILABLE_IDENTITY_VALUES.has(normalized) ? normalized : '';
+};
+
 export const accountingCoreFromPayload = (recordType, payload = {}) => {
   const map = ACCOUNTING_CORE_COLUMNS[recordType] || ACCOUNTING_CORE_COLUMNS.land;
   return {
@@ -56,13 +74,13 @@ export const canonicalizeAccountingStableKey = (stableKey) => {
 export const createAccountingStableKey = (recordType, payload = {}, coreInput = null) => {
   const core = coreInput || accountingCoreFromPayload(recordType, payload);
   const entityCode = normalizeKeyPart(core.entityCode);
-  const entityAsset = normalizeKeyPart(core.entityAssetNumber);
-  const mof = normalizeKeyPart(core.mofAssetNumber);
+  const entityAsset = normalizeIdentityPart(core.entityAssetNumber);
+  const mof = normalizeIdentityPart(core.mofAssetNumber);
 
   if (recordType === 'fixed_asset') {
     if (mof) return `asset:mof:${mof}`;
     if (entityAsset) return `asset:entity:${entityCode || 'na'}:${entityAsset}`;
-    const tag = normalizeKeyPart(payload.AB);
+    const tag = normalizeIdentityPart(payload.AB);
     if (tag) return `asset:tag:${tag}`;
     const fallback = [
       core.entityName,
@@ -74,6 +92,9 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
       core.linkedAsset,
       core.region,
       core.city,
+      payload.AC,
+      payload.AD,
+      payload.AE,
     ].map(normalizeKeyPart).join('|');
     return `asset:fallback:${crypto.createHash('sha256').update(fallback || JSON.stringify(payload)).digest('hex').slice(0, 32)}`;
   }
@@ -84,10 +105,9 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
   if (mof) return `${type}:mof:${mof}`;
   if (entityAsset) return `${type}:entity:${entityCode || 'na'}:${entityAsset}`;
 
-  // Accounting/classification codes and linked-parent references are not unique
-  // asset identifiers. They may repeat across many assets, so they can only
-  // contribute to a composite fallback signature and must never identify a row
-  // by themselves.
+  // Placeholder values such as "غير متوفر" are not identities. For Legacy rows
+  // without a strong asset number, use physical/location attributes as part of
+  // the fallback so repeated buildings in the same complex remain distinguishable.
   const fallback = [
     type,
     entityCode,
@@ -98,6 +118,12 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
     core.accountingGroupCode,
     core.region,
     core.city,
+    payload.AN,
+    payload.AO,
+    payload.AP,
+    payload.BC,
+    payload.BD,
+    payload.CI,
   ].map(normalizeKeyPart).join('|');
   return `${type}:fallback:${crypto.createHash('sha256').update(fallback || JSON.stringify(payload)).digest('hex').slice(0, 32)}`;
 };
