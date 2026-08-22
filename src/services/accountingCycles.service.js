@@ -63,9 +63,29 @@ export const createAccountingFingerprint = (recordType, payload = {}) =>
     .update(`${recordType}:${JSON.stringify(fingerprintPayload(recordType, payload))}`)
     .digest('hex');
 
+const looksLikeStrongEntityAssetIdentity = (value) => {
+  const normalized = normalizeIdentityPart(value);
+  if (!normalized) return false;
+  const compact = normalized.replace(/-/g, '');
+  const digits = (compact.match(/\d/g) || []).length;
+  const latin = (compact.match(/[a-z]/gi) || []).length;
+  if (digits >= 6) return true;
+  return compact.length >= 10 && digits >= 4 && latin >= 2;
+};
+
 export const canonicalizeAccountingStableKey = (stableKey) => {
   const key = String(stableKey || '').trim();
   if (!key) return '';
+
+  // Legacy building keys intentionally include physical discriminators because
+  // labels such as A4 or villa names are often reused. When the entity number is
+  // a strong identifier, remove those legacy-only discriminators so the same
+  // asset can match a later Model B row even if the sheet/column layout changed.
+  const buildingEntity = key.match(/^building:entity:([^:]+):([^:]+):(.+)$/);
+  if (buildingEntity && looksLikeStrongEntityAssetIdentity(buildingEntity[2])) {
+    return `asset:entity:${buildingEntity[1]}:${buildingEntity[2]}`;
+  }
+
   const strong = key.match(/^(?:land|building|fixed_asset|asset):(mof|entity):(.+)$/);
   if (strong) return `asset:${strong[1]}:${strong[2]}`;
   return key;
