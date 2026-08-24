@@ -13,6 +13,8 @@ jobs:
   patch-and-verify:
     if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[supporting-docs applied]') }}
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/iau_verify
     steps:
       - uses: actions/checkout@v4
         with:
