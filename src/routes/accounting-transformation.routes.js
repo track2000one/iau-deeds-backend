@@ -36,6 +36,10 @@ const attachmentSchema = z.object({
   driveFileId: z.string().trim().nullable().optional(),
   mimeType: z.string().trim().nullable().optional(),
   notes: z.string().trim().nullable().optional(),
+  documentPurpose: z.enum(['ownership_acquisition', 'maintenance', 'valuation', 'asset_image', 'other']).nullable().optional(),
+  documentType: z.string().trim().nullable().optional(),
+  documentNumber: z.string().trim().nullable().optional(),
+  archiveNumber: z.string().trim().nullable().optional(),
 });
 
 const recordInputSchema = z.object({
