@@ -1,0 +1,48 @@
+name: Apply Accounting Supporting Documents Backend
+
+on:
+  push:
+    branches: [feat/accounting-supporting-documents]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[supporting-docs applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/accounting-supporting-documents
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Apply schema patch
+        run: node scripts/patch-accounting-supporting-documents.mjs
+      - name: Verify JavaScript syntax
+        run: node --check src/routes/accounting-transformation.routes.js
+      - name: Validate Prisma schema
+        run: npx prisma validate
+      - name: Verify attachment metadata fields
+        run: |
+          grep -q "documentPurpose: z.enum" src/routes/accounting-transformation.routes.js
+          grep -q "documentType: z.string" src/routes/accounting-transformation.routes.js
+          grep -q "archiveNumber: z.string" src/routes/accounting-transformation.routes.js
+      - name: Commit generated source changes
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/routes/accounting-transformation.routes.js
+          if git diff --cached --quiet; then
+            echo "No generated changes to commit."
+          else
+            git commit -m "feat: persist accounting document metadata [supporting-docs applied]"
+            git push origin HEAD:feat/accounting-supporting-documents
+          fi
