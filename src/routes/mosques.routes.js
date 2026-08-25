@@ -273,7 +273,24 @@ const siteSchema = z.object({
   khateebName: z.string().trim().optional().nullable(),
   contactPhone: z.string().trim().optional().nullable(),
   notes: z.string().trim().optional().nullable(),
-  images: z.array(z.string()).optional().default([]),
+  images: z.union([
+    z.array(z.string()),
+    z.object({
+      photos: z.array(z.object({
+        url: z.string().url(),
+        fileId: z.string().optional().nullable(),
+        fileName: z.string().optional().nullable(),
+        mimeType: z.string().optional().nullable(),
+        category: z.enum(['site_image', 'mosque_image']).optional().default('mosque_image'),
+      })).optional().default([]),
+      documents: z.array(z.object({
+        url: z.string().url(),
+        fileId: z.string().optional().nullable(),
+        fileName: z.string().optional().nullable(),
+        mimeType: z.string().optional().nullable(),
+      })).optional().default([]),
+    }),
+  ]).optional().default({ photos: [], documents: [] }),
   supervisorUserId: z.string().trim().optional().nullable(),
 });
 
@@ -454,11 +471,18 @@ mosquesPublicRoutes.get('/gallery', async (_req, res, next) => {
     ]);
 
     const siteItems = sites.flatMap((site) => {
-      const images = Array.isArray(site.images) ? site.images : [];
-      return images.map((imageUrl, index) => ({
+      const legacyPhotos = Array.isArray(site.images) ? site.images : [];
+      const structuredPhotos = !Array.isArray(site.images) && site.images && Array.isArray(site.images.photos)
+        ? site.images.photos
+        : [];
+      const photos = [
+        ...legacyPhotos.map((url) => ({ url })),
+        ...structuredPhotos,
+      ];
+      return photos.map((photo, index) => ({
         id: `site-${site.id}-${index + 1}`,
         title: site.name,
-        imageUrl: normalizeGalleryImageUrl(imageUrl),
+        imageUrl: normalizeGalleryImageUrl(photo?.url || ''),
         sourcePage: null,
         source: 'site',
       })).filter((item) => /^https?:\/\//i.test(item.imageUrl));
