@@ -21,10 +21,14 @@ const upload = multer({
       'image/webp',
       'image/gif',
       'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     ];
 
     if (!allowedMimeTypes.includes(file.mimetype)) {
-      cb(new Error('نوع الملف غير مسموح. المسموح: JPG, PNG, WEBP, GIF, PDF'));
+      cb(new Error('نوع الملف غير مسموح. المسموح: JPG, PNG, WEBP, GIF, PDF, DOC, DOCX, XLS, XLSX'));
       return;
     }
 
