@@ -5,6 +5,7 @@ import { prisma } from '../prisma.js';
 import {
   uploadBufferToGoogleDrive,
   deleteGoogleDriveFile,
+  downloadGoogleDriveFile,
 } from '../services/googleDrive.js';
 
 const router = Router();
@@ -102,6 +103,21 @@ router.post('/', upload.single('file'), async (req, res, next) => {
       ...uploaded,
       attachment,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get('/:fileId/content', async (req, res, next) => {
+  try {
+    const file = await downloadGoogleDriveFile(req.params.fileId);
+    const encodedName = encodeURIComponent(file.fileName || 'attachment');
+
+    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodedName}`);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    if (file.size) res.setHeader('Content-Length', String(file.size));
+    res.status(200).send(file.buffer);
   } catch (err) {
     next(err);
   }
