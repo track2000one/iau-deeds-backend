@@ -36,6 +36,8 @@ jobs:
         run: npm ci
 
       - name: Validate Prisma schema
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/iau_deeds_validation
         run: npx prisma validate
 
       - name: Check backend syntax
