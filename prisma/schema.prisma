@@ -654,6 +654,7 @@ model MosqueSite {
   publicToken      String   @unique @default(uuid())
   name             String
   siteType         String   @default("mosque")
+  prayerRoomGender String?
   city             String?
   district         String?
   campusLocation   String?

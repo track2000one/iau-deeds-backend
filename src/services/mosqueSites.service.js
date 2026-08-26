@@ -456,6 +456,7 @@ const buildPrayerRoomSites = () => PRAYER_ROOM_INVENTORY.flatMap((item) => {
       rows.push({
         name: `مصلى ${item.label} - ${genderLabel}${sequence}`,
         siteType: 'prayer_room',
+        prayerRoomGender: genderLabel === 'نساء' ? 'women' : 'men',
         city: item.city,
         district: item.organization,
         campusLocation: `${campusBase} — ${genderLabel}${count > 1 ? ` — مصلى رقم ${index}` : ''}`,
@@ -597,12 +598,22 @@ export async function ensureOfficialMosqueSites() {
   const existingNames = new Set(existing.map((site) => site.name));
   const missing = OFFICIAL_MOSQUE_SITES.filter((site) => !existingNames.has(site.name));
 
-  if (!missing.length) return { created: 0, total: OFFICIAL_MOSQUE_SITES.length };
+  if (missing.length) {
+    await prisma.$transaction(
+      missing.map((site) => prisma.mosqueSite.create({ data: site }))
+    );
+  }
 
-  await prisma.$transaction(
-    missing.map((site) => prisma.mosqueSite.create({ data: site }))
-  );
+  const genderBackfills = OFFICIAL_MOSQUE_SITES.filter((site) => site.siteType === 'prayer_room' && site.prayerRoomGender);
+  if (genderBackfills.length) {
+    await prisma.$transaction(
+      genderBackfills.map((site) => prisma.mosqueSite.updateMany({
+        where: { name: site.name, prayerRoomGender: null },
+        data: { prayerRoomGender: site.prayerRoomGender },
+      }))
+    );
+  }
 
-  console.log(`Official mosque/prayer-room sites ensured: ${missing.length} created, ${OFFICIAL_MOSQUE_SITES.length} total.`);
-  return { created: missing.length, total: OFFICIAL_MOSQUE_SITES.length };
+  console.log(`Official mosque/prayer-room sites ensured: ${missing.length} created, ${genderBackfills.length} gender records checked, ${OFFICIAL_MOSQUE_SITES.length} total.`);
+  return { created: missing.length, genderChecked: genderBackfills.length, total: OFFICIAL_MOSQUE_SITES.length };
 }
