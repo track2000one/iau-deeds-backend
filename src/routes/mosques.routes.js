@@ -88,6 +88,47 @@ const normalizeMosqueRole = (role) => role === 'viewer' ? 'university_member' : 
 const MOSQUE_PERSONNEL_ROLE_LABELS = { imam: 'إمام', muezzin: 'مؤذن', khateeb: 'خطيب', collaborating_khateeb: 'خطيب متعاون', collaborator: 'خطيب متعاون' };
 const MOSQUE_MODULE_ROLE_LABELS = { head: 'رئيس الوحدة', supervisor: 'مشرف الوحدة', personnel: 'منسوب المسجد أو المصلى', university_member: 'منسوب الجامعة', viewer: 'منسوب الجامعة' };
 
+
+// مصدر أسماء الإمام والمؤذن والخطيب في بطاقة المسجد هو سجل منسوبي المساجد نفسه.
+// لا نعتمد على الحقول النصية اليدوية داخل MosqueSite حتى لا تتقادم الأسماء عند النقل أو التعديل.
+const enrichMosqueSitePersonnelNames = async (sites) => {
+  const inputWasArray = Array.isArray(sites);
+  const list = inputWasArray ? sites : (sites ? [sites] : []);
+  if (!list.length) return inputWasArray ? [] : null;
+
+  const siteIds = [...new Set(list.map((site) => site?.id).filter(Boolean))];
+  const personnelRows = siteIds.length
+    ? await prisma.mosquePersonnel.findMany({
+        where: {
+          siteId: { in: siteIds },
+          active: true,
+          role: { in: ['imam', 'muezzin', 'khateeb'] },
+        },
+        select: { siteId: true, name: true, role: true },
+        orderBy: [{ siteId: 'asc' }, { role: 'asc' }, { name: 'asc' }],
+      })
+    : [];
+
+  const grouped = new Map();
+  for (const row of personnelRows) {
+    if (!grouped.has(row.siteId)) grouped.set(row.siteId, { imam: [], muezzin: [], khateeb: [] });
+    const bucket = grouped.get(row.siteId);
+    if (bucket?.[row.role] && row.name?.trim()) bucket[row.role].push(row.name.trim());
+  }
+
+  const linked = list.map((site) => {
+    const roles = grouped.get(site.id) || { imam: [], muezzin: [], khateeb: [] };
+    return {
+      ...site,
+      imamName: roles.imam.length ? roles.imam.join('، ') : null,
+      muezzinName: roles.muezzin.length ? roles.muezzin.join('، ') : null,
+      khateebName: roles.khateeb.length ? roles.khateeb.join('، ') : null,
+    };
+  });
+
+  return inputWasArray ? linked : linked[0];
+};
+
 const enrichMosqueApplicants = async (items, userField) => {
   const userIds = [...new Set(items.map((item) => item?.[userField]).filter(Boolean))];
   if (!userIds.length) return items.map((item) => ({ ...item, applicant: null }));
@@ -685,17 +726,19 @@ router.get('/sites', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
     if (context.role === 'head') {
-      return res.json(await prisma.mosqueSite.findMany({
+      const sites = await prisma.mosqueSite.findMany({
         include: { _count: { select: { requests: true, tickets: true, personnel: true } } },
         orderBy: [{ status: 'asc' }, { name: 'asc' }],
-      }));
+      });
+      return res.json(await enrichMosqueSitePersonnelNames(sites));
     }
     if (context.role === 'supervisor') {
-      return res.json(await prisma.mosqueSite.findMany({
+      const sites = await prisma.mosqueSite.findMany({
         where: { supervisorUserId: req.authUser.id },
         include: { _count: { select: { requests: true, tickets: true, personnel: true } } },
         orderBy: [{ status: 'asc' }, { name: 'asc' }],
-      }));
+      });
+      return res.json(await enrichMosqueSitePersonnelNames(sites));
     }
     if (context.role === 'personnel') {
       if (!context.siteId) return res.json([]);
@@ -703,7 +746,8 @@ router.get('/sites', async (req, res, next) => {
         where: { id: context.siteId },
         include: { _count: { select: { requests: true, tickets: true, personnel: true } } },
       });
-      return res.json(site ? [site] : []);
+      const linkedSite = site ? await enrichMosqueSitePersonnelNames(site) : null;
+      return res.json(linkedSite ? [linkedSite] : []);
     }
     return res.json(await prisma.mosqueSite.findMany({
       where: { status: { not: 'temporarily_closed' } },
@@ -717,7 +761,7 @@ router.get('/sites', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/sites', requireRoles('head', 'supervisor'), async (req, res, next) => {
+router.post('/sites' , requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
     const context = req.mosqueRole || await getModuleRole(req);
     const input = siteSchema.parse(req.body);
