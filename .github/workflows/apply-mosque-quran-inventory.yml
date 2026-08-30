@@ -1,0 +1,57 @@
+name: Apply Mosque Quran Inventory
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/apply-mosque-quran-inventory.py'
+      - '.github/workflows/apply-mosque-quran-inventory.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-mosque-quran-inventory
+  cancel-in-progress: true
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Apply patch
+        run: python3 scripts/apply-mosque-quran-inventory.py
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      - name: Check backend syntax
+        run: node --check src/routes/mosques.routes.js
+
+      - name: Commit verified backend changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add prisma/schema.prisma src/routes/mosques.routes.js
+          if git diff --cached --quiet; then
+            echo "No backend source changes to commit"
+            exit 0
+          fi
+          git commit -m "feat(mosques): add Quran inventory management"
+          git push origin main
