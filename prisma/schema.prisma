@@ -680,6 +680,7 @@ model MosqueSite {
   tickets     MosqueTicket[]
   leaves      MosqueLeave[]
   assignments MosqueUserAssignment[]
+  quranInventories MosqueQuranInventory[]
 
   @@index([siteType])
   @@index([city])
@@ -708,6 +709,28 @@ model MosquePersonnel {
   @@index([userId])
   @@index([role])
   @@index([active])
+}
+
+
+model MosqueQuranInventory {
+  id            String   @id @default(cuid())
+  siteId        String
+  largeCount    Int      @default(0)
+  mediumCount   Int      @default(0)
+  smallCount    Int      @default(0)
+  damagedCount  Int      @default(0)
+  neededCount   Int      @default(0)
+  countedAt     DateTime @default(now())
+  countedBy     String?
+  countedByName String?
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  site MosqueSite @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@index([countedAt])
+  @@index([createdAt])
 }
 
 model MosqueRequest {
