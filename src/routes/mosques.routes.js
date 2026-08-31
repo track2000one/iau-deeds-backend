@@ -395,7 +395,7 @@ const quranWarehouseSchema = z.object({
 });
 
 const quranStockMovementSchema = z.object({
-  movementType: z.enum(['receipt', 'distribution', 'return', 'warehouse_damage', 'adjustment_in', 'adjustment_out']),
+  movementType: z.enum(['receipt', 'distribution', 'return', 'site_withdrawal', 'warehouse_damage', 'adjustment_in', 'adjustment_out']),
   warehouseId: z.string().min(1),
   siteId: z.string().min(1).optional().nullable(),
   largeCount: z.coerce.number().int().min(0).max(1000000).optional().default(0),
@@ -1038,13 +1038,13 @@ router.patch('/jobs/:id/status', requireRoles('head'), async (req, res, next) =>
 // Warehouses are the source of truth for central stock. Every receipt,
 // distribution, return, damage or adjustment is posted as an immutable movement.
 // Site system stock starts from the latest physical inventory snapshot and then
-// applies subsequent distribution/return movements, keeping physical counts and
+// applies subsequent distribution/return/site-withdrawal movements, keeping physical counts and
 // accounting movements auditable without overwriting history.
 // -----------------------------------------------------------------------------
 const QURAN_WAREHOUSE_POSITIVE_TYPES = new Set(['receipt', 'return', 'adjustment_in']);
 const QURAN_WAREHOUSE_NEGATIVE_TYPES = new Set(['distribution', 'warehouse_damage', 'adjustment_out']);
 const QURAN_SITE_POSITIVE_TYPES = new Set(['distribution']);
-const QURAN_SITE_NEGATIVE_TYPES = new Set(['return']);
+const QURAN_SITE_NEGATIVE_TYPES = new Set(['return', 'site_withdrawal']);
 
 const quranZeroCounts = () => ({ largeCount: 0, mediumCount: 0, smallCount: 0, totalCount: 0 });
 const quranMovementCounts = (row) => ({
@@ -1114,7 +1114,7 @@ const getQuranSiteSystemStock = async (client, siteId) => {
     orderBy: [{ countedAt: 'desc' }, { createdAt: 'desc' }],
   });
   const movements = await client.mosqueQuranStockMovement.findMany({
-    where: { siteId, movementType: { in: ['distribution', 'return'] } },
+    where: { siteId, movementType: { in: ['distribution', 'return', 'site_withdrawal'] } },
     orderBy: [{ movementAt: 'asc' }, { createdAt: 'asc' }],
   });
   return { latestInventory, systemStock: quranSiteStockFromRows(latestInventory, movements) };
@@ -1154,7 +1154,7 @@ router.get('/quran-stock/dashboard', requireRoles('head', 'supervisor', 'personn
             orderBy: [{ countedAt: 'desc' }, { createdAt: 'desc' }],
           }),
           prisma.mosqueQuranStockMovement.findMany({
-            where: { siteId: { in: siteIds }, movementType: { in: ['distribution', 'return'] } },
+            where: { siteId: { in: siteIds }, movementType: { in: ['distribution', 'return', 'site_withdrawal'] } },
             orderBy: [{ movementAt: 'asc' }, { createdAt: 'asc' }],
           }),
         ])
@@ -1170,8 +1170,12 @@ router.get('/quran-stock/dashboard', requireRoles('head', 'supervisor', 'personn
 
     const siteStock = sites.map((site) => {
       const latestInventory = latestBySite.get(site.id) || null;
-      const systemStock = quranSiteStockFromRows(latestInventory, movementsBySite.get(site.id) || []);
-      return { site, latestInventory, systemStock };
+      const movementRows = movementsBySite.get(site.id) || [];
+      const systemStock = quranSiteStockFromRows(latestInventory, movementRows);
+      const withdrawnStock = movementRows
+        .filter((row) => row.movementType === 'site_withdrawal')
+        .reduce((counts, row) => addQuranCounts(counts, quranMovementCounts(row), 1), quranZeroCounts());
+      return { site, latestInventory, systemStock, withdrawnStock };
     });
 
     const summary = {
@@ -1182,6 +1186,7 @@ router.get('/quran-stock/dashboard', requireRoles('head', 'supervisor', 'personn
       receivedTotal: allWarehouseMovements.filter((row) => row.movementType === 'receipt').reduce((sum, row) => sum + row.totalCount, 0),
       distributedTotal: allWarehouseMovements.filter((row) => row.movementType === 'distribution').reduce((sum, row) => sum + row.totalCount, 0),
       returnedTotal: allWarehouseMovements.filter((row) => row.movementType === 'return').reduce((sum, row) => sum + row.totalCount, 0),
+      withdrawnTotal: allWarehouseMovements.filter((row) => row.movementType === 'site_withdrawal').reduce((sum, row) => sum + row.totalCount, 0),
       damagedTotal: allWarehouseMovements.filter((row) => row.movementType === 'warehouse_damage').reduce((sum, row) => sum + row.totalCount, 0),
       siteSystemTotal: siteStock.reduce((sum, row) => sum + row.systemStock.totalCount, 0),
       siteNeedTotal: siteStock.reduce((sum, row) => sum + Number(row.latestInventory?.neededCount || 0), 0),
@@ -1362,7 +1367,7 @@ router.post('/quran-stock/movements', requireRoles('head'), async (req, res, nex
       totalCount: (input.largeCount || 0) + (input.mediumCount || 0) + (input.smallCount || 0),
     };
     if (counts.totalCount <= 0) return res.status(400).json({ message: 'يجب إدخال كمية واحدة على الأقل من المصاحف' });
-    if (['distribution', 'return'].includes(input.movementType) && !input.siteId) return res.status(400).json({ message: 'المسجد أو المصلى إلزامي في عمليات إضافة المصاحف والإرجاع' });
+    if (['distribution', 'return', 'site_withdrawal'].includes(input.movementType) && !input.siteId) return res.status(400).json({ message: 'المسجد أو المصلى إلزامي في عمليات إضافة المصاحف والإرجاع والسحب' });
 
     const movement = await prisma.$transaction(async (tx) => {
       const warehouse = await tx.mosqueQuranWarehouse.findUnique({ where: { id: input.warehouseId } });
@@ -1387,10 +1392,10 @@ router.post('/quran-stock/movements', requireRoles('head'), async (req, res, nex
         if (!site) { const error = new Error('المسجد أو المصلى غير موجود'); error.statusCode = 404; throw error; }
       }
 
-      if (input.movementType === 'return' && site) {
+      if (['return', 'site_withdrawal'].includes(input.movementType) && site) {
         const current = await getQuranSiteSystemStock(tx, site.id);
         if (!quranHasEnough(current.systemStock, counts)) {
-          const error = new Error(`لا يمكن إرجاع كمية أكبر من الرصيد النظامي للموقع. الرصيد: كبير ${current.systemStock.largeCount}، متوسط ${current.systemStock.mediumCount}، صغير ${current.systemStock.smallCount}`);
+          const error = new Error(`لا يمكن تسجيل كمية أكبر من الرصيد النظامي للموقع. الرصيد: كبير ${current.systemStock.largeCount}، متوسط ${current.systemStock.mediumCount}، صغير ${current.systemStock.smallCount}`);
           error.statusCode = 400; throw error;
         }
       }
@@ -1415,6 +1420,9 @@ router.post('/quran-stock/movements', requireRoles('head'), async (req, res, nex
 
     if (movement.movementType === 'distribution' && movement.siteId) {
       await notify({ siteId: movement.siteId, title: 'تمت إضافة مصاحف للموقع', message: `تمت إضافة ${movement.totalCount} مصحفًا إلى ${movement.site?.name || 'الموقع'} من مكتبة المصاحف بموجب ${movement.movementNumber}`, entityType: 'quran_stock_movement', entityId: movement.id });
+    }
+    if (movement.movementType === 'site_withdrawal' && movement.siteId) {
+      await notify({ siteId: movement.siteId, title: 'تم سحب مصاحف من الموقع', message: `تم سحب ${movement.totalCount} مصحفًا من ${movement.site?.name || 'الموقع'} بموجب ${movement.movementNumber}. الكمية المسحوبة لا تعاد تلقائيًا إلى رصيد مكتبة المصاحف.`, entityType: 'quran_stock_movement', entityId: movement.id });
     }
 
     try {
