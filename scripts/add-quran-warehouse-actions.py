@@ -26,8 +26,11 @@ if "router.delete('/quran-warehouses/:id'" not in text:
         data: {
           userId: req.authUser?.id || null,
           action: 'DELETE_QURAN_WAREHOUSE',
+          module: 'mosques',
           entity: 'MosqueQuranWarehouse',
           entityId: warehouse.id,
+          entityLabel: warehouse.name,
+          description: `حذف مستودع مصاحف: ${warehouse.name}`,
           details: { name: warehouse.name },
         },
       });
@@ -41,5 +44,10 @@ if "router.delete('/quran-warehouses/:id'" not in text:
 '''
     text = text.replace(marker, block + marker, 1)
 
+old_audit = """          userId: req.authUser?.id || null,\n          action: 'DELETE_QURAN_WAREHOUSE',\n          entity: 'MosqueQuranWarehouse',\n          entityId: warehouse.id,\n          details: { name: warehouse.name },\n"""
+new_audit = """          userId: req.authUser?.id || null,\n          action: 'DELETE_QURAN_WAREHOUSE',\n          module: 'mosques',\n          entity: 'MosqueQuranWarehouse',\n          entityId: warehouse.id,\n          entityLabel: warehouse.name,\n          description: `حذف مستودع مصاحف: ${warehouse.name}`,\n          details: { name: warehouse.name },\n"""
+if old_audit in text:
+    text = text.replace(old_audit, new_audit, 1)
+
 path.write_text(text, encoding='utf-8')
-print('Added Quran warehouse delete endpoint.')
+print('Added Quran warehouse delete endpoint and audit metadata.')
