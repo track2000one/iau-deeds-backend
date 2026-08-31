@@ -1274,10 +1274,10 @@ router.delete('/quran-warehouses/:id', requireRoles('head'), async (req, res, ne
       where: { id: req.params.id },
       select: { id: true, name: true, _count: { select: { movements: true } } },
     });
-    if (!warehouse) return res.status(404).json({ message: 'مستودع المصاحف غير موجود' });
+    if (!warehouse) return res.status(404).json({ message: 'مكتبة المصاحف غير موجودة' });
     if (warehouse._count.movements > 0) {
       return res.status(409).json({
-        message: 'لا يمكن حذف المستودع لأنه مرتبط بحركات مخزون محفوظة. حفاظًا على السجل المحاسبي يمكنك تعديل المستودع وإلغاء تفعيله بدلًا من الحذف.',
+        message: 'لا يمكن حذف المكتبة لأنها مرتبطة بحركات مصاحف محفوظة. حفاظًا على السجل يمكنك تعديل المكتبة وإلغاء تفعيلها بدلًا من الحذف.',
       });
     }
 
@@ -1291,7 +1291,7 @@ router.delete('/quran-warehouses/:id', requireRoles('head'), async (req, res, ne
           entity: 'MosqueQuranWarehouse',
           entityId: warehouse.id,
           entityLabel: warehouse.name,
-          description: `حذف مستودع مصاحف: ${warehouse.name}`,
+          description: `حذف مكتبة مصاحف: ${warehouse.name}`,
           details: { name: warehouse.name },
         },
       });
@@ -1312,15 +1312,15 @@ router.post('/quran-stock/movements', requireRoles('head'), async (req, res, nex
       totalCount: (input.largeCount || 0) + (input.mediumCount || 0) + (input.smallCount || 0),
     };
     if (counts.totalCount <= 0) return res.status(400).json({ message: 'يجب إدخال كمية واحدة على الأقل من المصاحف' });
-    if (['distribution', 'return'].includes(input.movementType) && !input.siteId) return res.status(400).json({ message: 'المسجد أو المصلى إلزامي في عمليات التوزيع والإرجاع' });
+    if (['distribution', 'return'].includes(input.movementType) && !input.siteId) return res.status(400).json({ message: 'المسجد أو المصلى إلزامي في عمليات إضافة المصاحف والإرجاع' });
 
     const movement = await prisma.$transaction(async (tx) => {
       const warehouse = await tx.mosqueQuranWarehouse.findUnique({ where: { id: input.warehouseId } });
       if (!warehouse) {
-        const error = new Error('المستودع غير موجود'); error.statusCode = 404; throw error;
+        const error = new Error('مكتبة المصاحف غير موجودة'); error.statusCode = 404; throw error;
       }
       if (!warehouse.active && input.movementType !== 'return') {
-        const error = new Error('المستودع غير نشط ولا يقبل حركات جديدة'); error.statusCode = 400; throw error;
+        const error = new Error('مكتبة المصاحف غير مفعلة ولا تقبل حركات جديدة'); error.statusCode = 400; throw error;
       }
 
       if (QURAN_WAREHOUSE_NEGATIVE_TYPES.has(input.movementType)) {
@@ -1364,14 +1364,14 @@ router.post('/quran-stock/movements', requireRoles('head'), async (req, res, nex
     });
 
     if (movement.movementType === 'distribution' && movement.siteId) {
-      await notify({ siteId: movement.siteId, title: 'تم صرف مصاحف للموقع', message: `تم توزيع ${movement.totalCount} مصحفًا على ${movement.site?.name || 'الموقع'} بموجب ${movement.movementNumber}`, entityType: 'quran_stock_movement', entityId: movement.id });
+      await notify({ siteId: movement.siteId, title: 'تمت إضافة مصاحف للموقع', message: `تمت إضافة ${movement.totalCount} مصحفًا إلى ${movement.site?.name || 'الموقع'} من مكتبة المصاحف بموجب ${movement.movementNumber}`, entityType: 'quran_stock_movement', entityId: movement.id });
     }
 
     try {
       await prisma.auditLog.create({ data: {
         userId: req.authUser?.id || null, username: req.authUser?.username || null, userEmail: req.authUser?.email || null, userRole: req.authUser?.role || null,
         action: `quran_stock_${movement.movementType}`, module: 'mosques', entity: 'MosqueQuranStockMovement', entityId: movement.id, entityLabel: movement.movementNumber,
-        description: `حركة مخزون مصاحف ${movement.movementNumber} — إجمالي ${movement.totalCount}`, newData: movement,
+        description: `حركة مصاحف ${movement.movementNumber} — إجمالي ${movement.totalCount}`, newData: movement,
       } });
     } catch {}
 
@@ -1382,7 +1382,7 @@ router.post('/quran-stock/movements', requireRoles('head'), async (req, res, nex
 router.post('/quran-stock/movements/:id/reverse', requireRoles('head'), async (req, res, next) => {
   try {
     const reason = nullableText(req.body?.reason);
-    if (!reason || reason.length < 3) return res.status(400).json({ message: 'سبب التراجع عن حركة الصرف إلزامي' });
+    if (!reason || reason.length < 3) return res.status(400).json({ message: 'سبب التراجع عن إضافة المصاحف إلزامي' });
 
     const original = await prisma.mosqueQuranStockMovement.findUnique({
       where: { id: req.params.id },
@@ -1393,9 +1393,9 @@ router.post('/quran-stock/movements/:id/reverse', requireRoles('head'), async (r
     });
     if (!original) return res.status(404).json({ message: 'حركة المصاحف غير موجودة' });
     if (original.movementType !== 'distribution') {
-      return res.status(400).json({ message: 'التراجع المباشر متاح لحركات الصرف والتوزيع فقط' });
+      return res.status(400).json({ message: 'التراجع المباشر متاح لحركات إضافة المصاحف للمواقع فقط' });
     }
-    if (!original.siteId) return res.status(400).json({ message: 'حركة الصرف غير مرتبطة بمسجد أو مصلى' });
+    if (!original.siteId) return res.status(400).json({ message: 'حركة إضافة المصاحف غير مرتبطة بمسجد أو مصلى' });
 
     const priorReversal = await prisma.mosqueQuranStockMovement.findFirst({
       where: {
@@ -1414,14 +1414,14 @@ router.post('/quran-stock/movements/:id/reverse', requireRoles('head'), async (r
     const reversal = await prisma.$transaction(async (tx) => {
       const current = await getQuranSiteSystemStock(tx, original.siteId);
       if (!quranHasEnough(current.systemStock, counts)) {
-        const error = new Error(`لا يمكن التراجع لأن رصيد الموقع الحالي أقل من كمية حركة الصرف. الرصيد: كبير ${current.systemStock.largeCount}، متوسط ${current.systemStock.mediumCount}، صغير ${current.systemStock.smallCount}`);
+        const error = new Error(`لا يمكن التراجع لأن رصيد الموقع الحالي أقل من كمية المصاحف المضافة. الرصيد: كبير ${current.systemStock.largeCount}، متوسط ${current.systemStock.mediumCount}، صغير ${current.systemStock.smallCount}`);
         error.statusCode = 400;
         throw error;
       }
 
       const warehouse = await tx.mosqueQuranWarehouse.findUnique({ where: { id: original.warehouseId } });
       if (!warehouse) {
-        const error = new Error('المستودع المرتبط بالحركة غير موجود');
+        const error = new Error('مكتبة المصاحف المرتبطة بالحركة غير موجودة');
         error.statusCode = 404;
         throw error;
       }
@@ -1457,8 +1457,8 @@ router.post('/quran-stock/movements/:id/reverse', requireRoles('head'), async (r
 
     await notify({
       siteId: original.siteId,
-      title: 'تم التراجع عن صرف مصاحف',
-      message: `تم عكس حركة الصرف ${original.movementNumber} وإعادة ${original.totalCount} مصحفًا إلى ${original.warehouse?.name || 'المستودع'} بموجب ${reversal.movementNumber}`,
+      title: 'تم التراجع عن إضافة مصاحف',
+      message: `تم عكس إضافة المصاحف ${original.movementNumber} وإعادة ${original.totalCount} مصحفًا إلى ${original.warehouse?.name || 'مكتبة المصاحف'} بموجب ${reversal.movementNumber}`,
       entityType: 'quran_stock_movement',
       entityId: reversal.id,
     });
@@ -1474,7 +1474,7 @@ router.post('/quran-stock/movements/:id/reverse', requireRoles('head'), async (r
         entity: 'MosqueQuranStockMovement',
         entityId: original.id,
         entityLabel: original.movementNumber,
-        description: `تراجع عن حركة صرف المصاحف ${original.movementNumber} بواسطة حركة الإرجاع ${reversal.movementNumber}`,
+        description: `تراجع عن إضافة المصاحف ${original.movementNumber} بواسطة حركة الإرجاع ${reversal.movementNumber}`,
         details: { reason, reversalMovementId: reversal.id, reversalMovementNumber: reversal.movementNumber },
         oldData: original,
         newData: reversal,
@@ -1565,6 +1565,17 @@ router.post('/quran-inventory', requireRoles('head', 'supervisor', 'personnel'),
     const totalCount = input.largeCount + input.mediumCount + input.smallCount;
     if (input.damagedCount > totalCount) {
       return res.status(400).json({ message: 'عدد المصاحف التالفة لا يمكن أن يتجاوز إجمالي المصاحف حسب الأحجام' });
+    }
+
+    const currentStock = await getQuranSiteSystemStock(prisma, site.id);
+    if (currentStock.latestInventory && (
+      input.largeCount > currentStock.systemStock.largeCount ||
+      input.mediumCount > currentStock.systemStock.mediumCount ||
+      input.smallCount > currentStock.systemStock.smallCount
+    )) {
+      return res.status(400).json({
+        message: 'زيادة رصيد المسجد أو المصلى تتم من «إضافة من المكتبة» ليتم الخصم تلقائيًا من مكتبة المصاحف',
+      });
     }
 
     const row = await prisma.mosqueQuranInventory.create({
