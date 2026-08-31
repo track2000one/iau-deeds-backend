@@ -681,6 +681,7 @@ model MosqueSite {
   leaves      MosqueLeave[]
   assignments MosqueUserAssignment[]
   quranInventories MosqueQuranInventory[]
+  quranStockMovements MosqueQuranStockMovement[]
 
   @@index([siteType])
   @@index([city])
@@ -732,6 +733,54 @@ model MosqueQuranInventory {
   @@index([countedAt])
   @@index([createdAt])
 }
+
+model MosqueQuranWarehouse {
+  id             String   @id @default(cuid())
+  code           String   @unique
+  name           String
+  location       String?
+  active         Boolean  @default(true)
+  minLargeCount  Int      @default(0)
+  minMediumCount Int      @default(0)
+  minSmallCount  Int      @default(0)
+  notes          String?
+  createdBy      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  movements MosqueQuranStockMovement[]
+
+  @@index([active])
+  @@index([name])
+}
+
+model MosqueQuranStockMovement {
+  id             String   @id @default(cuid())
+  movementNumber String   @unique
+  movementType   String
+  warehouseId    String
+  siteId         String?
+  largeCount     Int      @default(0)
+  mediumCount    Int      @default(0)
+  smallCount     Int      @default(0)
+  totalCount     Int      @default(0)
+  referenceNumber String?
+  movementAt     DateTime @default(now())
+  notes          String?
+  createdBy      String?
+  createdByName  String?
+  createdAt      DateTime @default(now())
+
+  warehouse MosqueQuranWarehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  site      MosqueSite?           @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@index([warehouseId])
+  @@index([siteId])
+  @@index([movementType])
+  @@index([movementAt])
+  @@index([createdAt])
+}
+
 
 model MosqueRequest {
   id                    String    @id @default(cuid())
