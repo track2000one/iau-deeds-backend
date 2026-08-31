@@ -1287,8 +1287,11 @@ router.delete('/quran-warehouses/:id', requireRoles('head'), async (req, res, ne
         data: {
           userId: req.authUser?.id || null,
           action: 'DELETE_QURAN_WAREHOUSE',
+          module: 'mosques',
           entity: 'MosqueQuranWarehouse',
           entityId: warehouse.id,
+          entityLabel: warehouse.name,
+          description: `حذف مستودع مصاحف: ${warehouse.name}`,
           details: { name: warehouse.name },
         },
       });
