@@ -39,7 +39,9 @@ jobs:
       - name: Verify route syntax
         run: node --check src/routes/mosques.routes.js
 
-      - name: Verify Prisma
+      - name: Verify Prisma schema
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/verify
         run: npx prisma validate
 
       - name: Commit verified backend source
