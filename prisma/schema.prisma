@@ -727,6 +727,7 @@ model MosqueFieldVisit {
   workflowStatus     String    @default("planned")
   generalNotes       String?
   recommendations    String?
+  attachments        Json?
   createdBy          String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt

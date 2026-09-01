@@ -355,6 +355,7 @@ const fieldVisitImageSchema = z.object({
   fileId: z.string().trim().optional().nullable(),
   fileName: z.string().trim().optional().nullable(),
   mimeType: z.string().trim().optional().nullable(),
+  fileSize: z.number().nonnegative().optional().nullable(),
   capturedAt: z.string().trim().optional().nullable(),
 });
 
@@ -396,6 +397,7 @@ const fieldVisitSchema = z.object({
   workflowStatus: z.enum(['planned', 'in_progress', 'completed', 'follow_up', 'closed']).default('completed'),
   generalNotes: z.string().trim().max(10000).optional().nullable(),
   recommendations: z.string().trim().max(10000).optional().nullable(),
+  attachments: z.array(fieldVisitImageSchema).max(100).optional().default([]),
   items: z.array(fieldVisitItemSchema).default([]),
 });
 
@@ -1176,6 +1178,7 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
         workflowStatus: input.workflowStatus,
         generalNotes: input.generalNotes || null,
         recommendations: input.recommendations || null,
+        attachments: input.attachments,
         createdBy: req.authUser.id,
         items: { create: items.map(fieldVisitItemData) },
       },
@@ -1212,6 +1215,7 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
           workflowStatus: input.workflowStatus,
           generalNotes: input.generalNotes || null,
           recommendations: input.recommendations || null,
+          attachments: input.attachments,
           items: { create: input.items.map(fieldVisitItemData) },
         },
         include: fieldVisitInclude,
