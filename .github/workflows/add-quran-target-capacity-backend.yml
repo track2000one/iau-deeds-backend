@@ -18,6 +18,8 @@ concurrency:
 jobs:
   apply-verify-commit:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
