@@ -1221,6 +1221,19 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
   } catch (error) { next(error); }
 });
 
+router.delete('/field-visits/:id', requireRoles('head'), async (req, res, next) => {
+  try {
+    const current = await prisma.mosqueFieldVisit.findUnique({
+      where: { id: req.params.id },
+      select: { id: true },
+    });
+    if (!current) return res.status(404).json({ message: 'الزيارة الميدانية غير موجودة' });
+
+    await prisma.mosqueFieldVisit.delete({ where: { id: current.id } });
+    res.status(204).send();
+  } catch (error) { next(error); }
+});
+
 router.get('/requests', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
