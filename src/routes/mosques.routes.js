@@ -354,6 +354,7 @@ const fieldVisitImageSchema = z.object({
   url: z.string().url(),
   fileId: z.string().trim().optional().nullable(),
   fileName: z.string().trim().optional().nullable(),
+  description: z.string().trim().max(500).optional().nullable(),
   mimeType: z.string().trim().optional().nullable(),
   fileSize: z.number().nonnegative().optional().nullable(),
   capturedAt: z.string().trim().optional().nullable(),
