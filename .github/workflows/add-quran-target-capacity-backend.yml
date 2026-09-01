@@ -1,0 +1,58 @@
+name: Add Quran Target Capacity Backend
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/add-quran-target-capacity.py'
+      - '.github/workflows/add-quran-target-capacity-backend.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: add-quran-target-capacity-backend
+  cancel-in-progress: true
+
+jobs:
+  apply-verify-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Apply Quran target capacity backend
+        run: python3 scripts/add-quran-target-capacity.py
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      - name: Verify route syntax
+        run: node --check src/routes/mosques.routes.js
+
+      - name: Commit verified backend source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add prisma/schema.prisma src/routes/mosques.routes.js
+          if git diff --cached --quiet; then
+            echo "No backend source changes to commit"
+            exit 0
+          fi
+          git commit -m "feat(mosques): calculate Quran site need from target"
+          git push origin main
