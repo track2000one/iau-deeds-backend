@@ -350,6 +350,90 @@ const siteSchema = z.object({
   supervisorUserId: z.string().trim().optional().nullable(),
 });
 
+const fieldVisitImageSchema = z.object({
+  url: z.string().url(),
+  fileId: z.string().trim().optional().nullable(),
+  fileName: z.string().trim().optional().nullable(),
+  mimeType: z.string().trim().optional().nullable(),
+  capturedAt: z.string().trim().optional().nullable(),
+});
+
+const fieldVisitItemSchema = z.object({
+  id: z.string().optional(),
+  category: z.string().trim().min(1).max(120),
+  title: z.string().trim().min(1).max(300),
+  status: z.enum(['good', 'needs_action', 'not_available', 'not_applicable', 'not_checked']).default('not_checked'),
+  note: z.string().trim().max(5000).optional().nullable(),
+  priority: z.enum(['low', 'normal', 'medium', 'high', 'urgent']).default('normal'),
+  responsibleEntity: z.string().trim().max(300).optional().nullable(),
+  dueDate: z.coerce.date().optional().nullable(),
+  resolutionStatus: z.enum(['new', 'referred', 'in_progress', 'resolved', 'closed']).default('new'),
+  resolutionNote: z.string().trim().max(5000).optional().nullable(),
+  beforeImages: z.array(fieldVisitImageSchema).optional().default([]),
+  afterImages: z.array(fieldVisitImageSchema).optional().default([]),
+});
+
+const fieldTourSchema = z.object({
+  title: z.string().trim().min(2).max(300),
+  scheduledDate: z.coerce.date(),
+  scope: z.string().trim().max(1000).optional().nullable(),
+  teamMembers: z.array(z.string().trim().min(1).max(200)).min(1),
+  status: z.enum(['scheduled', 'in_progress', 'completed', 'postponed', 'cancelled']).optional().default('scheduled'),
+  notes: z.string().trim().max(5000).optional().nullable(),
+  siteIds: z.array(z.string().min(1)).min(1),
+});
+
+const fieldVisitSchema = z.object({
+  tourId: z.string().optional().nullable(),
+  siteId: z.string().min(1),
+  visitType: z.enum(['initial', 'follow_up', 'urgent', 'closure_verification']).default('initial'),
+  visitDate: z.coerce.date(),
+  departureAt: z.coerce.date().optional().nullable(),
+  representativeName: z.string().trim().max(300).optional().nullable(),
+  teamMembers: z.array(z.string().trim().min(1).max(200)).min(1),
+  overallStatus: z.enum(['excellent', 'good', 'needs_attention', 'critical']).default('good'),
+  priority: z.enum(['low', 'normal', 'medium', 'high', 'urgent']).default('normal'),
+  workflowStatus: z.enum(['planned', 'in_progress', 'completed', 'follow_up', 'closed']).default('completed'),
+  generalNotes: z.string().trim().max(10000).optional().nullable(),
+  recommendations: z.string().trim().max(10000).optional().nullable(),
+  items: z.array(fieldVisitItemSchema).default([]),
+});
+
+const FIELD_VISIT_CHECKLIST = [
+  ['النظافة', 'نظافة السجاد والأرضيات'],
+  ['النظافة', 'نظافة الجدران والنوافذ وخلو الموقع من الروائح'],
+  ['النظافة', 'نظافة مرافق الوضوء ودورات المياه'],
+  ['التكييف والتهوية', 'كفاءة التكييف والتهوية وعدم وجود تسربات'],
+  ['الإنارة والكهرباء', 'سلامة الإنارة والمفاتيح والمقابس'],
+  ['الإنارة والكهرباء', 'عدم وجود تمديدات كهربائية مكشوفة أو غير آمنة'],
+  ['الصوتيات', 'سلامة الميكروفونات والسماعات وأجهزة الأذان'],
+  ['السلامة', 'وضوح مخارج الطوارئ وخلوها من العوائق'],
+  ['السلامة', 'توفر طفايات الحريق وصلاحيتها'],
+  ['السلامة', 'سلامة الأبواب والممرات وسهولة الحركة'],
+  ['التجهيزات', 'توفر دواليب ورفوف المصاحف بحالة مناسبة'],
+  ['التجهيزات', 'سلامة الفواصل والستائر والساعات واللوحات'],
+  ['المصاحف', 'سلامة المصاحف والتحقق من جهة الطباعة'],
+  ['المصاحف', 'كفاية أعداد المصاحف وملاءمة أحجامها'],
+  ['الكتب والمطبوعات', 'خلو الموقع من الكتب والنشرات غير المعتمدة'],
+  ['الأنشطة', 'اعتماد حلقات التحفيظ والمحاضرات والأنشطة القائمة'],
+  ['سهولة الوصول', 'ملاءمة الموقع لكبار السن والأشخاص ذوي الإعاقة'],
+  ['المظهر العام', 'تنظيم الموقع ووضوح اتجاه القبلة وجاهزيته للصلاة'],
+].map(([category, title]) => ({ category, title }));
+
+const fieldVisitItemData = (item) => ({
+  category: item.category,
+  title: item.title,
+  status: item.status,
+  note: item.note || null,
+  priority: item.priority,
+  responsibleEntity: item.responsibleEntity || null,
+  dueDate: item.dueDate || null,
+  resolutionStatus: item.resolutionStatus,
+  resolutionNote: item.resolutionNote || null,
+  beforeImages: item.beforeImages || [],
+  afterImages: item.afterImages || [],
+});
+
 const requestSchema = z.object({
   siteId: z.string().min(1),
   requestType: z.enum(['maintenance', 'renovation', 'equipment', 'cleaning', 'carpet', 'air_conditioning', 'audio', 'lighting', 'other']),
@@ -866,6 +950,274 @@ router.delete('/sites/:id', requireRoles('head'), async (req, res, next) => {
     }
     await prisma.mosqueSite.delete({ where: { id: req.params.id } });
     res.status(204).send();
+  } catch (error) { next(error); }
+});
+
+// -----------------------------------------------------------------------------
+// Field tours and visits. Every visit is linked to the existing MosqueSite
+// record so the platform keeps one authoritative mosque/prayer-room registry.
+// -----------------------------------------------------------------------------
+const newFieldChecklist = () => FIELD_VISIT_CHECKLIST.map((item) => ({
+  ...item,
+  status: 'not_checked',
+  priority: 'normal',
+  resolutionStatus: 'new',
+  beforeImages: [],
+  afterImages: [],
+}));
+
+const fieldVisitInclude = {
+  site: {
+    select: {
+      id: true, name: true, siteType: true, prayerRoomGender: true, city: true,
+      district: true, campusLocation: true, status: true, publicToken: true,
+    },
+  },
+  tour: { select: { id: true, tourNumber: true, title: true, scheduledDate: true, status: true } },
+  items: { orderBy: [{ category: 'asc' }, { createdAt: 'asc' }] },
+};
+
+const fieldSiteScope = async (req, context) => {
+  const managedSiteIds = await getManagedSiteIds(req, context);
+  return managedSiteIds === null ? {} : { siteId: { in: managedSiteIds } };
+};
+
+router.get('/field-visits/checklist-template', requireRoles('head', 'supervisor'), (_req, res) => {
+  res.json(newFieldChecklist());
+});
+
+router.get('/field-tours', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const scope = await fieldSiteScope(req, context);
+    const tours = await prisma.mosqueFieldTour.findMany({
+      where: context.role === 'head' ? {} : { visits: { some: scope } },
+      include: {
+        visits: {
+          where: scope,
+          include: {
+            site: { select: { id: true, name: true, siteType: true, prayerRoomGender: true, campusLocation: true } },
+            _count: { select: { items: true } },
+          },
+          orderBy: { visitDate: 'asc' },
+        },
+      },
+      orderBy: [{ scheduledDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    res.json(tours);
+  } catch (error) { next(error); }
+});
+
+router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const input = fieldTourSchema.parse(req.body);
+    const siteIds = [...new Set(input.siteIds)];
+
+    if (context.role === 'supervisor') {
+      const managed = new Set(await getManagedSiteIds(req, context) || []);
+      if (siteIds.some((siteId) => !managed.has(siteId))) {
+        return res.status(403).json({ message: 'تتضمن الجولة موقعًا غير مسند إلى حساب المشرف الحالي' });
+      }
+    }
+
+    const sites = await prisma.mosqueSite.findMany({ where: { id: { in: siteIds } }, select: { id: true } });
+    if (sites.length !== siteIds.length) return res.status(400).json({ message: 'يتضمن نطاق الجولة مسجدًا أو مصلى غير موجود' });
+
+    const created = await prisma.$transaction(async (tx) => {
+      const tour = await tx.mosqueFieldTour.create({
+        data: {
+          tourNumber: trackingNumber('MTR'),
+          title: input.title,
+          scheduledDate: input.scheduledDate,
+          scope: input.scope || null,
+          teamMembers: input.teamMembers,
+          status: input.status,
+          notes: input.notes || null,
+          createdBy: req.authUser.id,
+        },
+      });
+
+      for (const siteId of siteIds) {
+        await tx.mosqueFieldVisit.create({
+          data: {
+            visitNumber: trackingNumber('MVS'),
+            tourId: tour.id,
+            siteId,
+            visitType: 'initial',
+            visitDate: input.scheduledDate,
+            teamMembers: input.teamMembers,
+            workflowStatus: 'planned',
+            createdBy: req.authUser.id,
+            items: { create: newFieldChecklist().map(fieldVisitItemData) },
+          },
+        });
+      }
+
+      return tx.mosqueFieldTour.findUnique({
+        where: { id: tour.id },
+        include: {
+          visits: {
+            include: { site: { select: { id: true, name: true, siteType: true, prayerRoomGender: true, campusLocation: true } }, _count: { select: { items: true } } },
+            orderBy: { visitDate: 'asc' },
+          },
+        },
+      });
+    });
+
+    res.status(201).json(created);
+  } catch (error) { next(error); }
+});
+
+router.patch('/field-tours/:id', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const current = await prisma.mosqueFieldTour.findUnique({ where: { id: req.params.id }, include: { visits: { select: { siteId: true } } } });
+    if (!current) return res.status(404).json({ message: 'الجولة الميدانية غير موجودة' });
+    if (context.role === 'supervisor') {
+      const managed = new Set(await getManagedSiteIds(req, context) || []);
+      if (current.visits.some((visit) => !managed.has(visit.siteId))) return res.status(403).json({ message: 'لا تملك صلاحية تعديل هذه الجولة' });
+    }
+    const input = z.object({
+      status: z.enum(['scheduled', 'in_progress', 'completed', 'postponed', 'cancelled']),
+      notes: z.string().trim().max(5000).optional().nullable(),
+    }).parse(req.body);
+    const updated = await prisma.mosqueFieldTour.update({ where: { id: current.id }, data: { status: input.status, notes: input.notes === undefined ? current.notes : input.notes } });
+    res.json(updated);
+  } catch (error) { next(error); }
+});
+
+router.get('/field-visits/summary', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const visitScope = await fieldSiteScope(req, context);
+    const siteScope = context.role === 'head'
+      ? {}
+      : { id: { in: (await getManagedSiteIds(req, context)) || [] } };
+    const openResolution = { notIn: ['resolved', 'closed'] };
+    const [totalSites, visits, visitedSites, openItems, urgentItems, resolvedItems, overdueItems] = await Promise.all([
+      prisma.mosqueSite.count({ where: siteScope }),
+      prisma.mosqueFieldVisit.count({ where: visitScope }),
+      prisma.mosqueFieldVisit.findMany({
+        where: { ...visitScope, workflowStatus: { in: ['completed', 'follow_up', 'closed'] } },
+        distinct: ['siteId'],
+        select: { siteId: true },
+      }),
+      prisma.mosqueFieldVisitItem.count({ where: { visit: visitScope, status: 'needs_action', resolutionStatus: openResolution } }),
+      prisma.mosqueFieldVisitItem.count({ where: { visit: visitScope, priority: 'urgent', resolutionStatus: openResolution } }),
+      prisma.mosqueFieldVisitItem.count({ where: { visit: visitScope, resolutionStatus: { in: ['resolved', 'closed'] } } }),
+      prisma.mosqueFieldVisitItem.count({ where: { visit: visitScope, dueDate: { lt: new Date() }, resolutionStatus: openResolution } }),
+    ]);
+    res.json({
+      totalSites,
+      visitedSites: visitedSites.length,
+      remainingSites: Math.max(0, totalSites - visitedSites.length),
+      coveragePercent: totalSites ? Math.round((visitedSites.length / totalSites) * 100) : 0,
+      visits,
+      openItems,
+      urgentItems,
+      resolvedItems,
+      overdueItems,
+    });
+  } catch (error) { next(error); }
+});
+
+router.get('/field-visits', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const scope = await fieldSiteScope(req, context);
+    const siteId = nullableText(req.query.siteId);
+    const tourId = nullableText(req.query.tourId);
+    const workflowStatus = nullableText(req.query.workflowStatus);
+    const records = await prisma.mosqueFieldVisit.findMany({
+      where: {
+        ...scope,
+        ...(siteId ? { siteId } : {}),
+        ...(tourId ? { tourId } : {}),
+        ...(workflowStatus ? { workflowStatus } : {}),
+      },
+      include: fieldVisitInclude,
+      orderBy: [{ visitDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    res.json(records);
+  } catch (error) { next(error); }
+});
+
+router.get('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const scope = await fieldSiteScope(req, context);
+    const record = await prisma.mosqueFieldVisit.findFirst({ where: { id: req.params.id, ...scope }, include: fieldVisitInclude });
+    if (!record) return res.status(404).json({ message: 'الزيارة الميدانية غير موجودة' });
+    res.json(record);
+  } catch (error) { next(error); }
+});
+
+router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const input = fieldVisitSchema.parse(req.body);
+    if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
+    const site = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { id: true } });
+    if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
+    const items = input.items.length ? input.items : newFieldChecklist();
+    const record = await prisma.mosqueFieldVisit.create({
+      data: {
+        visitNumber: trackingNumber('MVS'),
+        tourId: input.tourId || null,
+        siteId: input.siteId,
+        visitType: input.visitType,
+        visitDate: input.visitDate,
+        departureAt: input.departureAt || null,
+        representativeName: input.representativeName || null,
+        teamMembers: input.teamMembers,
+        overallStatus: input.overallStatus,
+        priority: input.priority,
+        workflowStatus: input.workflowStatus,
+        generalNotes: input.generalNotes || null,
+        recommendations: input.recommendations || null,
+        createdBy: req.authUser.id,
+        items: { create: items.map(fieldVisitItemData) },
+      },
+      include: fieldVisitInclude,
+    });
+    res.status(201).json(record);
+  } catch (error) { next(error); }
+});
+
+router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const current = await prisma.mosqueFieldVisit.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'الزيارة الميدانية غير موجودة' });
+    if (context.role === 'supervisor') {
+      await assertSupervisorSiteAccess(req, current.siteId, context);
+      if (req.body.siteId && req.body.siteId !== current.siteId) await assertSupervisorSiteAccess(req, req.body.siteId, context);
+    }
+    const input = fieldVisitSchema.parse(req.body);
+    const record = await prisma.$transaction(async (tx) => {
+      await tx.mosqueFieldVisitItem.deleteMany({ where: { visitId: current.id } });
+      return tx.mosqueFieldVisit.update({
+        where: { id: current.id },
+        data: {
+          tourId: input.tourId || null,
+          siteId: input.siteId,
+          visitType: input.visitType,
+          visitDate: input.visitDate,
+          departureAt: input.departureAt || null,
+          representativeName: input.representativeName || null,
+          teamMembers: input.teamMembers,
+          overallStatus: input.overallStatus,
+          priority: input.priority,
+          workflowStatus: input.workflowStatus,
+          generalNotes: input.generalNotes || null,
+          recommendations: input.recommendations || null,
+          items: { create: input.items.map(fieldVisitItemData) },
+        },
+        include: fieldVisitInclude,
+      });
+    });
+    res.json(record);
   } catch (error) { next(error); }
 });
 

@@ -683,12 +683,89 @@ model MosqueSite {
   assignments MosqueUserAssignment[]
   quranInventories MosqueQuranInventory[]
   quranStockMovements MosqueQuranStockMovement[]
+  fieldVisits MosqueFieldVisit[]
 
   @@index([siteType])
   @@index([city])
   @@index([district])
   @@index([status])
   @@index([supervisorUserId])
+}
+
+model MosqueFieldTour {
+  id            String   @id @default(cuid())
+  tourNumber    String   @unique
+  title         String
+  scheduledDate DateTime
+  scope         String?
+  teamMembers   Json?
+  status        String   @default("scheduled")
+  notes         String?
+  createdBy     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  visits MosqueFieldVisit[]
+
+  @@index([scheduledDate])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model MosqueFieldVisit {
+  id                 String    @id @default(cuid())
+  visitNumber        String    @unique
+  tourId             String?
+  siteId             String
+  visitType          String    @default("initial")
+  visitDate          DateTime
+  departureAt        DateTime?
+  representativeName String?
+  teamMembers        Json?
+  overallStatus      String    @default("good")
+  priority           String    @default("normal")
+  workflowStatus     String    @default("planned")
+  generalNotes       String?
+  recommendations    String?
+  createdBy          String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  tour  MosqueFieldTour? @relation(fields: [tourId], references: [id], onDelete: SetNull)
+  site  MosqueSite       @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  items MosqueFieldVisitItem[]
+
+  @@index([tourId])
+  @@index([siteId])
+  @@index([visitDate])
+  @@index([priority])
+  @@index([workflowStatus])
+}
+
+model MosqueFieldVisitItem {
+  id                String    @id @default(cuid())
+  visitId           String
+  category          String
+  title             String
+  status            String    @default("not_checked")
+  note              String?
+  priority          String    @default("normal")
+  responsibleEntity String?
+  dueDate           DateTime?
+  resolutionStatus  String    @default("new")
+  resolutionNote    String?
+  beforeImages      Json?
+  afterImages       Json?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  visit MosqueFieldVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+
+  @@index([visitId])
+  @@index([category])
+  @@index([priority])
+  @@index([resolutionStatus])
+  @@index([dueDate])
 }
 
 model MosquePersonnel {
