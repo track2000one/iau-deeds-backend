@@ -985,6 +985,28 @@ const fieldSiteScope = async (req, context) => {
   return managedSiteIds === null ? {} : { siteId: { in: managedSiteIds } };
 };
 
+const ACTIVE_FIELD_VISIT_STATUSES = ['planned', 'in_progress', 'follow_up'];
+const findActiveFieldVisitConflict = async (siteIds, ignoreVisitId = null) => {
+  const records = await prisma.mosqueFieldVisit.findMany({
+    where: {
+      siteId: { in: siteIds },
+      workflowStatus: { in: ACTIVE_FIELD_VISIT_STATUSES },
+      ...(ignoreVisitId ? { id: { not: ignoreVisitId } } : {}),
+    },
+    select: {
+      id: true,
+      visitNumber: true,
+      siteId: true,
+      workflowStatus: true,
+      site: { select: { id: true, name: true } },
+      tour: { select: { id: true, tourNumber: true, title: true, status: true } },
+    },
+    orderBy: [{ visitDate: 'desc' }, { createdAt: 'desc' }],
+  });
+  return records.find((record) => record.tour?.status !== 'cancelled') || null;
+};
+const activeFieldVisitMessage = (record) => `يوجد إجراء ميداني قائم للموقع ${record.site.name} برقم ${record.visitNumber} وحالته الحالية ${record.workflowStatus === 'planned' ? 'مجدولة' : record.workflowStatus === 'in_progress' ? 'جارية' : 'تحتاج متابعة'}. افتح الزيارة القائمة بدل إنشاء زيارة مكررة.`;
+
 router.get('/field-visits/checklist-template', requireRoles('head', 'supervisor'), (_req, res) => {
   res.json(newFieldChecklist());
 });
@@ -1026,6 +1048,14 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
 
     const sites = await prisma.mosqueSite.findMany({ where: { id: { in: siteIds } }, select: { id: true } });
     if (sites.length !== siteIds.length) return res.status(400).json({ message: 'يتضمن نطاق الجولة مسجدًا أو مصلى غير موجود' });
+
+    const conflict = await findActiveFieldVisitConflict(siteIds);
+    if (conflict) {
+      return res.status(409).json({
+        message: activeFieldVisitMessage(conflict),
+        conflict: { visitId: conflict.id, visitNumber: conflict.visitNumber, siteId: conflict.siteId, siteName: conflict.site.name, workflowStatus: conflict.workflowStatus },
+      });
+    }
 
     const created = await prisma.$transaction(async (tx) => {
       const tour = await tx.mosqueFieldTour.create({
@@ -1163,6 +1193,13 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
     const site = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { id: true } });
     if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
+    const conflict = await findActiveFieldVisitConflict([input.siteId]);
+    if (conflict) {
+      return res.status(409).json({
+        message: activeFieldVisitMessage(conflict),
+        conflict: { visitId: conflict.id, visitNumber: conflict.visitNumber, siteId: conflict.siteId, siteName: conflict.site.name, workflowStatus: conflict.workflowStatus },
+      });
+    }
     const items = input.items.length ? input.items : newFieldChecklist();
     const record = await prisma.mosqueFieldVisit.create({
       data: {
@@ -1199,6 +1236,15 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
       if (req.body.siteId && req.body.siteId !== current.siteId) await assertSupervisorSiteAccess(req, req.body.siteId, context);
     }
     const input = fieldVisitSchema.parse(req.body);
+    if (ACTIVE_FIELD_VISIT_STATUSES.includes(input.workflowStatus)) {
+      const conflict = await findActiveFieldVisitConflict([input.siteId], current.id);
+      if (conflict) {
+        return res.status(409).json({
+          message: activeFieldVisitMessage(conflict),
+          conflict: { visitId: conflict.id, visitNumber: conflict.visitNumber, siteId: conflict.siteId, siteName: conflict.site.name, workflowStatus: conflict.workflowStatus },
+        });
+      }
+    }
     const record = await prisma.$transaction(async (tx) => {
       await tx.mosqueFieldVisitItem.deleteMany({ where: { visitId: current.id } });
       return tx.mosqueFieldVisit.update({
