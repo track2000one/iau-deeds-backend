@@ -660,6 +660,7 @@ model MosqueSite {
   campusLocation   String?
   area             Float?
   capacity         Int?
+  quranTargetCount Int?
   latitude         Float?
   longitude        Float?
   mapUrl           String?

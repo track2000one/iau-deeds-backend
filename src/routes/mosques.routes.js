@@ -319,6 +319,7 @@ const siteSchema = z.object({
   campusLocation: z.string().trim().optional().nullable(),
   area: z.coerce.number().nonnegative().optional().nullable(),
   capacity: z.coerce.number().int().nonnegative().optional().nullable(),
+  quranTargetCount: z.coerce.number().int().min(0).max(1000000).optional().nullable(),
   latitude: z.coerce.number().min(-90).max(90).optional().nullable(),
   longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
   mapUrl: z.string().trim().optional().nullable(),
@@ -1306,7 +1307,7 @@ router.get('/quran-stock/dashboard', requireRoles('head', 'supervisor', 'personn
       }),
       prisma.mosqueSite.findMany({
         where: siteWhere,
-        select: { id: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true, campusLocation: true },
+        select: { id: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true, campusLocation: true, quranTargetCount: true },
         orderBy: { name: 'asc' },
       }),
     ]);
@@ -1347,7 +1348,21 @@ router.get('/quran-stock/dashboard', requireRoles('head', 'supervisor', 'personn
       const withdrawnStock = movementRows
         .filter((row) => row.movementType === 'site_withdrawal')
         .reduce((counts, row) => addQuranCounts(counts, quranMovementCounts(row), 1), quranZeroCounts());
-      return { site, latestInventory, systemStock, withdrawnStock };
+      const targetCount = Math.max(0, Number(site.quranTargetCount || 0));
+      const needCount = targetCount > 0 ? Math.max(targetCount - systemStock.totalCount, 0) : 0;
+      const coveragePercent = targetCount > 0
+        ? Math.min(100, Math.round((systemStock.totalCount / targetCount) * 100))
+        : null;
+      const needLevel = targetCount <= 0
+        ? 'not_set'
+        : needCount <= 0
+          ? 'complete'
+          : coveragePercent >= 85
+            ? 'low'
+            : coveragePercent >= 60
+              ? 'medium'
+              : 'high';
+      return { site, latestInventory, systemStock, withdrawnStock, targetCount, needCount, coveragePercent, needLevel };
     });
 
     const summary = {
@@ -1361,7 +1376,7 @@ router.get('/quran-stock/dashboard', requireRoles('head', 'supervisor', 'personn
       withdrawnTotal: allWarehouseMovements.filter((row) => row.movementType === 'site_withdrawal').reduce((sum, row) => sum + row.totalCount, 0),
       damagedTotal: allWarehouseMovements.filter((row) => row.movementType === 'warehouse_damage').reduce((sum, row) => sum + row.totalCount, 0),
       siteSystemTotal: siteStock.reduce((sum, row) => sum + row.systemStock.totalCount, 0),
-      siteNeedTotal: siteStock.reduce((sum, row) => sum + Number(row.latestInventory?.neededCount || 0), 0),
+      siteNeedTotal: siteStock.reduce((sum, row) => sum + Number(row.needCount || 0), 0),
       lowStockWarehouses: warehouseRows.filter((row) => row.lowStock).length,
       shortageTotal: warehouseRows.reduce((sum, row) => sum + row.shortage.totalCount, 0),
     };
