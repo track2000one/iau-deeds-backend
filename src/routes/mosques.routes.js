@@ -402,6 +402,33 @@ const fieldVisitSchema = z.object({
   items: z.array(fieldVisitItemSchema).default([]),
 });
 
+const validateFieldVisitTreatmentEvidence = (input) => {
+  const requiresBeforeEvidence = ['completed', 'follow_up', 'closed'].includes(input.workflowStatus);
+  for (const item of input.items || []) {
+    if (item.status !== 'needs_action') continue;
+    if (!nullableText(item.note)) {
+      const error = new Error(`وصف الملاحظة إلزامي في بند: ${item.title}`);
+      error.statusCode = 400;
+      throw error;
+    }
+    if (requiresBeforeEvidence && !(item.beforeImages || []).length) {
+      const error = new Error(`صورة قبل المعالجة إلزامية في بند: ${item.title}`);
+      error.statusCode = 400;
+      throw error;
+    }
+    if (['resolved', 'closed'].includes(item.resolutionStatus) && !nullableText(item.resolutionNote)) {
+      const error = new Error(`وصف الإجراء أو المعالجة المنفذة إلزامي في بند: ${item.title}`);
+      error.statusCode = 400;
+      throw error;
+    }
+    if (item.resolutionStatus === 'closed' && !(item.afterImages || []).length) {
+      const error = new Error(`صورة بعد المعالجة إلزامية قبل إغلاق الملاحظة في بند: ${item.title}`);
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+};
+
 const FIELD_VISIT_CHECKLIST = [
   ['النظافة', 'نظافة السجاد والأرضيات'],
   ['النظافة', 'نظافة الجدران والنوافذ وخلو الموقع من الروائح'],
@@ -1203,6 +1230,7 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
   try {
     const context = req.mosqueRole || await getModuleRole(req);
     const input = fieldVisitSchema.parse(req.body);
+    validateFieldVisitTreatmentEvidence(input);
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
     const site = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { id: true } });
     if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
@@ -1249,6 +1277,7 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
       if (req.body.siteId && req.body.siteId !== current.siteId) await assertSupervisorSiteAccess(req, req.body.siteId, context);
     }
     const input = fieldVisitSchema.parse(req.body);
+    validateFieldVisitTreatmentEvidence(input);
     if (ACTIVE_FIELD_VISIT_STATUSES.includes(input.workflowStatus)) {
       const conflict = await findActiveFieldVisitConflict([input.siteId], current.id);
       if (conflict) {
