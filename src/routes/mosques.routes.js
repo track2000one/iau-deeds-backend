@@ -371,6 +371,7 @@ const fieldVisitItemSchema = z.object({
   dueDate: z.coerce.date().optional().nullable(),
   resolutionStatus: z.enum(['new', 'referred', 'in_progress', 'resolved', 'closed']).default('new'),
   resolutionNote: z.string().trim().max(5000).optional().nullable(),
+  details: z.any().optional().nullable(),
   beforeImages: z.array(fieldVisitImageSchema).optional().default([]),
   afterImages: z.array(fieldVisitImageSchema).optional().default([]),
 });
@@ -402,16 +403,24 @@ const fieldVisitSchema = z.object({
   items: z.array(fieldVisitItemSchema).default([]),
 });
 
+const STRUCTURED_EVIDENCE_ITEM_TITLES = new Set([
+  'اعتماد حلقات التحفيظ والمحاضرات والأنشطة القائمة',
+  'سلامة المصاحف والتحقق من جهة الطباعة وكفاية الأعداد وملاءمة الأحجام',
+  'سلامة المصاحف والتحقق من جهة الطباعة',
+  'كفاية أعداد المصاحف وملاءمة أحجامها',
+]);
+
 const validateFieldVisitTreatmentEvidence = (input) => {
   const requiresBeforeEvidence = ['completed', 'follow_up', 'closed'].includes(input.workflowStatus);
   for (const item of input.items || []) {
     if (item.status !== 'needs_action') continue;
+    const usesStructuredEvidence = STRUCTURED_EVIDENCE_ITEM_TITLES.has(item.title);
     if (!nullableText(item.note)) {
       const error = new Error(`وصف الملاحظة إلزامي في بند: ${item.title}`);
       error.statusCode = 400;
       throw error;
     }
-    if (requiresBeforeEvidence && !(item.beforeImages || []).length) {
+    if (requiresBeforeEvidence && !usesStructuredEvidence && !(item.beforeImages || []).length) {
       const error = new Error(`صورة قبل المعالجة إلزامية في بند: ${item.title}`);
       error.statusCode = 400;
       throw error;
@@ -421,7 +430,7 @@ const validateFieldVisitTreatmentEvidence = (input) => {
       error.statusCode = 400;
       throw error;
     }
-    if (item.resolutionStatus === 'closed' && !(item.afterImages || []).length) {
+    if (item.resolutionStatus === 'closed' && !usesStructuredEvidence && !(item.afterImages || []).length) {
       const error = new Error(`صورة بعد المعالجة إلزامية قبل إغلاق الملاحظة في بند: ${item.title}`);
       error.statusCode = 400;
       throw error;
@@ -442,8 +451,7 @@ const FIELD_VISIT_CHECKLIST = [
   ['السلامة', 'سلامة الأبواب والممرات وسهولة الحركة'],
   ['التجهيزات', 'توفر دواليب ورفوف المصاحف بحالة مناسبة'],
   ['التجهيزات', 'سلامة الفواصل والستائر والساعات واللوحات'],
-  ['المصاحف', 'سلامة المصاحف والتحقق من جهة الطباعة'],
-  ['المصاحف', 'كفاية أعداد المصاحف وملاءمة أحجامها'],
+  ['المصاحف', 'سلامة المصاحف والتحقق من جهة الطباعة وكفاية الأعداد وملاءمة الأحجام'],
   ['الكتب والمطبوعات', 'خلو الموقع من الكتب والنشرات غير المعتمدة'],
   ['الأنشطة', 'اعتماد حلقات التحفيظ والمحاضرات والأنشطة القائمة'],
   ['سهولة الوصول', 'ملاءمة الموقع لكبار السن والأشخاص ذوي الإعاقة'],
@@ -460,6 +468,7 @@ const fieldVisitItemData = (item) => ({
   dueDate: item.dueDate || null,
   resolutionStatus: item.resolutionStatus,
   resolutionNote: item.resolutionNote || null,
+  details: item.details || null,
   beforeImages: item.beforeImages || [],
   afterImages: item.afterImages || [],
 });
@@ -1645,18 +1654,19 @@ const getQuranOpeningBaselineState = async () => {
   };
 };
 
-router.get('/quran-stock/opening-baseline', requireRoles('head'), async (_req, res, next) => {
+router.get('/quran-stock/opening-baseline', requireRoles('head', 'supervisor'), async (_req, res, next) => {
   try {
     res.json(await getQuranOpeningBaselineState());
   } catch (error) { next(error); }
 });
 
-router.post('/quran-stock/opening-baseline', requireRoles('head'), async (req, res, next) => {
+router.post('/quran-stock/opening-baseline', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
     const currentState = await getQuranOpeningBaselineState();
     if (currentState.closed) return res.status(409).json({ message: 'تم اعتماد وإقفال الجرد التأسيسي، ولا يمكن تعديل الأرصدة الافتتاحية بعد الإقفال' });
 
     const input = quranOpeningBaselineSchema.parse(req.body || {});
+    if (req.mosqueRole?.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, req.mosqueRole);
     const site = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { id: true, name: true } });
     if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
 

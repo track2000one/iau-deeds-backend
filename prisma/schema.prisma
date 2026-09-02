@@ -755,6 +755,7 @@ model MosqueFieldVisitItem {
   dueDate           DateTime?
   resolutionStatus  String    @default("new")
   resolutionNote    String?
+  details           Json?
   beforeImages      Json?
   afterImages       Json?
   createdAt         DateTime  @default(now())
