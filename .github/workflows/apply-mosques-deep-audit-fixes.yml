@@ -1,0 +1,323 @@
+name: Apply Mosques Deep Audit Fixes
+
+on:
+  push:
+    branches: [fix/platform-audit-core]
+    paths:
+      - '.github/workflows/apply-mosques-deep-audit-fixes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/platform-audit-core
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply mosque backend fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/routes/mosques.routes.js')
+          s = p.read_text()
+
+          def one(old, new, label):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {count}')
+              s = s.replace(old, new, 1)
+
+          def all_matches(old, new, expected, label):
+              global s
+              count = s.count(old)
+              if count != expected:
+                  raise SystemExit(f'{label}: expected {expected} matches, found {count}')
+              s = s.replace(old, new)
+
+          one(
+              "const trackingNumber = (prefix) => `${prefix}-${new Date().getFullYear()}-${randomDigits(5)}`;",
+              "const trackingNumber = (prefix) => `${prefix}-${new Date().getFullYear()}-${randomDigits(8)}`;",
+              'tracking number entropy',
+          )
+
+          one(
+              "const QURAN_OPENING_BASELINE_SITE_ACTION = 'quran_opening_baseline_site';\nconst QURAN_OPENING_BASELINE_CLOSED_ACTION = 'quran_opening_baseline_closed';",
+              "const QURAN_OPENING_BASELINE_SITE_ACTION = 'quran_opening_baseline_site';\nconst QURAN_OPENING_BASELINE_CLOSED_ACTION = 'quran_opening_baseline_closed';\nconst QURAN_LIBRARY_RESET_ACTION = 'RESET_QURAN_LIBRARY';",
+              'quran reset marker constant',
+          )
+
+          one(
+              "requestType: z.enum(['maintenance', 'renovation', 'equipment', 'cleaning', 'carpet', 'air_conditioning', 'audio', 'lighting', 'other']),",
+              "requestType: z.enum(['maintenance', 'renovation', 'equipment', 'cleaning', 'carpet', 'air_conditioning', 'audio', 'lighting', 'quran_supply', 'other']),",
+              'quran request type schema',
+          )
+
+          all_matches(
+              "const input = fieldVisitSchema.parse(req.body);\n    validateFieldVisitTreatmentEvidence(input);",
+              "const input = fieldVisitSchema.parse(req.body);\n    if (input.departureAt && input.departureAt < input.visitDate) {\n      return res.status(400).json({ message: 'وقت المغادرة يجب أن يكون بعد وقت الوصول' });\n    }\n    validateFieldVisitTreatmentEvidence(input);",
+              2,
+              'field visit chronological validation',
+          )
+
+          one(
+              "router.post('/requests', requireRoles('personnel'), async (req, res, next) => {\n  try {\n    const input = requestSchema.parse(req.body);\n    const context = req.mosqueRole || await getModuleRole(req);\n    if (!context.siteId || input.siteId !== context.siteId) {\n      return res.status(403).json({ message: 'يمكن لمنسوب المسجد تقديم الطلب للمسجد أو الجامع أو المصلى المرتبط بحسابه فقط' });\n    }",
+              "router.post('/requests', requireRoles('head', 'supervisor', 'personnel'), async (req, res, next) => {\n  try {\n    const input = requestSchema.parse(req.body);\n    const context = req.mosqueRole || await getModuleRole(req);\n    if (context.role === 'personnel' && (!context.siteId || input.siteId !== context.siteId)) {\n      return res.status(403).json({ message: 'يمكن لمنسوب المسجد تقديم الطلب للمسجد أو الجامع أو المصلى المرتبط بحسابه فقط' });\n    }\n    if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);",
+              'management-created requests',
+          )
+
+          old_delete = """router.delete('/sites/:id', requireRoles('head'), async (req, res, next) => {
+  try {
+    const site = await prisma.mosqueSite.findUnique({ where: { id: req.params.id }, include: { _count: { select: { requests: true, tickets: true, leaves: true } } } });
+    if (!site) return res.status(404).json({ message: 'الموقع غير موجود' });
+    if (site._count.requests || site._count.tickets || site._count.leaves) {
+      return res.status(409).json({ message: 'لا يمكن حذف موقع مرتبط بإجراءات. غيّر حالته إلى مغلق مؤقتًا بدل الحذف.' });
+    }
+    await prisma.mosqueSite.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (error) { next(error); }
+});"""
+          new_delete = """router.delete('/sites/:id', requireRoles('head'), async (req, res, next) => {
+  try {
+    const site = await prisma.mosqueSite.findUnique({
+      where: { id: req.params.id },
+      include: {
+        _count: {
+          select: {
+            personnel: true,
+            requests: true,
+            tickets: true,
+            leaves: true,
+            assignments: true,
+            quranInventories: true,
+            quranStockMovements: true,
+            fieldVisits: true,
+          },
+        },
+      },
+    });
+    if (!site) return res.status(404).json({ message: 'الموقع غير موجود' });
+    const linkedRecords = Object.values(site._count || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    if (linkedRecords > 0) {
+      return res.status(409).json({
+        message: 'لا يمكن حذف مسجد أو مصلى مرتبط بسجلات تشغيلية أو تاريخية. غيّر حالته إلى «مغلق مؤقتًا» للمحافظة على السجل.',
+        dependencies: site._count,
+      });
+    }
+    await prisma.mosqueSite.delete({ where: { id: req.params.id } });
+    res.status(204).send();
+  } catch (error) { next(error); }
+});"""
+          one(old_delete, new_delete, 'site dependency deletion guard')
+
+          one(
+              "leave: { model: 'mosqueLeaveRequest', numberField: 'leaveNumber', siteField: 'siteId' },",
+              "leave: { model: 'mosqueLeave', numberField: 'leaveNumber', siteField: 'siteId' },",
+              'workflow leave delegate',
+          )
+
+          old_history = """router.get('/workflow/:kind/:id/history', async (req, res, next) => {
+  try {
+    const kind = String(req.params.kind || '').trim();
+    const config = getWorkflowConfig(kind);
+    if (!config) return res.status(400).json({ message: 'نوع الإجراء غير مدعوم' });
+    const rows = await prisma.auditLog.findMany({
+      where: { module: 'mosques', entity: `${kind}_workflow`, entityId: req.params.id },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, action: true, description: true, details: true, username: true, userEmail: true, userRole: true, createdAt: true },
+    });
+    res.json(rows);
+  } catch (error) { next(error); }
+});"""
+          new_history = """router.get('/workflow/:kind/:id/history', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const kind = String(req.params.kind || '').trim();
+    const config = getWorkflowConfig(kind);
+    if (!config) return res.status(400).json({ message: 'نوع الإجراء غير مدعوم' });
+    const model = prisma[config.model];
+    const current = await model.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'الإجراء غير موجود' });
+    const context = req.mosqueRole || await getModuleRole(req);
+    await assertWorkflowAccess(req, kind, current, context);
+    const rows = await prisma.auditLog.findMany({
+      where: { module: 'mosques', entity: `${kind}_workflow`, entityId: req.params.id },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, action: true, description: true, details: true, username: true, userEmail: true, userRole: true, createdAt: true },
+    });
+    res.json(rows);
+  } catch (error) { next(error); }
+});"""
+          one(old_history, new_history, 'workflow history authorization')
+
+          old_edit = """    const data = sanitizeWorkflowEdit(kind, req.body || {});
+    if (!Object.keys(data).length) return res.status(400).json({ message: 'لا توجد بيانات قابلة للتعديل' });
+    const updated = await model.update({ where: { id: current.id }, data });"""
+          new_edit = """    const data = sanitizeWorkflowEdit(kind, req.body || {});
+    if (!Object.keys(data).length) return res.status(400).json({ message: 'لا توجد بيانات قابلة للتعديل' });
+    if (kind === 'leave') {
+      if ((data.startDate && Number.isNaN(data.startDate.getTime())) || (data.endDate && Number.isNaN(data.endDate.getTime()))) {
+        return res.status(400).json({ message: 'تاريخ الإجازة أو الاعتذار غير صحيح' });
+      }
+      const effectiveStart = data.startDate || current.startDate;
+      const effectiveEnd = data.endDate || current.endDate;
+      if (effectiveEnd < effectiveStart) return res.status(400).json({ message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية' });
+    }
+    if (kind === 'job' && data.interviewAt && Number.isNaN(data.interviewAt.getTime())) {
+      return res.status(400).json({ message: 'موعد المقابلة غير صحيح' });
+    }
+    const updated = await model.update({ where: { id: current.id }, data });"""
+          one(old_edit, new_edit, 'workflow date validation')
+
+          old_reports = """    const from = req.query.from ? new Date(String(req.query.from)) : null;
+    const to = req.query.to ? new Date(String(req.query.to)) : null;
+    const dateWhere = from || to ? { createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {};"""
+          new_reports = """    const fromRaw = req.query.from ? String(req.query.from).trim() : '';
+    const toRaw = req.query.to ? String(req.query.to).trim() : '';
+    const from = fromRaw ? new Date(`${fromRaw}T00:00:00.000Z`) : null;
+    const to = toRaw ? new Date(`${toRaw}T23:59:59.999Z`) : null;
+    if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+      return res.status(400).json({ message: 'صيغة فترة التقرير غير صحيحة. استخدم YYYY-MM-DD' });
+    }
+    if (from && to && to < from) return res.status(400).json({ message: 'تاريخ نهاية التقرير يجب أن يكون بعد تاريخ البداية' });
+    const dateWhere = from || to ? { createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {};"""
+          one(old_reports, new_reports, 'report date validation')
+
+          old_baseline = """const getQuranOpeningBaselineState = async () => {
+  const [sites, baselineLogs, closedLog] = await Promise.all([
+    prisma.mosqueSite.findMany({
+      select: { id: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true, campusLocation: true, status: true },
+      orderBy: [{ name: 'asc' }],
+    }),
+    prisma.auditLog.findMany({
+      where: { module: 'mosques', action: QURAN_OPENING_BASELINE_SITE_ACTION },
+      orderBy: [{ createdAt: 'asc' }],
+    }),
+    prisma.auditLog.findFirst({
+      where: { module: 'mosques', action: QURAN_OPENING_BASELINE_CLOSED_ACTION },
+      orderBy: [{ createdAt: 'desc' }],
+    }),
+  ]);"""
+          new_baseline = """const getQuranOpeningBaselineState = async () => {
+  const latestReset = await prisma.auditLog.findFirst({
+    where: { module: 'mosques', action: QURAN_LIBRARY_RESET_ACTION },
+    orderBy: [{ createdAt: 'desc' }],
+    select: { createdAt: true },
+  });
+  const afterResetWhere = latestReset ? { createdAt: { gt: latestReset.createdAt } } : {};
+  const [sites, baselineLogs, closedLog] = await Promise.all([
+    prisma.mosqueSite.findMany({
+      select: { id: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true, campusLocation: true, status: true },
+      orderBy: [{ name: 'asc' }],
+    }),
+    prisma.auditLog.findMany({
+      where: { module: 'mosques', action: QURAN_OPENING_BASELINE_SITE_ACTION, ...afterResetWhere },
+      orderBy: [{ createdAt: 'asc' }],
+    }),
+    prisma.auditLog.findFirst({
+      where: { module: 'mosques', action: QURAN_OPENING_BASELINE_CLOSED_ACTION, ...afterResetWhere },
+      orderBy: [{ createdAt: 'desc' }],
+    }),
+  ]);"""
+          one(old_baseline, new_baseline, 'baseline state after reset marker')
+
+          old_reset = """      // Delete dependent records first because stock movements restrict warehouse deletion.
+      await tx.mosqueQuranStockMovement.deleteMany({});
+      await tx.mosqueQuranInventory.deleteMany({});
+      await tx.mosqueNotification.deleteMany({ where: { entityType: 'quran_stock_movement' } });
+      await tx.mosqueQuranWarehouse.deleteMany({});
+      await tx.auditLog.deleteMany({
+        where: { module: 'mosques', action: { in: [QURAN_OPENING_BASELINE_SITE_ACTION, QURAN_OPENING_BASELINE_CLOSED_ACTION] } },
+      });
+
+      return { warehouses, movements, inventories, notifications };
+    });
+
+    try {
+      await prisma.auditLog.create({
+        data: {
+          userId: req.authUser?.id || null,
+          username: req.authUser?.username || null,
+          userEmail: req.authUser?.email || null,
+          userRole: req.authUser?.role || null,
+          action: 'RESET_QURAN_LIBRARY',
+          module: 'mosques',
+          entity: 'MosqueQuranWarehouse',
+          entityLabel: 'مكتبة المصاحف',
+          description: 'تصفير كامل لمكتبة المصاحف وبيانات حركات وجرد المصاحف للبدء من الصفر',
+          details: reset,
+        },
+      });
+    } catch (auditError) {
+      console.warn('Unable to create Quran library reset audit log:', auditError?.message || auditError);
+    }
+"""
+          new_reset = """      // Delete operational stock rows, but never delete historical audit evidence.
+      await tx.mosqueQuranStockMovement.deleteMany({});
+      await tx.mosqueQuranInventory.deleteMany({});
+      await tx.mosqueNotification.deleteMany({ where: { entityType: 'quran_stock_movement' } });
+      await tx.mosqueQuranWarehouse.deleteMany({});
+      await tx.auditLog.create({
+        data: {
+          userId: req.authUser?.id || null,
+          username: req.authUser?.username || null,
+          userEmail: req.authUser?.email || null,
+          userRole: req.authUser?.role || null,
+          action: QURAN_LIBRARY_RESET_ACTION,
+          module: 'mosques',
+          entity: 'MosqueQuranWarehouse',
+          entityLabel: 'مكتبة المصاحف',
+          description: 'تصفير كامل لمكتبة المصاحف وبيانات حركات وجرد المصاحف للبدء من الصفر مع حفظ السجل التاريخي',
+          details: { warehouses, movements, inventories, notifications },
+        },
+      });
+
+      return { warehouses, movements, inventories, notifications };
+    });
+"""
+          one(old_reset, new_reset, 'quran reset preserves audit history')
+
+          p.write_text(s)
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Syntax check
+        shell: bash
+        run: find src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Verify mosque audit invariants
+        shell: bash
+        run: |
+          grep -q "leave: { model: 'mosqueLeave'" src/routes/mosques.routes.js
+          grep -q "requireRoles('head', 'supervisor', 'personnel')" src/routes/mosques.routes.js
+          grep -q "QURAN_LIBRARY_RESET_ACTION" src/routes/mosques.routes.js
+          ! grep -q "action: { in: \[QURAN_OPENING_BASELINE_SITE_ACTION" src/routes/mosques.routes.js
+          grep -q "quran_supply" src/routes/mosques.routes.js
+          grep -q "fieldVisits: true" src/routes/mosques.routes.js
+
+      - name: Commit patched backend
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/routes/mosques.routes.js
+          git commit -m 'Harden mosque workflows, Quran ledger and data integrity'
+          git push origin HEAD:fix/platform-audit-core
