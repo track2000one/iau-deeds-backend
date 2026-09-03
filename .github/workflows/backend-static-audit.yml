@@ -1,0 +1,32 @@
+name: Backend Static Audit
+on:
+  push:
+    branches: [fix/platform-audit-core]
+    paths: ['.github/workflows/backend-static-audit.yml']
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/platform-audit-core
+      - name: Date conversion patterns
+        run: |
+          echo '=== Hijri/date conversion candidates ==='
+          grep -RInE "Date\.UTC\(|islamic-umalqura|type === 'hijri'|DateType.*hijri" src --include='*.js' || true
+      - name: Prisma client instances
+        run: |
+          echo '=== PrismaClient direct instances ==='
+          grep -RInE 'new PrismaClient|from .@prisma/client.' src --include='*.js' || true
+      - name: Client audit identity candidates
+        run: |
+          echo '=== createdBy candidates ==='
+          grep -RInE 'createdBy.*body|body.*createdBy|attachment\.createdBy|createdBy:.*req\.' src/routes --include='*.js' || true
+      - name: Permission-sensitive custom actions
+        run: |
+          echo '=== approval and workflow routes ==='
+          grep -RInE "router\.(post|put|patch|delete)\([^\n]*(approve|review|complete|close|archive|publish|activate|reset|import|template)" src/routes --include='*.js' || true
+      - name: Syntax check
+        run: find src -name '*.js' -print0 | xargs -0 -n1 node --check
