@@ -1,0 +1,129 @@
+name: Apply Mosques Public Validation Fixes
+
+on:
+  push:
+    branches: [fix/platform-audit-core]
+    paths:
+      - '.github/workflows/apply-mosques-public-validation-fixes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/platform-audit-core
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply validation fixes
+        shell: bash
+        run: |
+          cat > /tmp/patch_mosques_validation.py <<'PY'
+          from pathlib import Path
+          p = Path('src/routes/mosques.routes.js')
+          s = p.read_text()
+          def one(old, new, label):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {count}')
+              s = s.replace(old, new, 1)
+
+          marker = "const personnelAccountSchema = z.object({\n  siteId: z.string().min(1),\n  name: z.string().trim().min(2),\n  role: z.enum(['imam', 'muezzin', 'khateeb', 'collaborating_khateeb']),\n  mobile: z.string().trim().optional().nullable(),\n  email: z.string().email(),\n});"
+          addition = marker + "\n\nconst publicTicketSchema = z.object({\n  siteToken: z.string().trim().min(1).max(120).optional().nullable(),\n  siteId: z.string().trim().min(1).max(120).optional().nullable(),\n  ticketType: z.string().trim().min(1).max(100).optional().default('general'),\n  description: z.string().trim().min(5, 'وصف البلاغ يجب ألا يقل عن 5 أحرف').max(5000),\n  reporterName: z.string().trim().max(200).optional().nullable(),\n  reporterPhone: z.string().trim().max(30).optional().nullable(),\n  reporterEmail: z.string().trim().email('البريد الإلكتروني غير صحيح').optional().nullable(),\n});\n\nconst publicJobSchema = z.object({\n  fullName: z.string().trim().min(2, 'الاسم مطلوب').max(200),\n  nationalId: z.string().regex(/^\\d{10}$/, 'رقم السجل المدني يجب أن يتكون من 10 أرقام'),\n  phone: z.string().trim().min(8, 'رقم الجوال غير صحيح').max(30),\n  email: z.string().trim().email('البريد الإلكتروني غير صحيح'),\n  qualification: z.string().trim().min(2, 'المؤهل العلمي مطلوب').max(300),\n  experience: z.string().trim().max(5000).optional().nullable(),\n  jobType: z.string().trim().min(2, 'الوظيفة المتقدم عليها مطلوبة').max(150),\n  preferredLocation: z.string().trim().max(300).optional().nullable(),\n});"
+          one(marker, addition, 'public schemas')
+
+          old_ticket = """mosquesPublicRoutes.post('/tickets', publicUpload.single('file'), async (req, res, next) => {
+  try {
+    const site = req.body.siteToken
+      ? await prisma.mosqueSite.findUnique({ where: { publicToken: String(req.body.siteToken) } })
+      : req.body.siteId
+        ? await prisma.mosqueSite.findUnique({ where: { id: String(req.body.siteId) } })
+        : null;
+    if (!site) return res.status(400).json({ message: 'اختر المسجد أو المصلى' });
+
+    const description = String(req.body.description || '').trim();
+    if (description.length < 5) return res.status(400).json({ message: 'وصف البلاغ يجب ألا يقل عن 5 أحرف' });"""
+          new_ticket = """mosquesPublicRoutes.post('/tickets', publicUpload.single('file'), async (req, res, next) => {
+  try {
+    const input = publicTicketSchema.parse({
+      siteToken: nullableText(req.body.siteToken),
+      siteId: nullableText(req.body.siteId),
+      ticketType: nullableText(req.body.ticketType) || 'general',
+      description: req.body.description,
+      reporterName: nullableText(req.body.reporterName),
+      reporterPhone: nullableText(req.body.reporterPhone),
+      reporterEmail: nullableText(req.body.reporterEmail),
+    });
+    const site = input.siteToken
+      ? await prisma.mosqueSite.findUnique({ where: { publicToken: input.siteToken } })
+      : input.siteId
+        ? await prisma.mosqueSite.findUnique({ where: { id: input.siteId } })
+        : null;
+    if (!site) return res.status(400).json({ message: 'اختر المسجد أو المصلى' });
+
+    const description = input.description;"""
+          one(old_ticket, new_ticket, 'public ticket validation')
+          one("        ticketType: nullableText(req.body.ticketType) || 'general',\n        description,\n        reporterName: nullableText(req.body.reporterName),\n        reporterPhone: nullableText(req.body.reporterPhone),\n        reporterEmail: nullableText(req.body.reporterEmail),", "        ticketType: input.ticketType,\n        description,\n        reporterName: input.reporterName || null,\n        reporterPhone: input.reporterPhone || null,\n        reporterEmail: input.reporterEmail || null,", 'validated ticket fields')
+
+          old_job = """mosquesPublicRoutes.post('/jobs', publicUpload.fields([{ name: 'cv', maxCount: 1 }, { name: 'certificate', maxCount: 1 }]), async (req, res, next) => {
+  try {
+    const required = ['fullName', 'nationalId', 'phone', 'email', 'qualification', 'jobType'];
+    for (const field of required) {
+      if (!nullableText(req.body[field])) return res.status(400).json({ message: `الحقل ${field} مطلوب` });
+    }
+
+    const cvFile = req.files?.cv?.[0];"""
+          new_job = """mosquesPublicRoutes.post('/jobs', publicUpload.fields([{ name: 'cv', maxCount: 1 }, { name: 'certificate', maxCount: 1 }]), async (req, res, next) => {
+  try {
+    const input = publicJobSchema.parse({
+      fullName: req.body.fullName,
+      nationalId: String(req.body.nationalId || '').replace(/\\D/g, ''),
+      phone: req.body.phone,
+      email: req.body.email,
+      qualification: req.body.qualification,
+      experience: nullableText(req.body.experience),
+      jobType: req.body.jobType,
+      preferredLocation: nullableText(req.body.preferredLocation),
+    });
+
+    const cvFile = req.files?.cv?.[0];"""
+          one(old_job, new_job, 'public job validation')
+          one("        fullName: String(req.body.fullName).trim(),\n        nationalId: String(req.body.nationalId).trim(),\n        phone: String(req.body.phone).trim(),\n        email: String(req.body.email).trim().toLowerCase(),\n        qualification: String(req.body.qualification).trim(),\n        experience: nullableText(req.body.experience),\n        jobType: String(req.body.jobType).trim(),\n        preferredLocation: nullableText(req.body.preferredLocation),", "        fullName: input.fullName,\n        nationalId: input.nationalId,\n        phone: input.phone,\n        email: input.email.toLowerCase(),\n        qualification: input.qualification,\n        experience: input.experience || null,\n        jobType: input.jobType,\n        preferredLocation: input.preferredLocation || null,", 'validated public job fields')
+
+          old_resubmit = "    const data = sanitizeWorkflowEdit(kind, req.body || {});\n    data.status = kind === 'request' ? 'new' : 'pending';"
+          new_resubmit = "    const data = sanitizeWorkflowEdit(kind, req.body || {});\n    if (kind === 'leave') {\n      if ((data.startDate && Number.isNaN(data.startDate.getTime())) || (data.endDate && Number.isNaN(data.endDate.getTime()))) return res.status(400).json({ message: 'تاريخ الإجازة أو الاعتذار غير صحيح' });\n      const effectiveStart = data.startDate || current.startDate;\n      const effectiveEnd = data.endDate || current.endDate;\n      if (effectiveEnd < effectiveStart) return res.status(400).json({ message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية' });\n    }\n    data.status = kind === 'request' ? 'new' : 'pending';"
+          one(old_resubmit, new_resubmit, 'resubmit date validation')
+
+          old_action = "    } else if (kind === 'job') {\n      if (note) data.internalNotes = note;\n      if (req.body?.interviewAt) data.interviewAt = new Date(req.body.interviewAt);\n    }\n\n    const updated = await model.update({ where: { id: current.id }, data });"
+          new_action = "    } else if (kind === 'job') {\n      if (note) data.internalNotes = note;\n      if (req.body?.interviewAt) {\n        data.interviewAt = new Date(req.body.interviewAt);\n        if (Number.isNaN(data.interviewAt.getTime())) return res.status(400).json({ message: 'موعد المقابلة غير صحيح' });\n      }\n    }\n\n    const updated = await model.update({ where: { id: current.id }, data });"
+          one(old_action, new_action, 'workflow action interview validation')
+          p.write_text(s)
+          PY
+          python3 /tmp/patch_mosques_validation.py
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Syntax check
+        run: find src -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Verify validation invariants
+        run: |
+          grep -q "const publicTicketSchema" src/routes/mosques.routes.js
+          grep -q "const publicJobSchema" src/routes/mosques.routes.js
+          grep -q "رقم السجل المدني يجب أن يتكون من 10 أرقام" src/routes/mosques.routes.js
+          grep -q "effectiveEnd < effectiveStart" src/routes/mosques.routes.js
+      - name: Commit patched backend
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/routes/mosques.routes.js
+          git commit -m 'Validate mosque public forms and workflow dates'
+          git push origin HEAD:fix/platform-audit-core
