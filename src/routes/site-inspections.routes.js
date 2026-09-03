@@ -56,6 +56,25 @@ const inspectionSchema = z.object({
   attachments: z.array(attachmentSchema).default([]),
 });
 
+const hijriParts = (date) => {
+  const parts = new Intl.DateTimeFormat('en-u-ca-islamic-umalqura', {
+    year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC'
+  }).formatToParts(date);
+  const get = (partType) => Number(parts.find((part) => part.type === partType)?.value);
+  return { year: get('year'), month: get('month'), day: get('day') };
+};
+
+const hijriToGregorian = (year, month, day) => {
+  const roughYear = year + 579;
+  const center = Date.UTC(roughYear, Math.max(0, month - 1), Math.min(day, 28), 12, 0, 0);
+  for (let offset = -420; offset <= 420; offset += 1) {
+    const candidate = new Date(center + offset * 86400000);
+    const hijri = hijriParts(candidate);
+    if (hijri.year === year && hijri.month === month && hijri.day === day) return candidate;
+  }
+  return null;
+};
+
 const toDate = (value, fieldName, type = 'gregorian') => {
   if (!value) return null;
   if (type === 'hijri') {
@@ -73,7 +92,13 @@ const toDate = (value, fieldName, type = 'gregorian') => {
       error.status = 400;
       throw error;
     }
-    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    const converted = hijriToGregorian(year, month, day);
+    if (!converted) {
+      const error = new Error(`${fieldName} الهجري غير صحيح أو خارج النطاق المدعوم`);
+      error.status = 400;
+      throw error;
+    }
+    return converted;
   }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {

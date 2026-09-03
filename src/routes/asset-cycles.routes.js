@@ -76,12 +76,35 @@ const isSnapshotValid = (snapshot) => Boolean(
   String(snapshot.category || '').trim()
 );
 
+const hijriParts = (date) => {
+  const parts = new Intl.DateTimeFormat('en-u-ca-islamic-umalqura', {
+    year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC'
+  }).formatToParts(date);
+  const get = (partType) => Number(parts.find((part) => part.type === partType)?.value);
+  return { year: get('year'), month: get('month'), day: get('day') };
+};
+
+const hijriToGregorian = (year, month, day) => {
+  const roughYear = year + 579;
+  const center = Date.UTC(roughYear, Math.max(0, month - 1), Math.min(day, 28), 12, 0, 0);
+  for (let offset = -420; offset <= 420; offset += 1) {
+    const candidate = new Date(center + offset * 86400000);
+    const hijri = hijriParts(candidate);
+    if (hijri.year === year && hijri.month === month && hijri.day === day) return candidate;
+  }
+  return null;
+};
+
 const parseDateForDb = (value, type = 'gregorian') => {
   if (!value) return null;
   if (type === 'hijri') {
     const match = String(value).trim().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
     if (!match) return null;
-    return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0));
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (year < 1200 || year > 1700 || month < 1 || month > 12 || day < 1 || day > 30) return null;
+    return hijriToGregorian(year, month, day);
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
