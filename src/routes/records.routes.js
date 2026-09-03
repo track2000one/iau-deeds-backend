@@ -22,7 +22,7 @@ const entityTypes = {
 };
 
 const allowedFields = {
-  'allocated-lands': ['propertyDescription','plotNumber','planNumber','area','usageType','region','city','district','coordinates','googleEarthLink','notes','createdBy'],
+  'allocated-lands': ['propertyDescription','plotNumber','planNumber','area','usageType','region','city','district','coordinates','googleEarthLink','notes'],
   'delivered-lands': [
     'receiptNumber',
     'receiptDate',
@@ -48,12 +48,11 @@ const allowedFields = {
     'coordinates',
     'deliveryMinutesNumber',
     'notes',
-    'createdBy',
   ],
-  'leased-lands-out': ['tenant','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','contractDuration','plotNumber','planNumber','area','location','coordinates','rentAmount','notes','createdBy'],
-  'leased-lands-in': ['owner','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','contractDuration','propertyDescription','area','location','coordinates','rentAmount','notes','createdBy'],
-  'leased-buildings-out': ['tenant','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','buildingNumber','planNumber','locationName','area','city','district','coordinates','rentAmount','notes','createdBy'],
-  'leased-buildings-in': ['owner','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','buildingNumber','locationName','area','region','city','coordinates','rentAmount','notes','createdBy'],
+  'leased-lands-out': ['tenant','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','contractDuration','plotNumber','planNumber','area','location','coordinates','rentAmount','notes'],
+  'leased-lands-in': ['owner','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','contractDuration','propertyDescription','area','location','coordinates','rentAmount','notes'],
+  'leased-buildings-out': ['tenant','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','buildingNumber','planNumber','locationName','area','city','district','coordinates','rentAmount','notes'],
+  'leased-buildings-in': ['owner','contractNumber','contractStartDate','contractStartDateOriginal','contractStartDateType','contractEndDate','contractEndDateOriginal','contractEndDateType','buildingNumber','locationName','area','region','city','coordinates','rentAmount','notes'],
 };
 
 const dateFields = new Set([
@@ -201,7 +200,7 @@ const sanitizeRecordPayload = (resource, body = {}) => {
   return data;
 };
 
-const sanitizeAttachments = (attachments, entityType, entityId) => {
+const sanitizeAttachments = (attachments, entityType, entityId, createdBy = null) => {
   if (!Array.isArray(attachments)) return [];
   return attachments
     .filter((attachment) => attachment?.driveUrl)
@@ -219,7 +218,7 @@ const sanitizeAttachments = (attachments, entityType, entityId) => {
       driveFileId: attachment.driveFileId || null,
       mimeType: attachment.mimeType || attachment.fileType || null,
       notes: attachment.notes || null,
-      createdBy: attachment.createdBy || null,
+      createdBy,
     }));
 };
 
@@ -280,13 +279,17 @@ router.post('/:resource', async (req, res, next) => {
     const resource = req.params.resource;
 
     const record = await delegate.create({
-      data: sanitizeRecordPayload(resource, req.body),
+      data: {
+        ...sanitizeRecordPayload(resource, req.body),
+        createdBy: req.authUser?.username || req.authUser?.email || null,
+      },
     });
 
     const attachments = sanitizeAttachments(
       req.body?.attachments,
       entityTypes[resource],
-      record.id
+      record.id,
+      req.authUser?.username || req.authUser?.email || null
     );
 
     if (attachments.length > 0) {
@@ -323,7 +326,8 @@ router.put('/:resource/:id', async (req, res, next) => {
       const attachments = sanitizeAttachments(
         req.body?.attachments,
         entityTypes[resource],
-        req.params.id
+        req.params.id,
+        req.authUser?.username || req.authUser?.email || null
       );
 
       if (attachments.length > 0) {

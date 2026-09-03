@@ -23,6 +23,25 @@ const deedSchema = z.object({
   createdBy: z.string().optional().nullable(),
 });
 
+const hijriParts = (date) => {
+  const parts = new Intl.DateTimeFormat('en-u-ca-islamic-umalqura', {
+    year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC'
+  }).formatToParts(date);
+  const get = (partType) => Number(parts.find((part) => part.type === partType)?.value);
+  return { year: get('year'), month: get('month'), day: get('day') };
+};
+
+const hijriToGregorian = (year, month, day) => {
+  const roughYear = year + 579;
+  const center = Date.UTC(roughYear, Math.max(0, month - 1), Math.min(day, 28), 12, 0, 0);
+  for (let offset = -420; offset <= 420; offset += 1) {
+    const candidate = new Date(center + offset * 86400000);
+    const hijri = hijriParts(candidate);
+    if (hijri.year === year && hijri.month === month && hijri.day === day) return candidate;
+  }
+  return null;
+};
+
 const parseFlexibleDate = (value, type = 'gregorian', fieldName = 'التاريخ') => {
   if (!value) return null;
   if (type === 'hijri') {
@@ -40,7 +59,13 @@ const parseFlexibleDate = (value, type = 'gregorian', fieldName = 'التاري�
       error.status = 400;
       throw error;
     }
-    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    const converted = hijriToGregorian(year, month, day);
+    if (!converted) {
+      const error = new Error(`${fieldName} الهجري غير صحيح أو خارج النطاق المدعوم`);
+      error.status = 400;
+      throw error;
+    }
+    return converted;
   }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
@@ -51,10 +76,12 @@ const parseFlexibleDate = (value, type = 'gregorian', fieldName = 'التاري�
   return parsed;
 };
 
-const toDbData = (body) => {
-  const data = deedSchema.parse(body);
+const toDbData = (body, { createdBy } = {}) => {
+  const parsed = deedSchema.parse(body);
+  const { createdBy: _clientCreatedBy, ...data } = parsed;
   return {
     ...data,
+    ...(createdBy !== undefined ? { createdBy } : {}),
     deedDate: parseFlexibleDate(data.deedDate, data.deedDateType, 'تاريخ الصك'),
   };
 };
@@ -84,7 +111,11 @@ router.get('/:id', async (req, res, next) => {
 
 router.post('/', async (req, res, next) => {
   try {
-    const deed = await prisma.deed.create({ data: toDbData(req.body) });
+    const deed = await prisma.deed.create({
+      data: toDbData(req.body, {
+        createdBy: req.authUser?.username || req.authUser?.email || null,
+      }),
+    });
     res.status(201).json(deed);
   } catch (err) {
     next(err);
