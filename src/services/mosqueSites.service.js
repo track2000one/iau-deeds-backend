@@ -461,6 +461,7 @@ const buildPrayerRoomSites = () => PRAYER_ROOM_INVENTORY.flatMap((item) => {
         district: item.organization,
         campusLocation: `${campusBase} — ${genderLabel}${count > 1 ? ` — مصلى رقم ${index}` : ''}`,
         status: 'active',
+        coordinatorName: item.coordinator?.name || null,
         contactPhone: item.coordinator?.mobile || null,
         notes: [
           'بيانات حصر المصليات الجامعية المستخرجة من ملف منسقي وحدة العناية بالمساجد والمصليات داخل مباني الجامعة.',
@@ -614,6 +615,16 @@ export async function ensureOfficialMosqueSites() {
     );
   }
 
-  console.log(`Official mosque/prayer-room sites ensured: ${missing.length} created, ${genderBackfills.length} gender records checked, ${OFFICIAL_MOSQUE_SITES.length} total.`);
-  return { created: missing.length, genderChecked: genderBackfills.length, total: OFFICIAL_MOSQUE_SITES.length };
+  const coordinatorBackfills = OFFICIAL_MOSQUE_SITES.filter((site) => site.coordinatorName);
+  if (coordinatorBackfills.length) {
+    await prisma.$transaction(
+      coordinatorBackfills.map((site) => prisma.mosqueSite.updateMany({
+        where: { name: site.name, coordinatorName: null },
+        data: { coordinatorName: site.coordinatorName },
+      }))
+    );
+  }
+
+  console.log(`Official mosque/prayer-room sites ensured: ${missing.length} created, ${genderBackfills.length} gender records checked, ${coordinatorBackfills.length} coordinator records checked, ${OFFICIAL_MOSQUE_SITES.length} total.`);
+  return { created: missing.length, genderChecked: genderBackfills.length, coordinatorChecked: coordinatorBackfills.length, total: OFFICIAL_MOSQUE_SITES.length };
 }

@@ -327,6 +327,7 @@ const siteSchema = z.object({
   imamName: z.string().trim().optional().nullable(),
   muezzinName: z.string().trim().optional().nullable(),
   khateebName: z.string().trim().optional().nullable(),
+  coordinatorName: z.string().trim().optional().nullable(),
   contactPhone: z.string().trim().optional().nullable(),
   notes: z.string().trim().optional().nullable(),
   images: z.union([
