@@ -1,0 +1,40 @@
+name: Apply Platform Audit Core Backend
+
+on:
+  push:
+    branches: [fix/platform-audit-core]
+    paths:
+      - '.github/workflows/apply-platform-audit-core.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/platform-audit-core
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: node scripts/apply-platform-audit-core.mjs
+      - run: npx prisma generate
+      - run: find src -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Remove temporary patch files
+        run: rm -f scripts/apply-platform-audit-core.mjs .github/workflows/apply-platform-audit-core.yml
+      - name: Commit verified fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/app.js src/routes/uploads.routes.js src/routes/attachments.routes.js scripts/apply-platform-audit-core.mjs .github/workflows/apply-platform-audit-core.yml
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Harden platform permissions and audit identity"
+            git push origin fix/platform-audit-core
+          fi
