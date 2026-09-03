@@ -65,7 +65,7 @@ const randomDigits = (length = 5) => {
   return String(crypto.randomInt(0, max)).padStart(length, '0');
 };
 
-const trackingNumber = (prefix) => `${prefix}-${new Date().getFullYear()}-${randomDigits(5)}`;
+const trackingNumber = (prefix) => `${prefix}-${new Date().getFullYear()}-${randomDigits(8)}`;
 
 const nullableText = (value) => {
   const normalized = String(value ?? '').trim();
@@ -477,7 +477,7 @@ const fieldVisitItemData = (item) => ({
 
 const requestSchema = z.object({
   siteId: z.string().min(1),
-  requestType: z.enum(['maintenance', 'renovation', 'equipment', 'cleaning', 'carpet', 'air_conditioning', 'audio', 'lighting', 'other']),
+  requestType: z.enum(['maintenance', 'renovation', 'equipment', 'cleaning', 'carpet', 'air_conditioning', 'audio', 'lighting', 'quran_supply', 'other']),
   description: z.string().trim().min(5),
   priority: z.enum(['low', 'medium', 'high', 'urgent']).default('medium'),
   attachments: z.array(z.string()).optional().default([]),
@@ -521,6 +521,7 @@ const quranOpeningBaselineSchema = z.object({
 
 const QURAN_OPENING_BASELINE_SITE_ACTION = 'quran_opening_baseline_site';
 const QURAN_OPENING_BASELINE_CLOSED_ACTION = 'quran_opening_baseline_closed';
+const QURAN_LIBRARY_RESET_ACTION = 'RESET_QURAN_LIBRARY';
 
 const quranWarehouseSchema = z.object({
   code: z.string().trim().min(2).max(40).optional().nullable(),
@@ -997,10 +998,14 @@ router.put('/sites/:id', requireRoles('head', 'supervisor'), async (req, res, ne
 
 router.delete('/sites/:id', requireRoles('head'), async (req, res, next) => {
   try {
-    const site = await prisma.mosqueSite.findUnique({ where: { id: req.params.id }, include: { _count: { select: { requests: true, tickets: true, leaves: true } } } });
+    const site = await prisma.mosqueSite.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { personnel: true, requests: true, tickets: true, leaves: true, assignments: true, quranInventories: true, quranStockMovements: true, fieldVisits: true } } },
+    });
     if (!site) return res.status(404).json({ message: 'الموقع غير موجود' });
-    if (site._count.requests || site._count.tickets || site._count.leaves) {
-      return res.status(409).json({ message: 'لا يمكن حذف موقع مرتبط بإجراءات. غيّر حالته إلى مغلق مؤقتًا بدل الحذف.' });
+    const linkedRecords = Object.values(site._count || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    if (linkedRecords > 0) {
+      return res.status(409).json({ message: 'لا يمكن حذف مسجد أو مصلى مرتبط بسجلات تشغيلية أو تاريخية. غيّر حالته إلى «مغلق مؤقتًا» للمحافظة على السجل.', dependencies: site._count });
     }
     await prisma.mosqueSite.delete({ where: { id: req.params.id } });
     res.status(204).send();
@@ -1241,6 +1246,9 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
   try {
     const context = req.mosqueRole || await getModuleRole(req);
     const input = fieldVisitSchema.parse(req.body);
+    if (input.departureAt && input.departureAt < input.visitDate) {
+      return res.status(400).json({ message: 'وقت المغادرة يجب أن يكون بعد وقت الوصول' });
+    }
     validateFieldVisitTreatmentEvidence(input);
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
     const site = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { id: true } });
@@ -1288,6 +1296,9 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
       if (req.body.siteId && req.body.siteId !== current.siteId) await assertSupervisorSiteAccess(req, req.body.siteId, context);
     }
     const input = fieldVisitSchema.parse(req.body);
+    if (input.departureAt && input.departureAt < input.visitDate) {
+      return res.status(400).json({ message: 'وقت المغادرة يجب أن يكون بعد وقت الوصول' });
+    }
     validateFieldVisitTreatmentEvidence(input);
     if (ACTIVE_FIELD_VISIT_STATUSES.includes(input.workflowStatus)) {
       const conflict = await findActiveFieldVisitConflict([input.siteId], current.id);
@@ -1354,13 +1365,14 @@ router.get('/requests', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.post('/requests', requireRoles('personnel'), async (req, res, next) => {
+router.post('/requests', requireRoles('head', 'supervisor', 'personnel'), async (req, res, next) => {
   try {
     const input = requestSchema.parse(req.body);
     const context = req.mosqueRole || await getModuleRole(req);
-    if (!context.siteId || input.siteId !== context.siteId) {
+    if (context.role === 'personnel' && (!context.siteId || input.siteId !== context.siteId)) {
       return res.status(403).json({ message: 'يمكن لمنسوب المسجد تقديم الطلب للمسجد أو الجامع أو المصلى المرتبط بحسابه فقط' });
     }
+    if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
     const request = await prisma.mosqueRequest.create({ data: { ...input, requestNumber: trackingNumber('REQ'), submittedBy: req.authUser.id } });
     const site = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { name: true } });
     await Promise.all([
@@ -1604,17 +1616,19 @@ const getQuranSiteSystemStock = async (client, siteId) => {
 };
 
 const getQuranOpeningBaselineState = async () => {
+  const latestReset = await prisma.auditLog.findFirst({ where: { module: 'mosques', action: QURAN_LIBRARY_RESET_ACTION }, orderBy: [{ createdAt: 'desc' }], select: { createdAt: true } });
+  const afterResetWhere = latestReset ? { createdAt: { gt: latestReset.createdAt } } : {};
   const [sites, baselineLogs, closedLog] = await Promise.all([
     prisma.mosqueSite.findMany({
       select: { id: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true, campusLocation: true, status: true },
       orderBy: [{ name: 'asc' }],
     }),
     prisma.auditLog.findMany({
-      where: { module: 'mosques', action: QURAN_OPENING_BASELINE_SITE_ACTION },
+      where: { module: 'mosques', action: QURAN_OPENING_BASELINE_SITE_ACTION, ...afterResetWhere },
       orderBy: [{ createdAt: 'asc' }],
     }),
     prisma.auditLog.findFirst({
-      where: { module: 'mosques', action: QURAN_OPENING_BASELINE_CLOSED_ACTION },
+      where: { module: 'mosques', action: QURAN_OPENING_BASELINE_CLOSED_ACTION, ...afterResetWhere },
       orderBy: [{ createdAt: 'desc' }],
     }),
   ]);
@@ -1979,36 +1993,14 @@ router.post('/quran-stock/reset', requireRoles('head'), async (req, res, next) =
         tx.mosqueNotification.count({ where: { entityType: 'quran_stock_movement' } }),
       ]);
 
-      // Delete dependent records first because stock movements restrict warehouse deletion.
+      // Delete operational stock rows, but never delete historical audit evidence.
       await tx.mosqueQuranStockMovement.deleteMany({});
       await tx.mosqueQuranInventory.deleteMany({});
       await tx.mosqueNotification.deleteMany({ where: { entityType: 'quran_stock_movement' } });
       await tx.mosqueQuranWarehouse.deleteMany({});
-      await tx.auditLog.deleteMany({
-        where: { module: 'mosques', action: { in: [QURAN_OPENING_BASELINE_SITE_ACTION, QURAN_OPENING_BASELINE_CLOSED_ACTION] } },
-      });
-
+      await tx.auditLog.create({ data: { userId: req.authUser?.id || null, username: req.authUser?.username || null, userEmail: req.authUser?.email || null, userRole: req.authUser?.role || null, action: QURAN_LIBRARY_RESET_ACTION, module: 'mosques', entity: 'MosqueQuranWarehouse', entityLabel: 'مكتبة المصاحف', description: 'تصفير كامل لمكتبة المصاحف وبيانات حركات وجرد المصاحف للبدء من الصفر مع حفظ السجل التاريخي', details: { warehouses, movements, inventories, notifications } } });
       return { warehouses, movements, inventories, notifications };
     });
-
-    try {
-      await prisma.auditLog.create({
-        data: {
-          userId: req.authUser?.id || null,
-          username: req.authUser?.username || null,
-          userEmail: req.authUser?.email || null,
-          userRole: req.authUser?.role || null,
-          action: 'RESET_QURAN_LIBRARY',
-          module: 'mosques',
-          entity: 'MosqueQuranWarehouse',
-          entityLabel: 'مكتبة المصاحف',
-          description: 'تصفير كامل لمكتبة المصاحف وبيانات حركات وجرد المصاحف للبدء من الصفر',
-          details: reset,
-        },
-      });
-    } catch (auditError) {
-      console.warn('Unable to create Quran library reset audit log:', auditError?.message || auditError);
-    }
 
     res.json({
       message: 'تم تصفير مكتبة المصاحف بالكامل ويمكن الآن البدء من الصفر',
@@ -2691,8 +2683,14 @@ router.patch('/notifications/:id/read', async (req, res, next) => {
 router.get('/reports/summary', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
     const context = req.mosqueRole || await getModuleRole(req);
-    const from = req.query.from ? new Date(String(req.query.from)) : null;
-    const to = req.query.to ? new Date(String(req.query.to)) : null;
+    const fromRaw = req.query.from ? String(req.query.from).trim() : '';
+    const toRaw = req.query.to ? String(req.query.to).trim() : '';
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if ((fromRaw && !datePattern.test(fromRaw)) || (toRaw && !datePattern.test(toRaw))) return res.status(400).json({ message: 'صيغة فترة التقرير غير صحيحة. استخدم YYYY-MM-DD' });
+    const from = fromRaw ? new Date(`${fromRaw}T00:00:00.000Z`) : null;
+    const to = toRaw ? new Date(`${toRaw}T23:59:59.999Z`) : null;
+    if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) return res.status(400).json({ message: 'فترة التقرير غير صحيحة' });
+    if (from && to && to < from) return res.status(400).json({ message: 'تاريخ نهاية التقرير يجب أن يكون بعد تاريخ البداية' });
     const dateWhere = from || to ? { createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {};
     const ids = context.role === 'head' ? null : await getManagedSiteIds(req, context);
     const siteScope = ids === null ? {} : { siteId: { in: ids || [] } };
@@ -2716,7 +2714,7 @@ router.get('/reports/summary', requireRoles('head', 'supervisor'), async (req, r
 const MOSQUE_WORKFLOW_CONFIG = {
   request: { model: 'mosqueRequest', numberField: 'requestNumber', siteField: 'siteId' },
   ticket: { model: 'mosqueTicket', numberField: 'ticketNumber', siteField: 'siteId' },
-  leave: { model: 'mosqueLeaveRequest', numberField: 'leaveNumber', siteField: 'siteId' },
+  leave: { model: 'mosqueLeave', numberField: 'leaveNumber', siteField: 'siteId' },
   job: { model: 'mosqueJobApplication', numberField: 'applicationNumber', siteField: null },
 };
 
@@ -2829,11 +2827,16 @@ const sanitizeWorkflowEdit = (kind, input) => {
   return data;
 };
 
-router.get('/workflow/:kind/:id/history', async (req, res, next) => {
+router.get('/workflow/:kind/:id/history', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
     const kind = String(req.params.kind || '').trim();
     const config = getWorkflowConfig(kind);
     if (!config) return res.status(400).json({ message: 'نوع الإجراء غير مدعوم' });
+    const model = prisma[config.model];
+    const current = await model.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'الإجراء غير موجود' });
+    const context = req.mosqueRole || await getModuleRole(req);
+    await assertWorkflowAccess(req, kind, current, context);
     const rows = await prisma.auditLog.findMany({
       where: { module: 'mosques', entity: `${kind}_workflow`, entityId: req.params.id },
       orderBy: { createdAt: 'asc' },
@@ -2856,6 +2859,13 @@ router.patch('/workflow/:kind/:id', requireRoles('head', 'supervisor'), async (r
 
     const data = sanitizeWorkflowEdit(kind, req.body || {});
     if (!Object.keys(data).length) return res.status(400).json({ message: 'لا توجد بيانات قابلة للتعديل' });
+    if (kind === 'leave') {
+      if ((data.startDate && Number.isNaN(data.startDate.getTime())) || (data.endDate && Number.isNaN(data.endDate.getTime()))) return res.status(400).json({ message: 'تاريخ الإجازة أو الاعتذار غير صحيح' });
+      const effectiveStart = data.startDate || current.startDate;
+      const effectiveEnd = data.endDate || current.endDate;
+      if (effectiveEnd < effectiveStart) return res.status(400).json({ message: 'تاريخ النهاية يجب أن يكون بعد تاريخ البداية' });
+    }
+    if (kind === 'job' && data.interviewAt && Number.isNaN(data.interviewAt.getTime())) return res.status(400).json({ message: 'موعد المقابلة غير صحيح' });
     const updated = await model.update({ where: { id: current.id }, data });
     await logMosqueWorkflowAction({ req, kind, item: updated, action: 'administrative_edit', fromStatus: current.status, toStatus: updated.status, note: nullableText(req.body?.adminNote) || 'تعديل إداري على بيانات المعاملة', previousData: current, newData: updated });
     res.json(updated);
