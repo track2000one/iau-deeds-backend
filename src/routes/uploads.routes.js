@@ -94,7 +94,7 @@ router.post('/', upload.single('file'), async (req, res, next) => {
           driveFileId: uploaded.driveFileId,
           mimeType: uploaded.mimeType,
           notes: parsed.notes || null,
-          createdBy: parsed.createdBy || null,
+          createdBy: req.authUser?.username || req.authUser?.email || null,
         },
       });
     }

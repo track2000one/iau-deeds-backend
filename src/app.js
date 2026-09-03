@@ -142,6 +142,7 @@ app.use(
   '/api/contracts/follow-up',
   requireAuth,
   auditTrail('contracts_followup'),
+  requirePermission('contracts_follow_up'),
   contractsFollowUpRoutes
 );
 

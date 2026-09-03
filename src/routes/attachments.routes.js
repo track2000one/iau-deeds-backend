@@ -49,7 +49,12 @@ router.get('/:entityType/:entityId', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const data = attachmentSchema.parse(req.body);
-    const attachment = await prisma.attachment.create({ data });
+    const attachment = await prisma.attachment.create({
+      data: {
+        ...data,
+        createdBy: req.authUser?.username || req.authUser?.email || null,
+      },
+    });
     res.status(201).json(attachment);
   } catch (err) {
     next(err);
