@@ -1,8 +1,7 @@
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../prisma.js';
 
 const router = express.Router();
-const prisma = new PrismaClient();
 
 const cleanString = (value) => {
   if (value === undefined || value === null) return null;
@@ -34,7 +33,6 @@ const sanitizePayload = (body = {}) => ({
       : Number(body.fileSize) || 0,
   driveUrl: cleanString(body.driveUrl),
   driveFileId: cleanString(body.driveFileId),
-  createdBy: cleanString(body.createdBy),
 });
 
 router.get('/', async (_req, res, next) => {
@@ -73,7 +71,12 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ message: 'رابط Google Drive مطلوب' });
     }
 
-    const document = await prisma.archiveDocument.create({ data });
+    const document = await prisma.archiveDocument.create({
+      data: {
+        ...data,
+        createdBy: req.authUser?.username || req.authUser?.email || null,
+      },
+    });
     res.status(201).json(document);
   } catch (error) {
     next(error);
