@@ -669,6 +669,7 @@ model MosqueSite {
   muezzinName      String?
   khateebName      String?
   coordinatorName  String?
+  supervisorName   String?
   contactPhone     String?
   notes            String?
   images           Json?
