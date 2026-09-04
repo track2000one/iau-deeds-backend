@@ -1845,7 +1845,16 @@ router.get('/quran-stock/dashboard', requireRoles('head', 'supervisor', 'personn
       returnedTotal: allWarehouseMovements.filter((row) => row.movementType === 'return').reduce((sum, row) => sum + row.totalCount, 0),
       withdrawnTotal: allWarehouseMovements.filter((row) => row.movementType === 'site_withdrawal').reduce((sum, row) => sum + row.totalCount, 0),
       damagedTotal: allWarehouseMovements.filter((row) => row.movementType === 'warehouse_damage').reduce((sum, row) => sum + row.totalCount, 0),
+      adjustmentInTotal: allWarehouseMovements.filter((row) => row.movementType === 'adjustment_in').reduce((sum, row) => sum + row.totalCount, 0),
+      adjustmentOutTotal: allWarehouseMovements.filter((row) => row.movementType === 'adjustment_out').reduce((sum, row) => sum + row.totalCount, 0),
+      warehouseInflowTotal: allWarehouseMovements.filter((row) => ['receipt', 'return', 'adjustment_in'].includes(row.movementType)).reduce((sum, row) => sum + row.totalCount, 0),
+      warehouseOutflowTotal: allWarehouseMovements.filter((row) => ['distribution', 'warehouse_damage', 'adjustment_out'].includes(row.movementType)).reduce((sum, row) => sum + row.totalCount, 0),
+      warehouseNetMovement: allWarehouseMovements.reduce((sum, row) => {
+        const sign = QURAN_WAREHOUSE_POSITIVE_TYPES.has(row.movementType) ? 1 : QURAN_WAREHOUSE_NEGATIVE_TYPES.has(row.movementType) ? -1 : 0;
+        return sum + (sign * row.totalCount);
+      }, 0),
       siteSystemTotal: siteStock.reduce((sum, row) => sum + row.systemStock.totalCount, 0),
+      systemTotal: warehouseRows.reduce((sum, row) => sum + row.balance.totalCount, 0) + siteStock.reduce((sum, row) => sum + row.systemStock.totalCount, 0),
       siteNeedTotal: siteStock.reduce((sum, row) => sum + Number(row.needCount || 0), 0),
       lowStockWarehouses: warehouseRows.filter((row) => row.lowStock).length,
       shortageTotal: warehouseRows.reduce((sum, row) => sum + row.shortage.totalCount, 0),
