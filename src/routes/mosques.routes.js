@@ -1865,10 +1865,8 @@ router.post('/quran-stock/opening-baseline', requireRoles('head', 'supervisor'),
     if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
 
     const totalCount = input.largeCount + input.mediumCount + input.smallCount;
-    if (input.recommendedWithdrawalCount > totalCount) {
-      return res.status(400).json({ message: 'عدد المصاحف الموصى بسحبها لا يمكن أن يتجاوز إجمالي المصاحف الموجودة في الموقع' });
-    }
-
+    // العدد الموصى بسحبه / استبداله ملاحظة ميدانية مستقلة عن إجمالي المصاحف حسب الأحجام.
+    // لا تتم مقارنته بإجمالي المصاحف الكبيرة + المتوسطة + الصغيرة.
     const countedAt = input.countedAt || new Date();
     const countedByName = req.authUser?.username || req.authUser?.email || null;
     const inventory = await prisma.$transaction(async (tx) => {
