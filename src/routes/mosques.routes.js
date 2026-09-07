@@ -1088,7 +1088,8 @@ const fieldTourAccessState = (req, tour) => {
   return {
     isOwner,
     hasStarted,
-    canDelete: Boolean(isSystemAdmin || (isOwner && !hasStarted)),
+    canEdit: Boolean(isSystemAdmin || isOwner),
+    canDelete: Boolean(isSystemAdmin || isOwner),
     canCancel: Boolean((isSystemAdmin || isOwner) && tour?.status !== 'cancelled'),
   };
 };
@@ -1100,6 +1101,7 @@ const fieldVisitAccessState = (req, visit) => {
   return {
     isOwner,
     hasStarted,
+    canEdit: Boolean(isSystemAdmin || isOwner),
     canDelete: Boolean(isSystemAdmin || (isOwner && !hasStarted)),
   };
 };
@@ -1195,7 +1197,7 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
       });
     });
 
-    res.status(201).json(created);
+    res.status(201).json({ ...created, ...fieldTourAccessState(req, created) });
   } catch (error) { next(error); }
 });
 
@@ -1214,8 +1216,8 @@ router.patch('/field-tours/:id', requireRoles('head', 'supervisor'), async (req,
     }).parse(req.body);
     const isSystemAdmin = req.authUser?.role === 'admin';
     const isOwner = current.createdBy === req.authUser?.id;
-    if (input.status === 'cancelled' && current.status !== 'cancelled' && !isSystemAdmin && !isOwner) {
-      return res.status(403).json({ message: 'لا يمكن إلغاء الجولة إلا بواسطة منشئها أو مسؤول المنصة' });
+    if (!isSystemAdmin && !isOwner) {
+      return res.status(403).json({ message: 'هذه الجولة أنشأها مستخدم آخر؛ يمكنك عرضها فقط ولا تملك صلاحية تعديلها أو إلغائها.' });
     }
     const updated = await prisma.mosqueFieldTour.update({ where: { id: current.id }, data: { status: input.status, notes: input.notes === undefined ? current.notes : input.notes } });
     if (input.status === 'cancelled' && current.status !== 'cancelled') {
@@ -1280,11 +1282,6 @@ router.delete('/field-tours/:id', requireRoles('head', 'supervisor'), async (req
     const isOwner = current.createdBy === req.authUser?.id;
     if (!isSystemAdmin && !isOwner) {
       return res.status(403).json({ message: 'لا يمكن حذف الجولة إلا بواسطة المستخدم الذي أنشأها أو مسؤول المنصة' });
-    }
-
-    const hasStarted = current.status !== 'scheduled' || current.visits.some(fieldVisitHasExecutionData);
-    if (!isSystemAdmin && hasStarted) {
-      return res.status(409).json({ message: 'بدأ تنفيذ هذه الجولة أو أصبحت جزءًا من السجل التاريخي؛ استخدم «إلغاء الجولة» بدل الحذف.' });
     }
 
     const visitIds = current.visits.map((visit) => visit.id);
@@ -1431,6 +1428,11 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
     if (context.role === 'supervisor') {
       await assertSupervisorSiteAccess(req, current.siteId, context);
       if (req.body.siteId && req.body.siteId !== current.siteId) await assertSupervisorSiteAccess(req, req.body.siteId, context);
+    }
+    const isSystemAdmin = req.authUser?.role === 'admin';
+    const isOwner = current.createdBy === req.authUser?.id;
+    if (!isSystemAdmin && !isOwner) {
+      return res.status(403).json({ message: 'هذه الزيارة تتبع جولة أنشأها مستخدم آخر؛ يمكنك عرضها فقط ولا تملك صلاحية تعديلها.' });
     }
     const input = fieldVisitSchema.parse(req.body);
     validateFieldVisitTreatmentEvidence(input);
