@@ -74,13 +74,13 @@ model PasswordResetToken {
 }
 
 model UserPermission {
-  id            String  @id @default(cuid())
-  userId        String
-  module        String
-  canView       Boolean @default(false)
-  canAdd        Boolean @default(false)
-  canEdit       Boolean @default(false)
-  canDelete     Boolean @default(false)
+  id              String  @id @default(cuid())
+  userId          String
+  module          String
+  canView         Boolean @default(false)
+  canAdd          Boolean @default(false)
+  canEdit         Boolean @default(false)
+  canDelete       Boolean @default(false)
   canPrint        Boolean @default(false)
   canCreateUser   Boolean @default(false)
   canCreateCycle  Boolean @default(false)
@@ -342,12 +342,12 @@ model Asset {
 }
 
 model AssetUpdateCycle {
-  id              String   @id @default(cuid())
-  cycleNumber     Int      @unique
+  id              String    @id @default(cuid())
+  cycleNumber     Int       @unique
   name            String
   description     String?
-  status          String   @default("draft")
-  isCurrent       Boolean  @default(false)
+  status          String    @default("draft")
+  isCurrent       Boolean   @default(false)
   basedOnCycleId  String?
   sourceFileNames Json?
   importedAt      DateTime?
@@ -358,8 +358,8 @@ model AssetUpdateCycle {
   approvedBy      String?
   archivedAt      DateTime?
   createdBy       String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   records AssetCycleRecord[]
 
@@ -370,13 +370,13 @@ model AssetUpdateCycle {
 }
 
 model AssetCycleRecord {
-  id                String   @id @default(cuid())
+  id                String    @id @default(cuid())
   cycleId           String
   assetId           String?
   stableKey         String
   sourceFingerprint String?
-  changeType        String   @default("manual")
-  reviewStatus      String   @default("auto")
+  changeType        String    @default("manual")
+  reviewStatus      String    @default("auto")
   previousRecordId  String?
   itemNumber        String?
   assetNumber       String?
@@ -395,8 +395,8 @@ model AssetCycleRecord {
   sourceRow         Int?
   reviewedBy        String?
   reviewedAt        DateTime?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   cycle AssetUpdateCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
 
@@ -678,14 +678,16 @@ model MosqueSite {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  personnel   MosquePersonnel[]
-  requests    MosqueRequest[]
-  tickets     MosqueTicket[]
-  leaves      MosqueLeave[]
-  assignments MosqueUserAssignment[]
-  quranInventories MosqueQuranInventory[]
-  quranStockMovements MosqueQuranStockMovement[]
-  fieldVisits MosqueFieldVisit[]
+  personnel            MosquePersonnel[]
+  requests             MosqueRequest[]
+  tickets              MosqueTicket[]
+  leaves               MosqueLeave[]
+  assignments          MosqueUserAssignment[]
+  quranInventories     MosqueQuranInventory[]
+  quranStockMovements  MosqueQuranStockMovement[]
+  quranRackInventories MosqueQuranRackInventory[]
+  quranRackMovements   MosqueQuranRackMovement[]
+  fieldVisits          MosqueFieldVisit[]
 
   @@index([siteType])
   @@index([city])
@@ -734,8 +736,8 @@ model MosqueFieldVisit {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
-  tour  MosqueFieldTour? @relation(fields: [tourId], references: [id], onDelete: SetNull)
-  site  MosqueSite       @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  tour  MosqueFieldTour?       @relation(fields: [tourId], references: [id], onDelete: SetNull)
+  site  MosqueSite             @relation(fields: [siteId], references: [id], onDelete: Restrict)
   items MosqueFieldVisitItem[]
 
   @@index([tourId])
@@ -794,7 +796,6 @@ model MosquePersonnel {
   @@index([active])
 }
 
-
 model MosqueQuranInventory {
   id            String   @id @default(cuid())
   siteId        String
@@ -837,24 +838,24 @@ model MosqueQuranWarehouse {
 }
 
 model MosqueQuranStockMovement {
-  id             String   @id @default(cuid())
-  movementNumber String   @unique
-  movementType   String
-  warehouseId    String
-  siteId         String?
-  largeCount     Int      @default(0)
-  mediumCount    Int      @default(0)
-  smallCount     Int      @default(0)
-  totalCount     Int      @default(0)
+  id              String   @id @default(cuid())
+  movementNumber  String   @unique
+  movementType    String
+  warehouseId     String
+  siteId          String?
+  largeCount      Int      @default(0)
+  mediumCount     Int      @default(0)
+  smallCount      Int      @default(0)
+  totalCount      Int      @default(0)
   referenceNumber String?
-  movementAt     DateTime @default(now())
-  notes          String?
-  createdBy      String?
-  createdByName  String?
-  createdAt      DateTime @default(now())
+  movementAt      DateTime @default(now())
+  notes           String?
+  createdBy       String?
+  createdByName   String?
+  createdAt       DateTime @default(now())
 
   warehouse MosqueQuranWarehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
-  site      MosqueSite?           @relation(fields: [siteId], references: [id], onDelete: Restrict)
+  site      MosqueSite?          @relation(fields: [siteId], references: [id], onDelete: Restrict)
 
   @@index([warehouseId])
   @@index([siteId])
@@ -863,6 +864,46 @@ model MosqueQuranStockMovement {
   @@index([createdAt])
 }
 
+model MosqueQuranRackInventory {
+  id            String   @id @default(cuid())
+  siteId        String
+  presentCount  Int      @default(0)
+  targetCount   Int      @default(0)
+  capacityCount Int      @default(0)
+  goodCount     Int      @default(0)
+  damagedCount  Int      @default(0)
+  countedAt     DateTime @default(now())
+  countedBy     String?
+  countedByName String?
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  site MosqueSite @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@index([countedAt])
+  @@index([createdAt])
+}
+
+model MosqueQuranRackMovement {
+  id             String   @id @default(cuid())
+  movementNumber String   @unique
+  movementType   String
+  siteId         String?
+  quantity       Int
+  movementAt     DateTime @default(now())
+  notes          String?
+  createdBy      String?
+  createdByName  String?
+  createdAt      DateTime @default(now())
+
+  site MosqueSite? @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  @@index([siteId])
+  @@index([movementType])
+  @@index([movementAt])
+  @@index([createdAt])
+}
 
 model MosqueRequest {
   id                    String    @id @default(cuid())
