@@ -865,22 +865,26 @@ model MosqueQuranStockMovement {
 }
 
 model MosqueQuranRackInventory {
-  id            String   @id @default(cuid())
-  siteId        String
-  presentCount  Int      @default(0)
-  targetCount   Int      @default(0)
-  capacityCount Int      @default(0)
-  goodCount     Int      @default(0)
-  damagedCount  Int      @default(0)
-  countedAt     DateTime @default(now())
-  countedBy     String?
-  countedByName String?
-  notes         String?
-  createdAt     DateTime @default(now())
+  id                 String   @id @default(cuid())
+  siteId             String
+  itemType           String   @default("shelf_unit")
+  presentCount       Int      @default(0)
+  targetCount        Int      @default(0)
+  capacityCount      Int      @default(0)
+  quranCapacityCount Int      @default(0)
+  goodCount          Int      @default(0)
+  damagedCount       Int      @default(0)
+  countedAt          DateTime @default(now())
+  countedBy          String?
+  countedByName      String?
+  notes              String?
+  createdAt          DateTime @default(now())
 
   site MosqueSite @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
   @@index([siteId])
+  @@index([itemType])
+  @@index([siteId, itemType])
   @@index([countedAt])
   @@index([createdAt])
 }
@@ -889,6 +893,7 @@ model MosqueQuranRackMovement {
   id             String   @id @default(cuid())
   movementNumber String   @unique
   movementType   String
+  itemType       String   @default("shelf_unit")
   siteId         String?
   quantity       Int
   movementAt     DateTime @default(now())
@@ -900,6 +905,7 @@ model MosqueQuranRackMovement {
   site MosqueSite? @relation(fields: [siteId], references: [id], onDelete: Restrict)
 
   @@index([siteId])
+  @@index([itemType])
   @@index([movementType])
   @@index([movementAt])
   @@index([createdAt])

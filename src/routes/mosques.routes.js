@@ -451,7 +451,8 @@ const FIELD_VISIT_CHECKLIST = [
   ['السلامة', 'وضوح مخارج الطوارئ وخلوها من العوائق'],
   ['السلامة', 'توفر طفايات الحريق وصلاحيتها'],
   ['السلامة', 'سلامة الأبواب والممرات وسهولة الحركة'],
-  ['التجهيزات', 'توفر دواليب ورفوف المصاحف بحالة مناسبة'],
+  ['التجهيزات', 'توفر حوامل المصاحف الفردية وكفاية عددها وسلامتها'],
+  ['التجهيزات', 'توفر رفوف ودواليب المصاحف وكفاية سعتها وسلامتها'],
   ['التجهيزات', 'سلامة الفواصل والستائر والساعات واللوحات'],
   ['المصاحف', 'سلامة المصاحف والتحقق من جهة الطباعة وكفاية الأعداد وملاءمة الأحجام'],
   ['الكتب والمطبوعات', 'خلو الموقع من الكتب والنشرات غير المعتمدة'],
@@ -2470,29 +2471,39 @@ router.get('/quran-inventory/:siteId/history', requireRoles('head', 'supervisor'
   } catch (error) { next(error); }
 });
 
+const QURAN_EQUIPMENT_TYPES = ['individual_stand', 'shelf_unit'];
+const quranEquipmentTypeLabel = (itemType) => itemType === 'individual_stand' ? 'حوامل المصاحف الفردية' : 'رفوف ودواليب المصاحف';
+
 const quranRackInventorySchema = z.object({
   siteId: z.string().min(1),
+  itemType: z.enum(['individual_stand', 'shelf_unit']).default('shelf_unit'),
   presentCount: z.coerce.number().int().min(0).max(100000).default(0),
   targetCount: z.coerce.number().int().min(0).max(100000).default(0),
   capacityCount: z.coerce.number().int().min(0).max(100000).default(0),
+  quranCapacityCount: z.coerce.number().int().min(0).max(1000000).default(0),
   goodCount: z.coerce.number().int().min(0).max(100000).default(0),
   damagedCount: z.coerce.number().int().min(0).max(100000).default(0),
   countedAt: z.coerce.date().optional(),
   notes: z.string().trim().max(5000).optional().nullable(),
 }).superRefine((value, ctx) => {
+  const label = quranEquipmentTypeLabel(value.itemType);
   if (value.goodCount + value.damagedCount > value.presentCount) {
-    ctx.addIssue({ code: 'custom', path: ['presentCount'], message: 'العدد الموجود يجب ألا يقل عن مجموع الحوامل الصالحة والتالفة' });
+    ctx.addIssue({ code: 'custom', path: ['presentCount'], message: `العدد الموجود من ${label} يجب ألا يقل عن مجموع الصالح والتالف` });
   }
   if (value.capacityCount > 0 && value.targetCount > value.capacityCount) {
-    ctx.addIssue({ code: 'custom', path: ['targetCount'], message: 'العدد المستهدف لا يمكن أن يتجاوز الحد الاستيعابي للموقع' });
+    ctx.addIssue({ code: 'custom', path: ['targetCount'], message: `العدد المستهدف من ${label} لا يمكن أن يتجاوز الحد الاستيعابي للموقع` });
   }
   if (value.capacityCount > 0 && value.presentCount > value.capacityCount) {
-    ctx.addIssue({ code: 'custom', path: ['presentCount'], message: 'العدد الموجود يتجاوز الحد الاستيعابي المسجل للموقع' });
+    ctx.addIssue({ code: 'custom', path: ['presentCount'], message: `العدد الموجود من ${label} يتجاوز الحد الاستيعابي المسجل للموقع` });
+  }
+  if (value.itemType === 'shelf_unit' && value.presentCount > 0 && value.quranCapacityCount <= 0) {
+    ctx.addIssue({ code: 'custom', path: ['quranCapacityCount'], message: 'أدخل السعة الإجمالية للمصاحف التي تستوعبها الرفوف والدواليب الموجودة' });
   }
 });
 
 const quranRackMovementSchema = z.object({
   movementType: z.enum(['surplus_to_stock', 'stock_to_site', 'receipt', 'stock_damage', 'adjustment_in', 'adjustment_out']),
+  itemType: z.enum(['individual_stand', 'shelf_unit']).default('shelf_unit'),
   siteId: z.string().min(1).optional().nullable(),
   quantity: z.coerce.number().int().min(1).max(100000),
   movementAt: z.coerce.date().optional(),
@@ -2500,15 +2511,19 @@ const quranRackMovementSchema = z.object({
 });
 
 const quranRackMetrics = (inventory) => {
+  const itemType = inventory?.itemType === 'individual_stand' ? 'individual_stand' : 'shelf_unit';
   const presentCount = Number(inventory?.presentCount || 0);
   const targetCount = Number(inventory?.targetCount || 0);
   const capacityCount = Number(inventory?.capacityCount || 0);
+  const quranCapacityCount = itemType === 'shelf_unit' ? Number(inventory?.quranCapacityCount || 0) : 0;
   const goodCount = Number(inventory?.goodCount || 0);
   const damagedCount = Number(inventory?.damagedCount || 0);
   return {
+    itemType,
     presentCount,
     targetCount,
     capacityCount,
+    quranCapacityCount,
     goodCount,
     damagedCount,
     surplusCount: Math.max(goodCount - targetCount, 0),
@@ -2517,7 +2532,9 @@ const quranRackMetrics = (inventory) => {
   };
 };
 
-const quranRackStockBalance = (movements) => movements.reduce((balance, movement) => {
+const quranRackStockBalance = (movements, itemType) => movements.reduce((balance, movement) => {
+  const movementItemType = movement.itemType === 'individual_stand' ? 'individual_stand' : 'shelf_unit';
+  if (movementItemType !== itemType) return balance;
   const quantity = Number(movement.quantity || 0);
   if (['surplus_to_stock', 'receipt', 'adjustment_in'].includes(movement.movementType)) return balance + quantity;
   if (['stock_to_site', 'stock_damage', 'adjustment_out'].includes(movement.movementType)) return balance - quantity;
@@ -2538,28 +2555,55 @@ const quranRackDashboard = async (req) => {
     where: { siteId: { in: siteIds } },
     orderBy: [{ countedAt: 'desc' }, { createdAt: 'desc' }],
   }) : [];
-  const latestBySite = new Map();
-  for (const inventory of inventories) if (!latestBySite.has(inventory.siteId)) latestBySite.set(inventory.siteId, inventory);
+  const latestBySiteType = new Map();
+  for (const inventory of inventories) {
+    const key = `${inventory.siteId}:${inventory.itemType || 'shelf_unit'}`;
+    if (!latestBySiteType.has(key)) latestBySiteType.set(key, inventory);
+  }
 
   const movements = await prisma.mosqueQuranRackMovement.findMany({ orderBy: [{ movementAt: 'desc' }, { createdAt: 'desc' }] });
-  const centralStock = Math.max(quranRackStockBalance(movements), 0);
-  const rows = sites.map((site) => {
-    const latest = latestBySite.get(site.id) || null;
-    return { site, latest, ...(latest ? quranRackMetrics(latest) : { presentCount: 0, targetCount: 0, capacityCount: 0, goodCount: 0, damagedCount: 0, surplusCount: 0, shortageCount: 0, remainingCapacity: null }) };
-  });
+  const rows = sites.flatMap((site) => QURAN_EQUIPMENT_TYPES.map((itemType) => {
+    const latest = latestBySiteType.get(`${site.id}:${itemType}`) || null;
+    const metrics = quranRackMetrics(latest || { itemType });
+    return { site, latest, ...metrics };
+  }));
+
+  const buildTypeSummary = (itemType) => {
+    const typeRows = rows.filter((row) => row.itemType === itemType);
+    return {
+      centralStock: Math.max(quranRackStockBalance(movements, itemType), 0),
+      countedSites: typeRows.filter((row) => Boolean(row.latest)).length,
+      totalPresent: typeRows.reduce((sum, row) => sum + row.presentCount, 0),
+      totalGood: typeRows.reduce((sum, row) => sum + row.goodCount, 0),
+      totalDamaged: typeRows.reduce((sum, row) => sum + row.damagedCount, 0),
+      totalSurplus: typeRows.reduce((sum, row) => sum + row.surplusCount, 0),
+      totalShortage: typeRows.reduce((sum, row) => sum + row.shortageCount, 0),
+      totalQuranCapacity: itemType === 'shelf_unit' ? typeRows.reduce((sum, row) => sum + row.quranCapacityCount, 0) : 0,
+    };
+  };
+
+  const individualStand = buildTypeSummary('individual_stand');
+  const shelfUnit = buildTypeSummary('shelf_unit');
+  const countedSiteIds = new Set(rows.filter((row) => Boolean(row.latest)).map((row) => row.site.id));
   const visibleMovementSiteIds = new Set(siteIds);
   const recentMovements = movements
     .filter((movement) => context.role === 'head' || !movement.siteId || visibleMovementSiteIds.has(movement.siteId))
     .slice(0, 100);
+
   return {
     summary: {
-      centralStock,
-      countedSites: rows.filter((row) => Boolean(row.latest)).length,
-      totalPresent: rows.reduce((sum, row) => sum + row.presentCount, 0),
-      totalGood: rows.reduce((sum, row) => sum + row.goodCount, 0),
-      totalDamaged: rows.reduce((sum, row) => sum + row.damagedCount, 0),
-      totalSurplus: rows.reduce((sum, row) => sum + row.surplusCount, 0),
-      totalShortage: rows.reduce((sum, row) => sum + row.shortageCount, 0),
+      centralStock: individualStand.centralStock + shelfUnit.centralStock,
+      centralStockIndividualStands: individualStand.centralStock,
+      centralStockShelfUnits: shelfUnit.centralStock,
+      countedSites: countedSiteIds.size,
+      countedEntries: individualStand.countedSites + shelfUnit.countedSites,
+      totalPresent: individualStand.totalPresent + shelfUnit.totalPresent,
+      totalGood: individualStand.totalGood + shelfUnit.totalGood,
+      totalDamaged: individualStand.totalDamaged + shelfUnit.totalDamaged,
+      totalSurplus: individualStand.totalSurplus + shelfUnit.totalSurplus,
+      totalShortage: individualStand.totalShortage + shelfUnit.totalShortage,
+      totalQuranCapacity: shelfUnit.totalQuranCapacity,
+      byType: { individual_stand: individualStand, shelf_unit: shelfUnit },
     },
     sites: rows,
     recentMovements,
@@ -2580,9 +2624,11 @@ router.post('/quran-racks/inventory', requireRoles('head', 'supervisor'), async 
     const inventory = await prisma.mosqueQuranRackInventory.create({
       data: {
         siteId: input.siteId,
+        itemType: input.itemType,
         presentCount: input.presentCount,
         targetCount: input.targetCount,
         capacityCount: input.capacityCount,
+        quranCapacityCount: input.itemType === 'shelf_unit' ? input.quranCapacityCount : 0,
         goodCount: input.goodCount,
         damagedCount: input.damagedCount,
         countedAt: input.countedAt || new Date(),
@@ -2600,18 +2646,22 @@ router.post('/quran-racks/movements', requireRoles('head', 'supervisor'), async 
     const context = req.mosqueRole || await getModuleRole(req);
     const input = quranRackMovementSchema.parse(req.body || {});
     const siteMovement = ['surplus_to_stock', 'stock_to_site'].includes(input.movementType);
+    const itemLabel = quranEquipmentTypeLabel(input.itemType);
     if (siteMovement && !input.siteId) return res.status(400).json({ message: 'يجب تحديد المسجد أو المصلى لهذه الحركة' });
-    if (!siteMovement && context.role !== 'head') return res.status(403).json({ message: 'إدارة الرصيد المركزي للحوامل متاحة لرئيس الوحدة أو مسؤول المنصة فقط' });
+    if (!siteMovement && context.role !== 'head') return res.status(403).json({ message: `إدارة الرصيد المركزي لـ ${itemLabel} متاحة لرئيس الوحدة أو مسؤول المنصة فقط` });
     if (input.siteId) await assertQuranInventorySiteAccess(req, input.siteId, context);
 
     const result = await prisma.$transaction(async (tx) => {
-      const movements = await tx.mosqueQuranRackMovement.findMany({ select: { movementType: true, quantity: true } });
-      const centralStock = quranRackStockBalance(movements);
+      const movements = await tx.mosqueQuranRackMovement.findMany({ select: { movementType: true, itemType: true, quantity: true } });
+      const centralStock = quranRackStockBalance(movements, input.itemType);
       let latest = null;
-      if (input.siteId) latest = await tx.mosqueQuranRackInventory.findFirst({ where: { siteId: input.siteId }, orderBy: [{ countedAt: 'desc' }, { createdAt: 'desc' }] });
+      if (input.siteId) latest = await tx.mosqueQuranRackInventory.findFirst({
+        where: { siteId: input.siteId, itemType: input.itemType },
+        orderBy: [{ countedAt: 'desc' }, { createdAt: 'desc' }],
+      });
 
       if (siteMovement && !latest) {
-        const error = new Error('يجب تسجيل جرد حوامل المصاحف للموقع قبل تنفيذ حركة نقل');
+        const error = new Error(`يجب تسجيل جرد ${itemLabel} للموقع قبل تنفيذ حركة نقل`);
         error.statusCode = 400;
         throw error;
       }
@@ -2619,20 +2669,20 @@ router.post('/quran-racks/movements', requireRoles('head', 'supervisor'), async 
       if (input.movementType === 'surplus_to_stock') {
         const metrics = quranRackMetrics(latest);
         if (input.quantity > metrics.surplusCount) {
-          const error = new Error(`الكمية تتجاوز الفائض المتاح بالموقع (${metrics.surplusCount})`);
+          const error = new Error(`الكمية تتجاوز الفائض المتاح من ${itemLabel} بالموقع (${metrics.surplusCount})`);
           error.statusCode = 400;
           throw error;
         }
       }
       if (['stock_to_site', 'stock_damage', 'adjustment_out'].includes(input.movementType) && input.quantity > centralStock) {
-        const error = new Error(`رصيد مخزون الحوامل غير كافٍ. الرصيد الحالي ${Math.max(centralStock, 0)}`);
+        const error = new Error(`رصيد مخزون ${itemLabel} غير كافٍ. الرصيد الحالي ${Math.max(centralStock, 0)}`);
         error.statusCode = 400;
         throw error;
       }
       if (input.movementType === 'stock_to_site') {
         const metrics = quranRackMetrics(latest);
         if (metrics.capacityCount > 0 && metrics.presentCount + input.quantity > metrics.capacityCount) {
-          const error = new Error(`الكمية تتجاوز الحد الاستيعابي للموقع. المساحة المتاحة ${metrics.remainingCapacity || 0}`);
+          const error = new Error(`الكمية تتجاوز الحد الاستيعابي للموقع من ${itemLabel}. المساحة المتاحة ${metrics.remainingCapacity || 0}`);
           error.statusCode = 400;
           throw error;
         }
@@ -2640,8 +2690,9 @@ router.post('/quran-racks/movements', requireRoles('head', 'supervisor'), async 
 
       const movement = await tx.mosqueQuranRackMovement.create({
         data: {
-          movementNumber: `RACK-${Date.now()}-${randomDigits(4)}`,
+          movementNumber: `${input.itemType === 'individual_stand' ? 'QSTAND' : 'QSHELF'}-${Date.now()}-${randomDigits(4)}`,
           movementType: input.movementType,
+          itemType: input.itemType,
           siteId: input.siteId || null,
           quantity: input.quantity,
           movementAt: input.movementAt || new Date(),
@@ -2654,29 +2705,33 @@ router.post('/quran-racks/movements', requireRoles('head', 'supervisor'), async 
       if (latest && input.movementType === 'surplus_to_stock') {
         await tx.mosqueQuranRackInventory.create({ data: {
           siteId: latest.siteId,
+          itemType: input.itemType,
           presentCount: Math.max(latest.presentCount - input.quantity, 0),
           targetCount: latest.targetCount,
           capacityCount: latest.capacityCount,
+          quranCapacityCount: latest.quranCapacityCount,
           goodCount: Math.max(latest.goodCount - input.quantity, 0),
           damagedCount: latest.damagedCount,
           countedAt: input.movementAt || new Date(),
           countedBy: req.authUser?.id || null,
           countedByName: req.authUser?.username || req.authUser?.email || null,
-          notes: `تحديث آلي بعد ترحيل ${input.quantity} من فائض حوامل المصاحف إلى المخزون المركزي.`,
+          notes: `تحديث آلي بعد ترحيل ${input.quantity} من فائض ${itemLabel} إلى المخزون المركزي.${input.itemType === 'shelf_unit' ? ' تُراجع السعة الإجمالية للمصاحف في الجرد الميداني التالي.' : ''}`,
         } });
       }
       if (latest && input.movementType === 'stock_to_site') {
         await tx.mosqueQuranRackInventory.create({ data: {
           siteId: latest.siteId,
+          itemType: input.itemType,
           presentCount: latest.presentCount + input.quantity,
           targetCount: latest.targetCount,
           capacityCount: latest.capacityCount,
+          quranCapacityCount: latest.quranCapacityCount,
           goodCount: latest.goodCount + input.quantity,
           damagedCount: latest.damagedCount,
           countedAt: input.movementAt || new Date(),
           countedBy: req.authUser?.id || null,
           countedByName: req.authUser?.username || req.authUser?.email || null,
-          notes: `تحديث آلي بعد صرف ${input.quantity} حامل مصحف من المخزون المركزي للموقع.`,
+          notes: `تحديث آلي بعد صرف ${input.quantity} من ${itemLabel} من المخزون المركزي للموقع.${input.itemType === 'shelf_unit' ? ' تُراجع السعة الإجمالية للمصاحف في الجرد الميداني التالي.' : ''}`,
         } });
       }
       return movement;
