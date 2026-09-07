@@ -6,6 +6,7 @@ import { prisma } from '../prisma.js';
 import { uploadBufferToGoogleDrive } from '../services/googleDrive.js';
 import { hashPassword } from '../security/auth.js';
 import { sendMosquePersonnelActivationEmail } from '../services/email.service.js';
+import { archiveMosqueLeavesForRemovedPersonnel } from '../services/mosqueLeaveLifecycle.service.js';
 
 const router = Router();
 export const mosquesPublicRoutes = Router();
@@ -3031,6 +3032,14 @@ router.delete('/personnel/:id', requireRoles('head'), async (req, res, next) => 
     if (!current) return res.status(404).json({ message: 'منسوب المسجد غير موجود' });
 
     await prisma.$transaction(async (tx) => {
+      // إبعاد جميع معاملات الإجازة/الاعتذار الخاصة بالمنسوب من لوحة العمل قبل حذف سجل المنسوب.
+      // تبقى المعاملات محفوظة كأرشيف مع أثر تدقيقي كامل بدل الحذف الصلب.
+      await archiveMosqueLeavesForRemovedPersonnel({
+        client: tx,
+        personnel: current,
+        actor: req.authUser,
+        source: 'personnel_removal',
+      });
       await tx.mosquePersonnel.delete({ where: { id: current.id } });
       if (current.userId) {
         const assignment = await tx.mosqueUserAssignment.findUnique({ where: { userId: current.userId } });
@@ -3195,7 +3204,7 @@ router.get('/reports/summary', requireRoles('head', 'supervisor'), async (req, r
 const MOSQUE_WORKFLOW_CONFIG = {
   request: { model: 'mosqueRequest', numberField: 'requestNumber', siteField: 'siteId' },
   ticket: { model: 'mosqueTicket', numberField: 'ticketNumber', siteField: 'siteId' },
-  leave: { model: 'mosqueLeaveRequest', numberField: 'leaveNumber', siteField: 'siteId' },
+  leave: { model: 'mosqueLeave', numberField: 'leaveNumber', siteField: 'siteId' },
   job: { model: 'mosqueJobApplication', numberField: 'applicationNumber', siteField: null },
 };
 

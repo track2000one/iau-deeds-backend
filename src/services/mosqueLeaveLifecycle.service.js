@@ -1,44 +1,4 @@
-from pathlib import Path
-
-routes_path = Path('src/routes/mosques.routes.js')
-routes = routes_path.read_text(encoding='utf-8')
-
-import_target = "import { sendMosquePersonnelActivationEmail } from '../services/email.service.js';\n"
-import_replacement = import_target + "import { archiveMosqueLeavesForRemovedPersonnel } from '../services/mosqueLeaveLifecycle.service.js';\n"
-if import_target not in routes:
-    raise SystemExit('routes import target not found')
-routes = routes.replace(import_target, import_replacement, 1)
-
-config_old = "  leave: { model: 'mosqueLeaveRequest', numberField: 'leaveNumber', siteField: 'siteId' },"
-config_new = "  leave: { model: 'mosqueLeave', numberField: 'leaveNumber', siteField: 'siteId' },"
-if config_old not in routes:
-    raise SystemExit('leave workflow model target not found')
-routes = routes.replace(config_old, config_new, 1)
-
-delete_old = """    await prisma.$transaction(async (tx) => {\n      await tx.mosquePersonnel.delete({ where: { id: current.id } });\n"""
-delete_new = """    await prisma.$transaction(async (tx) => {\n      // إبعاد جميع معاملات الإجازة/الاعتذار الخاصة بالمنسوب من لوحة العمل قبل حذف سجل المنسوب.\n      // تبقى المعاملات محفوظة كأرشيف مع أثر تدقيقي كامل بدل الحذف الصلب.\n      await archiveMosqueLeavesForRemovedPersonnel({\n        client: tx,\n        personnel: current,\n        actor: req.authUser,\n        source: 'personnel_removal',\n      });\n      await tx.mosquePersonnel.delete({ where: { id: current.id } });\n"""
-if delete_old not in routes:
-    raise SystemExit('personnel delete transaction target not found')
-routes = routes.replace(delete_old, delete_new, 1)
-routes_path.write_text(routes, encoding='utf-8')
-
-server_path = Path('src/server.js')
-server = server_path.read_text(encoding='utf-8')
-server_import_target = "import { ensureOfficialMosqueSites } from './services/mosqueSites.service.js';\n"
-server_import_replacement = server_import_target + "import { archiveOrphanedMosqueLeaves } from './services/mosqueLeaveLifecycle.service.js';\n"
-if server_import_target not in server:
-    raise SystemExit('server import target not found')
-server = server.replace(server_import_target, server_import_replacement, 1)
-
-server_call_target = "  await ensureOfficialMosqueSites();\n"
-server_call_replacement = server_call_target + "  await archiveOrphanedMosqueLeaves();\n"
-if server_call_target not in server:
-    raise SystemExit('server startup target not found')
-server = server.replace(server_call_target, server_call_replacement, 1)
-server_path.write_text(server, encoding='utf-8')
-
-service_path = Path('src/services/mosqueLeaveLifecycle.service.js')
-service_path.write_text("""import { prisma } from '../prisma.js';
+import { prisma } from '../prisma.js';
 
 const archiveLeaves = async ({ client, rows, actor = null, reason, source }) => {
   if (!rows.length) return { count: 0, leaveNumbers: [] };
@@ -178,6 +138,3 @@ export const archiveOrphanedMosqueLeaves = async () => {
   console.log(`Archived ${result.count} orphaned mosque leave request(s): ${result.leaveNumbers.join(', ')}`);
   return result;
 };
-""", encoding='utf-8')
-
-print('Applied mosque orphaned-leave lifecycle patch')
