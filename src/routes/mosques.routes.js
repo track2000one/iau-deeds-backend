@@ -1083,26 +1083,36 @@ const fieldVisitHasExecutionData = (visit) => Boolean(
 
 const fieldTourAccessState = (req, tour) => {
   const isSystemAdmin = req.authUser?.role === 'admin';
+  const isUnitHead = req.mosqueRole?.role === 'head';
   const isOwner = Boolean(tour?.createdBy && tour.createdBy === req.authUser?.id);
   const hasStarted = tour?.status !== 'scheduled' || (tour?.visits || []).some(fieldVisitHasExecutionData);
+  const mosquePermission = req.authUser?.permissions?.find((item) => item.module === 'mosques');
+  const canEditByPermission = isSystemAdmin || Boolean(mosquePermission?.canEdit);
+  const canDeleteByPermission = isSystemAdmin || Boolean(mosquePermission?.canDelete);
+  const canManageRecord = isSystemAdmin || isUnitHead || isOwner;
   return {
     isOwner,
     hasStarted,
-    canEdit: Boolean(isSystemAdmin || isOwner),
-    canDelete: Boolean(isSystemAdmin || isOwner),
-    canCancel: Boolean((isSystemAdmin || isOwner) && tour?.status !== 'cancelled'),
+    canEdit: Boolean(canEditByPermission && canManageRecord),
+    canDelete: Boolean(canDeleteByPermission && canManageRecord),
+    canCancel: Boolean(canEditByPermission && canManageRecord && tour?.status !== 'cancelled'),
   };
 };
 
 const fieldVisitAccessState = (req, visit) => {
   const isSystemAdmin = req.authUser?.role === 'admin';
+  const isUnitHead = req.mosqueRole?.role === 'head';
   const isOwner = Boolean(visit?.createdBy && visit.createdBy === req.authUser?.id);
   const hasStarted = fieldVisitHasExecutionData(visit);
+  const mosquePermission = req.authUser?.permissions?.find((item) => item.module === 'mosques');
+  const canEditByPermission = isSystemAdmin || Boolean(mosquePermission?.canEdit);
+  const canDeleteByPermission = isSystemAdmin || Boolean(mosquePermission?.canDelete);
+  const canManageRecord = isSystemAdmin || isUnitHead || isOwner;
   return {
     isOwner,
     hasStarted,
-    canEdit: Boolean(isSystemAdmin || isOwner),
-    canDelete: Boolean(isSystemAdmin || (isOwner && !hasStarted)),
+    canEdit: Boolean(canEditByPermission && canManageRecord),
+    canDelete: Boolean(canDeleteByPermission && canManageRecord),
   };
 };
 
@@ -1215,8 +1225,9 @@ router.patch('/field-tours/:id', requireRoles('head', 'supervisor'), async (req,
       notes: z.string().trim().max(5000).optional().nullable(),
     }).parse(req.body);
     const isSystemAdmin = req.authUser?.role === 'admin';
+    const isUnitHead = req.mosqueRole?.role === 'head';
     const isOwner = current.createdBy === req.authUser?.id;
-    if (!isSystemAdmin && !isOwner) {
+    if (!isSystemAdmin && !isUnitHead && !isOwner) {
       return res.status(403).json({ message: 'هذه الجولة أنشأها مستخدم آخر؛ يمكنك عرضها فقط ولا تملك صلاحية تعديلها أو إلغائها.' });
     }
     const updated = await prisma.mosqueFieldTour.update({ where: { id: current.id }, data: { status: input.status, notes: input.notes === undefined ? current.notes : input.notes } });
@@ -1279,8 +1290,9 @@ router.delete('/field-tours/:id', requireRoles('head', 'supervisor'), async (req
     }
 
     const isSystemAdmin = req.authUser?.role === 'admin';
+    const isUnitHead = req.mosqueRole?.role === 'head';
     const isOwner = current.createdBy === req.authUser?.id;
-    if (!isSystemAdmin && !isOwner) {
+    if (!isSystemAdmin && !isUnitHead && !isOwner) {
       return res.status(403).json({ message: 'لا يمكن حذف الجولة إلا بواسطة المستخدم الذي أنشأها أو مسؤول المنصة' });
     }
 
@@ -1430,8 +1442,9 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
       if (req.body.siteId && req.body.siteId !== current.siteId) await assertSupervisorSiteAccess(req, req.body.siteId, context);
     }
     const isSystemAdmin = req.authUser?.role === 'admin';
+    const isUnitHead = req.mosqueRole?.role === 'head';
     const isOwner = current.createdBy === req.authUser?.id;
-    if (!isSystemAdmin && !isOwner) {
+    if (!isSystemAdmin && !isUnitHead && !isOwner) {
       return res.status(403).json({ message: 'هذه الزيارة تتبع جولة أنشأها مستخدم آخر؛ يمكنك عرضها فقط ولا تملك صلاحية تعديلها.' });
     }
     const input = fieldVisitSchema.parse(req.body);
@@ -1497,14 +1510,11 @@ router.delete('/field-visits/:id', requireRoles('head', 'supervisor'), async (re
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, current.siteId, context);
 
     const isSystemAdmin = req.authUser?.role === 'admin';
+    const isUnitHead = req.mosqueRole?.role === 'head';
     const isOwner = current.createdBy === req.authUser?.id;
-    if (!isSystemAdmin && !isOwner) {
+    if (!isSystemAdmin && !isUnitHead && !isOwner) {
       return res.status(403).json({ message: 'لا يمكن حذف الزيارة إلا بواسطة المستخدم الذي أنشأها أو مسؤول المنصة' });
     }
-    if (!isSystemAdmin && fieldVisitHasExecutionData(current)) {
-      return res.status(409).json({ message: 'بدأ تنفيذ هذه الزيارة أو أصبحت جزءًا من السجل التاريخي؛ أغلق الزيارة أو ألغِ الجولة المرتبطة بدل حذف السجل.' });
-    }
-
     await prisma.$transaction(async (tx) => {
       await tx.mosqueFieldVisitItem.deleteMany({ where: { visitId: current.id } });
       await tx.mosqueFieldVisit.delete({ where: { id: current.id } });
