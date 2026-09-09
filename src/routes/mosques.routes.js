@@ -315,6 +315,10 @@ const siteSchema = z.object({
   name: z.string().trim().min(2),
   siteType: z.enum(['mosque', 'jami', 'prayer_room']).default('mosque'),
   prayerRoomGender: z.enum(['men', 'women']).optional().nullable(),
+  spatialRelation: z.enum(['inside_building', 'independent']).default('independent'),
+  buildingId: z.string().trim().optional().nullable(),
+  floor: z.string().trim().optional().nullable(),
+  roomNumber: z.string().trim().optional().nullable(),
   city: z.string().trim().optional().nullable(),
   district: z.string().trim().optional().nullable(),
   campusLocation: z.string().trim().optional().nullable(),
@@ -352,6 +356,40 @@ const siteSchema = z.object({
   ]).optional().default({ photos: [], documents: [] }),
   supervisorUserId: z.string().trim().optional().nullable(),
 });
+
+const buildingSchema = z.object({
+  buildingNumber: z.string().trim().min(1).max(100),
+  name: z.string().trim().optional().nullable(),
+  campusLocation: z.string().trim().optional().nullable(),
+  city: z.string().trim().optional().nullable(),
+  district: z.string().trim().optional().nullable(),
+  expectedUsers: z.coerce.number().int().nonnegative().optional().nullable(),
+  coverageStatus: z.enum(['unassessed', 'covered', 'needs_prayer_room', 'under_feasibility_study', 'not_feasible_alternative', 'under_implementation']).default('unassessed'),
+  creationFeasibility: z.enum(['available', 'unavailable', 'under_study']).default('under_study'),
+  unavailableReason: z.string().trim().optional().nullable(),
+  approvedAlternative: z.string().trim().optional().nullable(),
+  notes: z.string().trim().optional().nullable(),
+});
+
+const assertMosqueBuildingLink = async (input) => {
+  if (input.spatialRelation !== 'inside_building') {
+    input.buildingId = null;
+    input.floor = null;
+    input.roomNumber = null;
+    return;
+  }
+  if (!input.buildingId) {
+    const error = new Error('رقم المبنى مطلوب عند اختيار داخل مبنى');
+    error.statusCode = 400;
+    throw error;
+  }
+  const building = await prisma.mosqueBuilding.findUnique({ where: { id: input.buildingId }, select: { id: true } });
+  if (!building) {
+    const error = new Error('المبنى المحدد غير موجود في سجل تغطية المباني');
+    error.statusCode = 400;
+    throw error;
+  }
+};
 
 const fieldVisitImageSchema = z.object({
   url: z.string().url(),
@@ -926,12 +964,55 @@ router.get('/dashboard', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.get('/buildings', async (req, res, next) => {
+  try {
+    const context = await getModuleRole(req);
+    if (!['head', 'supervisor'].includes(context.role)) return res.json([]);
+    const rows = await prisma.mosqueBuilding.findMany({
+      include: {
+        sites: { select: { id: true, name: true, siteType: true, prayerRoomGender: true, status: true }, orderBy: { name: 'asc' } },
+        _count: { select: { sites: true } },
+      },
+      orderBy: [{ buildingNumber: 'asc' }, { name: 'asc' }],
+    });
+    res.json(rows);
+  } catch (error) { next(error); }
+});
+
+router.post('/buildings', requireRoles('head'), async (req, res, next) => {
+  try {
+    const input = buildingSchema.parse(req.body);
+    const building = await prisma.mosqueBuilding.create({ data: { ...input, createdBy: req.authUser.id } });
+    res.status(201).json(building);
+  } catch (error) { next(error); }
+});
+
+router.put('/buildings/:id', requireRoles('head'), async (req, res, next) => {
+  try {
+    const input = buildingSchema.parse(req.body);
+    const current = await prisma.mosqueBuilding.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
+    const building = await prisma.mosqueBuilding.update({ where: { id: req.params.id }, data: input });
+    res.json(building);
+  } catch (error) { next(error); }
+});
+
+router.delete('/buildings/:id', requireRoles('head'), async (req, res, next) => {
+  try {
+    const current = await prisma.mosqueBuilding.findUnique({ where: { id: req.params.id }, include: { _count: { select: { sites: true } } } });
+    if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
+    if (current._count.sites > 0) return res.status(409).json({ message: 'لا يمكن حذف المبنى قبل فك ارتباط المساجد والمصليات التابعة له' });
+    await prisma.mosqueBuilding.delete({ where: { id: req.params.id } });
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
+
 router.get('/sites', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
     if (context.role === 'head') {
       const sites = await prisma.mosqueSite.findMany({
-        include: { _count: { select: { requests: true, tickets: true, personnel: true } } },
+        include: { building: true, _count: { select: { requests: true, tickets: true, personnel: true } } },
         orderBy: [{ status: 'asc' }, { name: 'asc' }],
       });
       return res.json(await enrichMosqueSitePersonnelNames(sites));
@@ -939,7 +1020,7 @@ router.get('/sites', async (req, res, next) => {
     if (context.role === 'supervisor') {
       const sites = await prisma.mosqueSite.findMany({
         where: { supervisorUserId: req.authUser.id },
-        include: { _count: { select: { requests: true, tickets: true, personnel: true } } },
+        include: { building: true, _count: { select: { requests: true, tickets: true, personnel: true } } },
         orderBy: [{ status: 'asc' }, { name: 'asc' }],
       });
       return res.json(await enrichMosqueSitePersonnelNames(sites));
@@ -948,7 +1029,7 @@ router.get('/sites', async (req, res, next) => {
       if (!context.siteId) return res.json([]);
       const site = await prisma.mosqueSite.findUnique({
         where: { id: context.siteId },
-        include: { _count: { select: { requests: true, tickets: true, personnel: true } } },
+        include: { building: true, _count: { select: { requests: true, tickets: true, personnel: true } } },
       });
       const linkedSite = site ? await enrichMosqueSitePersonnelNames(site) : null;
       return res.json(linkedSite ? [linkedSite] : []);
@@ -969,6 +1050,7 @@ router.post('/sites' , requireRoles('head', 'supervisor'), async (req, res, next
   try {
     const context = req.mosqueRole || await getModuleRole(req);
     const input = siteSchema.parse(req.body);
+    await assertMosqueBuildingLink(input);
     const site = await prisma.mosqueSite.create({
       data: {
         ...input,
@@ -987,6 +1069,7 @@ router.put('/sites/:id', requireRoles('head', 'supervisor'), async (req, res, ne
     if (!current) return res.status(404).json({ message: 'الموقع غير موجود' });
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, current.id, context);
     const input = siteSchema.parse(req.body);
+    await assertMosqueBuildingLink(input);
     const site = await prisma.mosqueSite.update({
       where: { id: req.params.id },
       data: {

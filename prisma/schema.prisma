@@ -649,12 +649,39 @@ model AssetExcelTemplate {
 // ============================================================
 // University Mosques & Prayer Rooms Care Unit
 // ============================================================
+model MosqueBuilding {
+  id                  String   @id @default(cuid())
+  buildingNumber      String   @unique
+  name                String?
+  campusLocation      String?
+  city                String?
+  district            String?
+  expectedUsers       Int?
+  coverageStatus      String   @default("unassessed")
+  creationFeasibility String   @default("under_study")
+  unavailableReason   String?
+  approvedAlternative String?
+  notes               String?
+  createdBy           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  sites MosqueSite[]
+
+  @@index([coverageStatus])
+  @@index([creationFeasibility])
+}
+
 model MosqueSite {
   id               String   @id @default(cuid())
   publicToken      String   @unique @default(uuid())
   name             String
   siteType         String   @default("mosque")
   prayerRoomGender String?
+  spatialRelation  String   @default("independent")
+  buildingId       String?
+  floor            String?
+  roomNumber       String?
   city             String?
   district         String?
   campusLocation   String?
@@ -688,12 +715,14 @@ model MosqueSite {
   quranRackInventories MosqueQuranRackInventory[]
   quranRackMovements   MosqueQuranRackMovement[]
   fieldVisits          MosqueFieldVisit[]
+  building             MosqueBuilding?            @relation(fields: [buildingId], references: [id], onDelete: SetNull)
 
   @@index([siteType])
   @@index([city])
   @@index([district])
   @@index([status])
   @@index([supervisorUserId])
+  @@index([buildingId])
 }
 
 model MosqueFieldTour {
