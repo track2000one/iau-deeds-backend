@@ -25,6 +25,8 @@ jobs:
       - name: Apply building registry and site linkage
         run: node scripts/apply-mosque-building-linkage.mjs
       - name: Validate Prisma schema and JavaScript
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/validation
         run: |
           npx prisma format
           npx prisma validate
