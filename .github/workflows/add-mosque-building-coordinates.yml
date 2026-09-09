@@ -1,0 +1,74 @@
+name: Add Mosque Building Coordinates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/add-mosque-building-coordinates.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Add building coordinate fields
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          schema_path = Path('prisma/schema.prisma')
+          schema = schema_path.read_text()
+          old = '''  city                String?\n  district            String?\n  expectedUsers       Int?\n'''
+          new = '''  city                String?\n  district            String?\n  latitude            Float?\n  longitude           Float?\n  expectedUsers       Int?\n'''
+          if 'model MosqueBuilding {' not in schema:
+              raise SystemExit('MosqueBuilding model not found')
+          if '  latitude            Float?\n  longitude           Float?\n  expectedUsers       Int?' not in schema:
+              if old not in schema:
+                  raise SystemExit('MosqueBuilding coordinate insertion marker not found')
+              schema = schema.replace(old, new, 1)
+          schema_path.write_text(schema)
+
+          routes_path = Path('src/routes/mosques.routes.js')
+          routes = routes_path.read_text()
+          old = '''  city: z.string().trim().optional().nullable(),\n  district: z.string().trim().optional().nullable(),\n  expectedUsers: z.coerce.number().int().nonnegative().optional().nullable(),\n'''
+          new = '''  city: z.string().trim().optional().nullable(),\n  district: z.string().trim().optional().nullable(),\n  latitude: z.coerce.number().min(-90).max(90).optional().nullable(),\n  longitude: z.coerce.number().min(-180).max(180).optional().nullable(),\n  expectedUsers: z.coerce.number().int().nonnegative().optional().nullable(),\n'''
+          marker = 'const buildingSchema = z.object({'
+          start = routes.find(marker)
+          if start < 0:
+              raise SystemExit('buildingSchema not found')
+          end = routes.find('});', start)
+          if end < 0:
+              raise SystemExit('buildingSchema end not found')
+          block = routes[start:end]
+          if 'latitude: z.coerce.number()' not in block:
+              local = block.replace(old, new, 1)
+              if local == block:
+                  raise SystemExit('buildingSchema coordinate insertion marker not found')
+              routes = routes[:start] + local + routes[end:]
+          routes_path.write_text(routes)
+          PY
+      - name: Validate backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/iau_validation
+        run: |
+          npx prisma validate
+          node --check src/routes/mosques.routes.js
+      - name: Commit implementation and cleanup
+        run: |
+          rm -f .github/workflows/add-mosque-building-coordinates.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add prisma/schema.prisma src/routes/mosques.routes.js .github/workflows/add-mosque-building-coordinates.yml
+          git commit -m 'Add coordinates to mosque building coverage registry'
+          git push origin main
