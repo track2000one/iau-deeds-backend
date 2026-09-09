@@ -1,0 +1,39 @@
+name: Apply Automatic Adhan Checklist Backend
+
+on:
+  push:
+    paths:
+      - 'scripts/apply-automatic-adhan-checklist-backend.mjs'
+      - '.github/workflows/apply-automatic-adhan-checklist-backend.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Apply automatic adhan checklist template
+        run: node scripts/apply-automatic-adhan-checklist-backend.mjs
+      - name: Verify backend syntax and Prisma
+        run: |
+          node --check src/routes/mosques.routes.js
+          npx prisma validate
+      - name: Commit implementation and cleanup
+        run: |
+          rm -f scripts/apply-automatic-adhan-checklist-backend.mjs
+          rm -f .github/workflows/apply-automatic-adhan-checklist-backend.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "Add automatic adhan field visit checklist template"
+          git push
