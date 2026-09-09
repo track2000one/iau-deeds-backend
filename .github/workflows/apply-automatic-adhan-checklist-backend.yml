@@ -24,6 +24,8 @@ jobs:
       - name: Apply automatic adhan checklist template
         run: node scripts/apply-automatic-adhan-checklist-backend.mjs
       - name: Verify backend syntax and Prisma
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/iau_verify
         run: |
           node --check src/routes/mosques.routes.js
           npx prisma validate
