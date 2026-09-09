@@ -656,6 +656,8 @@ model MosqueBuilding {
   campusLocation      String?
   city                String?
   district            String?
+  latitude            Float?
+  longitude           Float?
   expectedUsers       Int?
   coverageStatus      String   @default("unassessed")
   creationFeasibility String   @default("under_study")

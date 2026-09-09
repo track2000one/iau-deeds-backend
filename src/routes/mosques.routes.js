@@ -363,6 +363,8 @@ const buildingSchema = z.object({
   campusLocation: z.string().trim().optional().nullable(),
   city: z.string().trim().optional().nullable(),
   district: z.string().trim().optional().nullable(),
+  latitude: z.coerce.number().min(-90).max(90).optional().nullable(),
+  longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
   expectedUsers: z.coerce.number().int().nonnegative().optional().nullable(),
   coverageStatus: z.enum(['unassessed', 'covered', 'needs_prayer_room', 'under_feasibility_study', 'not_feasible_alternative', 'under_implementation']).default('unassessed'),
   creationFeasibility: z.enum(['available', 'unavailable', 'under_study']).default('under_study'),
