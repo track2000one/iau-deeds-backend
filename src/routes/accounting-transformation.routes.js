@@ -12,6 +12,12 @@ import {
   ensureAccountingTransformationBaseline,
   nextAccountingRecordNumber,
 } from '../services/accountingCycles.service.js';
+import {
+  buildEvidenceAuditMirrorRows,
+  hasProtectedEvidenceHistory,
+  preserveEvidenceControlForImport,
+  protectEvidenceAuditPayload,
+} from '../services/accountingEvidenceAudit.service.js';
 
 const router = Router();
 
@@ -57,6 +63,23 @@ const itemIsValid = (item) => {
   const payload = item.payload || {};
   if (item.recordType === 'fixed_asset') return ['Y','Z','AA','AB'].some((column) => hasAccountingValue(payload[column]));
   return hasAccountingValue(payload.B) || hasAccountingValue(payload.D) || hasAccountingValue(payload.E) || hasAccountingValue(payload.G);
+};
+
+const syncEvidenceAuditMirror = async (db, record) => {
+  const rows = buildEvidenceAuditMirrorRows(record, record?.payload || {});
+  if (!rows.length) return;
+  const ids = rows.map((item) => item.mirrorId);
+  const existing = await db.auditLog.findMany({
+    where: {
+      module: 'accounting_transformation',
+      entity: 'accounting_evidence_event',
+      entityId: { in: ids },
+    },
+    select: { entityId: true },
+  });
+  const existingIds = new Set(existing.map((item) => item.entityId));
+  const missing = rows.filter((item) => !existingIds.has(item.mirrorId)).map((item) => item.data);
+  if (missing.length) await db.auditLog.createMany({ data: missing });
 };
 
 const accountingGroupKey = (item) => {
@@ -187,7 +210,8 @@ router.post('/bulk-preview', async (req, res, next) => {
     const duplicateIndexes = [];
     input.items.forEach((item, index) => {
       if (!itemIsValid(item)) { invalidIndexes.push(index); return; }
-      const fingerprint = createAccountingFingerprint(item.recordType, item.payload || {});
+      const safePayload = preserveEvidenceControlForImport({}, item.payload || {});
+      const fingerprint = createAccountingFingerprint(item.recordType, safePayload);
       if (seen.has(fingerprint)) { duplicateIndexes.push(index); return; }
       seen.add(fingerprint);
       fingerprints.push({ index, fingerprint });
@@ -215,12 +239,14 @@ router.post('/bulk-import', async (req, res, next) => {
     let skipped = 0;
     for (const item of input.items) {
       if (!itemIsValid(item)) { skipped += 1; continue; }
-      const sourceFingerprint = createAccountingFingerprint(item.recordType, item.payload || {});
-      const stableKey = createAccountingStableKey(item.recordType, item.payload || {});
+      const safePayload = preserveEvidenceControlForImport({}, item.payload || {});
+      const safeItem = { ...item, payload: safePayload };
+      const sourceFingerprint = createAccountingFingerprint(item.recordType, safePayload);
+      const stableKey = createAccountingStableKey(item.recordType, safePayload);
       const existing = await prisma.accountingTransformationRecord.findFirst({ where: { cycleId: currentCycle.id, sourceFingerprint }, select: { id: true } });
       if (existing) { skipped += 1; continue; }
       rows.push({
-        ...buildAccountingSnapshotData(item, req.authUser, { cycleId: currentCycle.id, sourceFingerprint, stableKey, changeType: 'manual' }),
+        ...buildAccountingSnapshotData(safeItem, req.authUser, { cycleId: currentCycle.id, sourceFingerprint, stableKey, changeType: 'manual' }),
         recordNumber: `ACT-${year}-${String(baseSequence + rows.length).padStart(6, '0')}`,
         createdBy: req.authUser?.email || req.authUser?.username || null,
       });
@@ -281,17 +307,19 @@ router.get('/:id', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const input = recordInputSchema.parse(req.body);
-    if (!itemIsValid(input)) return res.status(400).json({ message: 'السجل لا يحتوي على هوية أو وصف أصل كافٍ.' });
+    const protectedAudit = protectEvidenceAuditPayload({}, input.payload || {}, req.authUser);
+    const safeInput = { ...input, payload: protectedAudit.payload };
+    if (!itemIsValid(safeInput)) return res.status(400).json({ message: 'السجل لا يحتوي على هوية أو وصف أصل كافٍ.' });
     const currentCycle = await ensureAccountingTransformationBaseline();
-    const sourceFingerprint = createAccountingFingerprint(input.recordType, input.payload || {});
-    const stableKey = createAccountingStableKey(input.recordType, input.payload || {});
+    const sourceFingerprint = createAccountingFingerprint(safeInput.recordType, safeInput.payload || {});
+    const stableKey = createAccountingStableKey(safeInput.recordType, safeInput.payload || {});
     let record = null;
     for (let attempt = 0; attempt < 5 && !record; attempt += 1) {
       const recordNumber = await nextAccountingRecordNumber(attempt);
       try {
         record = await prisma.accountingTransformationRecord.create({
           data: {
-            ...buildAccountingSnapshotData(input, req.authUser, { cycleId: currentCycle.id, sourceFingerprint, stableKey, changeType: 'manual' }),
+            ...buildAccountingSnapshotData(safeInput, req.authUser, { cycleId: currentCycle.id, sourceFingerprint, stableKey, changeType: 'manual' }),
             recordNumber,
             createdBy: req.authUser?.email || req.authUser?.username || null,
           },
@@ -301,6 +329,7 @@ router.post('/', async (req, res, next) => {
       }
     }
     if (!record) return res.status(409).json({ message: 'تعذر إنشاء رقم سجل فريد، حاول مرة أخرى' });
+    await syncEvidenceAuditMirror(prisma, record);
     res.status(201).json(record);
   } catch (error) { next(error); }
 });
@@ -308,15 +337,34 @@ router.post('/', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   try {
     const input = recordInputSchema.parse(req.body);
-    if (!itemIsValid(input)) return res.status(400).json({ message: 'السجل لا يحتوي على هوية أو وصف أصل كافٍ.' });
-    const current = await prisma.accountingTransformationRecord.findUnique({ where: { id: req.params.id }, include: { cycle: true } });
-    if (!current) return res.status(404).json({ message: 'سجل التحول المحاسبي غير موجود' });
-    if (current.cycle && current.cycle.status === 'archived') return res.status(409).json({ message: 'الدورات المؤرشفة للعرض التاريخي فقط ولا يمكن تعديل بياناتها' });
-    const sourceFingerprint = createAccountingFingerprint(input.recordType, input.payload || {});
-    const stableKey = createAccountingStableKey(input.recordType, input.payload || {});
-    const record = await prisma.accountingTransformationRecord.update({
-      where: { id: req.params.id },
-      data: buildAccountingSnapshotData(input, req.authUser, { cycleId: current.cycleId, sourceFingerprint, stableKey, changeType: current.changeType || 'manual' }),
+    const record = await prisma.$transaction(async (tx) => {
+      const current = await tx.accountingTransformationRecord.findUnique({ where: { id: req.params.id }, include: { cycle: true } });
+      if (!current) {
+        const error = new Error('سجل التحول المحاسبي غير موجود');
+        error.statusCode = 404;
+        throw error;
+      }
+      if (current.cycle && current.cycle.status === 'archived') {
+        const error = new Error('الدورات المؤرشفة للعرض التاريخي فقط ولا يمكن تعديل بياناتها');
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const protectedAudit = protectEvidenceAuditPayload(current.payload || {}, input.payload || {}, req.authUser);
+      const safeInput = { ...input, payload: protectedAudit.payload };
+      if (!itemIsValid(safeInput)) {
+        const error = new Error('السجل لا يحتوي على هوية أو وصف أصل كافٍ.');
+        error.statusCode = 400;
+        throw error;
+      }
+      const sourceFingerprint = createAccountingFingerprint(safeInput.recordType, safeInput.payload || {});
+      const stableKey = createAccountingStableKey(safeInput.recordType, safeInput.payload || {});
+      const updated = await tx.accountingTransformationRecord.update({
+        where: { id: req.params.id },
+        data: buildAccountingSnapshotData(safeInput, req.authUser, { cycleId: current.cycleId, sourceFingerprint, stableKey, changeType: current.changeType || 'manual' }),
+      });
+      await syncEvidenceAuditMirror(tx, updated);
+      return updated;
     });
     res.json(record);
   } catch (error) { next(error); }
@@ -327,6 +375,7 @@ router.delete('/:id', async (req, res, next) => {
     const current = await prisma.accountingTransformationRecord.findUnique({ where: { id: req.params.id }, include: { cycle: true } });
     if (!current) return res.status(404).json({ message: 'سجل التحول المحاسبي غير موجود' });
     if (current.cycle && current.cycle.status === 'archived') return res.status(409).json({ message: 'الدورات المؤرشفة محفوظة كسجل تاريخي ولا يمكن حذف بياناتها' });
+    if (hasProtectedEvidenceHistory(current.payload || {})) return res.status(409).json({ message: 'لا يمكن حذف سجل يحتوي على أحداث رقابية لمستندات الإثبات. احتفظ بالسجل ضمن دورة البيانات أو أرشفه بدل الحذف.' });
     await prisma.accountingTransformationRecord.delete({ where: { id: req.params.id } });
     res.status(204).send();
   } catch (error) {
