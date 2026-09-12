@@ -10,6 +10,7 @@ import {
   nextAccountingRecordNumber,
 } from '../services/accountingCycles.service.js';
 import { hasAccountingValue } from '../config/accountingTransformation.js';
+import { preserveEvidenceControlForImport } from '../services/accountingEvidenceAudit.service.js';
 
 const router = Router();
 
@@ -150,15 +151,17 @@ router.post('/:id/import-preview', async (req, res, next) => {
       fileKeys.add(matchKey);
 
       const previous = baseByKey.get(matchKey);
+      const target = targetByKey.get(matchKey);
       const canMerge = previous && previous.recordType === item.recordType;
-      const mergedPayload = canMerge ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
+      const accountingPayload = canMerge ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
+      const auditSourcePayload = target?.payload || previous?.payload || {};
+      const mergedPayload = preserveEvidenceControlForImport(auditSourcePayload, accountingPayload);
       const { fingerprint, changeType } = classifyAgainstBase(item, previous, mergedPayload);
 
       if (changeType === 'new') newIndexes.push(index);
       else if (changeType === 'modified') modifiedIndexes.push(index);
       else unchangedIndexes.push(index);
 
-      const target = targetByKey.get(matchKey);
       if (!target) {
         freshIndexes.push(index);
         return;
@@ -233,10 +236,12 @@ router.post('/:id/import', async (req, res, next) => {
       seen.add(matchKey);
 
       const previous = baseByKey.get(matchKey);
-      const canMerge = previous && previous.recordType === item.recordType;
-      const mergedPayload = canMerge ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
-      const { fingerprint: sourceFingerprint, changeType } = classifyAgainstBase(item, previous, mergedPayload);
       const target = targetByKey.get(matchKey);
+      const canMerge = previous && previous.recordType === item.recordType;
+      const accountingPayload = canMerge ? mergeAccountingPayload(previous.payload || {}, item.payload || {}) : (item.payload || {});
+      const auditSourcePayload = target?.payload || previous?.payload || {};
+      const mergedPayload = preserveEvidenceControlForImport(auditSourcePayload, accountingPayload);
+      const { fingerprint: sourceFingerprint, changeType } = classifyAgainstBase(item, previous, mergedPayload);
 
       if (target && target.recordType === item.recordType && target.sourceFingerprint === sourceFingerprint) {
         skipped += 1;

@@ -54,8 +54,12 @@ export const accountingCoreFromPayload = (recordType, payload = {}) => {
   };
 };
 
-const fingerprintPayload = (recordType, payload = {}) =>
-  recordType === 'fixed_asset' ? calculateModelBDerivedPayload(payload) : payload;
+const fingerprintPayload = (recordType, payload = {}) => {
+  const source = recordType === 'fixed_asset' ? calculateModelBDerivedPayload(payload) : payload;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return source;
+  const { __propertyControlAnalysis: _protectedAudit, ...accountingPayload } = source;
+  return accountingPayload;
+};
 
 export const createAccountingFingerprint = (recordType, payload = {}) =>
   crypto

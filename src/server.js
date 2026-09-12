@@ -5,6 +5,8 @@ import { ensureAccountingTransformationBaseline } from './services/accountingCyc
 import { ensureOrganizationStorage } from './services/organization.service.js';
 import { ensureOfficialMosqueSites } from './services/mosqueSites.service.js';
 import { archiveOrphanedMosqueLeaves } from './services/mosqueLeaveLifecycle.service.js';
+import { backfillEvidenceAuditMirror } from './services/accountingEvidenceAudit.service.js';
+import { prisma } from './prisma.js';
 
 const port = Number(process.env.PORT || 8080);
 
@@ -14,6 +16,14 @@ const startServer = async () => {
   await ensureOfficialMosqueSites();
   await archiveOrphanedMosqueLeaves();
   await ensureAccountingTransformationBaseline();
+  try {
+    const auditBackfill = await backfillEvidenceAuditMirror(prisma);
+    if (auditBackfill.mirrored > 0) {
+      console.log(`Mirrored ${auditBackfill.mirrored} protected accounting evidence audit events.`);
+    }
+  } catch (error) {
+    console.error('Unable to backfill protected accounting evidence audit events:', error);
+  }
 
   app.listen(port, () => {
     console.log(`IAU Deeds and Lands API is running on port ${port}`);
