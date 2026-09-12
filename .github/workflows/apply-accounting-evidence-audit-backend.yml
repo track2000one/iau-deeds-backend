@@ -1,0 +1,54 @@
+name: Apply Accounting Evidence Audit Backend
+
+on:
+  push:
+    branches: [feat/accounting-evidence-audit-backend]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: accounting-evidence-audit-backend-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/accounting-evidence-audit-backend
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Apply server-side audit protection
+        run: python3 scripts/apply-accounting-evidence-audit-backend.py
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Verify audit guard behavior
+        run: node scripts/verify-accounting-evidence-audit-guard.mjs
+      - name: Verify JavaScript syntax
+        run: |
+          node --check src/services/accountingEvidenceAudit.service.js
+          node --check src/services/accountingCycles.service.js
+          node --check src/routes/accounting-transformation.routes.js
+          node --check src/routes/accounting-cycle-reimport.routes.js
+      - name: Remove temporary automation files
+        run: |
+          rm -f scripts/apply-accounting-evidence-audit-backend.py
+          rm -f .github/workflows/apply-accounting-evidence-audit-backend.yml
+      - name: Commit integration changes
+        run: |
+          git config user.name "track2000one"
+          git config user.email "track2000one@gmail.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No generated changes to commit"
+          else
+            git commit -m "حماية سجل مستندات الإثبات على مستوى الخادم"
+            git push origin HEAD:feat/accounting-evidence-audit-backend
+          fi
