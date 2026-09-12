@@ -273,3 +273,56 @@ export const buildEvidenceAuditMirrorRows = (record, payload = {}) =>
       },
     },
   }));
+
+
+/**
+ * Backfills the append-only AuditLog mirror for histories that existed before
+ * server-side enforcement was deployed. It is idempotent at application level:
+ * mirror IDs are checked before insert and no existing audit row is updated.
+ */
+export const backfillEvidenceAuditMirror = async (db, options = {}) => {
+  const batchSize = Math.min(1000, Math.max(50, Number(options.batchSize) || 250));
+  let cursor = null;
+  let scanned = 0;
+  let mirrored = 0;
+
+  for (;;) {
+    const records = await db.accountingTransformationRecord.findMany({
+      orderBy: { id: 'asc' },
+      take: batchSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      select: { id: true, recordNumber: true, payload: true },
+    });
+    if (!records.length) break;
+    scanned += records.length;
+    cursor = records[records.length - 1].id;
+
+    const rows = records.flatMap((record) => buildEvidenceAuditMirrorRows(record, record.payload || {}));
+    if (!rows.length) continue;
+
+    const existingIds = new Set();
+    for (let index = 0; index < rows.length; index += 500) {
+      const ids = rows.slice(index, index + 500).map((item) => item.mirrorId);
+      const existing = await db.auditLog.findMany({
+        where: {
+          module: 'accounting_transformation',
+          entity: 'accounting_evidence_event',
+          entityId: { in: ids },
+        },
+        select: { entityId: true },
+      });
+      existing.forEach((item) => existingIds.add(item.entityId));
+    }
+
+    const missing = rows.filter((item) => !existingIds.has(item.mirrorId)).map((item) => item.data);
+    for (let index = 0; index < missing.length; index += 500) {
+      const chunk = missing.slice(index, index + 500);
+      if (chunk.length) {
+        const result = await db.auditLog.createMany({ data: chunk });
+        mirrored += Number(result?.count || chunk.length);
+      }
+    }
+  }
+
+  return { scanned, mirrored };
+};
