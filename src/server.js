@@ -17,15 +17,15 @@ const startServer = async () => {
   await ensureOfficialMosqueSites();
   await archiveOrphanedMosqueLeaves();
 
-  try {
-    const stage6 = await applyAccountingStage6Baseline();
-    if (stage6.state === 'applied') {
-      console.log(`Applied accounting Stage 6 baseline with ${stage6.currentRecords} records.`);
-    } else {
-      console.log(`Accounting Stage 6 baseline state: ${stage6.state}.`);
-    }
-  } catch (error) {
-    console.error('Unable to apply accounting Stage 6 baseline:', error);
+  // The reviewed Stage 6 workbook is the requested accounting baseline. In
+  // production we fail closed: if Google Sheets cannot be read or the verified
+  // 16 land / 625 building / 11 deed-bearing-land counts do not match, the new
+  // deployment must not start with stale accounting-transformation data.
+  const stage6 = await applyAccountingStage6Baseline();
+  if (stage6.state === 'applied') {
+    console.log(`Applied accounting Stage 6 baseline with ${stage6.currentRecords} records.`);
+  } else {
+    console.log(`Accounting Stage 6 baseline state: ${stage6.state}.`);
   }
 
   await ensureAccountingTransformationBaseline();
