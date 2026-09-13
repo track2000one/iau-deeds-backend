@@ -34,8 +34,8 @@ router.get('/evidence-audit-log', async (req, res, next) => {
       { action: 'evidence_history_append' },
     ];
 
-    if (query.recordId) clauses.push({ entityId: { startsWith: `${query.recordId}:` } });
-    if (query.eventId) clauses.push({ entityId: { endsWith: `:${query.eventId}` } });
+    if (query.recordId) clauses.push({ entityId: { startsWith: \`\${query.recordId}:\` } });
+    if (query.eventId) clauses.push({ entityId: { endsWith: \`:\${query.eventId}\` } });
     if (query.search) {
       clauses.push({ OR: [
         { entityLabel: { contains: query.search, mode: 'insensitive' } },
@@ -48,11 +48,11 @@ router.get('/evidence-audit-log', async (req, res, next) => {
     if (query.from || query.to) {
       const createdAt = {};
       if (query.from) {
-        const from = new Date(`${query.from}T00:00:00.000Z`);
+        const from = new Date(\`\${query.from}T00:00:00.000Z\`);
         if (!Number.isNaN(from.getTime())) createdAt.gte = from;
       }
       if (query.to) {
-        const to = new Date(`${query.to}T23:59:59.999Z`);
+        const to = new Date(\`\${query.to}T23:59:59.999Z\`);
         if (!Number.isNaN(to.getTime())) createdAt.lte = to;
       }
       if (Object.keys(createdAt).length) clauses.push({ createdAt });
