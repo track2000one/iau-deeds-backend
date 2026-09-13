@@ -129,6 +129,8 @@ const queryWhere = (req) => {
     { accountingAssetCode: { contains: search, mode: 'insensitive' } },
     { city: { contains: search, mode: 'insensitive' } },
     { region: { contains: search, mode: 'insensitive' } },
+    { payload: { path: ['AJ'], string_contains: search } },
+    { payload: { path: ['AG'], string_contains: search } },
   ] } : {};
   const clauses = [groupWhere, searchWhere].filter((part) => Object.keys(part).length);
   return { ...baseFilters, ...(clauses.length > 1 ? { AND: clauses } : clauses[0] || {}) };

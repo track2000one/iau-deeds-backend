@@ -51,6 +51,7 @@ const strongIdentity = (record) => {
     return hasValue(payload.Y) || hasValue(payload.Z) || hasValue(payload.AB)
       || hasValue(record.mofAssetNumber) || hasValue(record.entityAssetNumber);
   }
+  if (record.recordType === 'land' && hasValue(payload.AJ) && hasValue(payload.AG)) return true;
   return hasValue(payload.D) || hasValue(payload.E)
     || hasValue(record.mofAssetNumber) || hasValue(record.entityAssetNumber);
 };
