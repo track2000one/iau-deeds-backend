@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { app } from './app.js';
 import { ensureBootstrapAdmin } from './bootstrapAdmin.js';
 import { ensureAccountingTransformationBaseline } from './services/accountingCycles.service.js';
+import { applyAccountingStage6Baseline } from './services/accountingStage6Baseline.service.js';
 import { ensureOrganizationStorage } from './services/organization.service.js';
 import { ensureOfficialMosqueSites } from './services/mosqueSites.service.js';
 import { archiveOrphanedMosqueLeaves } from './services/mosqueLeaveLifecycle.service.js';
@@ -15,6 +16,18 @@ const startServer = async () => {
   await ensureOrganizationStorage();
   await ensureOfficialMosqueSites();
   await archiveOrphanedMosqueLeaves();
+
+  try {
+    const stage6 = await applyAccountingStage6Baseline();
+    if (stage6.state === 'applied') {
+      console.log(`Applied accounting Stage 6 baseline with ${stage6.currentRecords} records.`);
+    } else {
+      console.log(`Accounting Stage 6 baseline state: ${stage6.state}.`);
+    }
+  } catch (error) {
+    console.error('Unable to apply accounting Stage 6 baseline:', error);
+  }
+
   await ensureAccountingTransformationBaseline();
   try {
     const auditBackfill = await backfillEvidenceAuditMirror(prisma);
