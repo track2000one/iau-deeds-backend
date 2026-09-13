@@ -1,4 +1,8 @@
 import { Router } from 'express';
+import {
+  ACCOUNTING_STAGE6_SOURCE,
+  getAccountingStage6RuntimeStatus,
+} from '../services/accountingStage6Baseline.service.js';
 
 const router = Router();
 const startedAt = new Date().toISOString();
@@ -7,6 +11,7 @@ export const HEALTH_CAPABILITIES = [
   'accounting_evidence_audit_mirror_v1',
   'accounting_evidence_audit_reconciliation_v1',
   'accounting_evidence_audit_backfill_missing_only_v1',
+  'accounting_stage6_baseline_v1',
 ];
 
 export const getHealthPayload = () => ({
@@ -26,6 +31,14 @@ export const getHealthPayload = () => ({
     serviceName: process.env.RAILWAY_SERVICE_NAME || null,
   },
   capabilities: HEALTH_CAPABILITIES,
+  accountingStage6Baseline: {
+    source: {
+      snapshotId: ACCOUNTING_STAGE6_SOURCE.snapshotId,
+      originalFileSha256: ACCOUNTING_STAGE6_SOURCE.originalFileSha256,
+      expected: ACCOUNTING_STAGE6_SOURCE.expected,
+    },
+    runtime: getAccountingStage6RuntimeStatus(),
+  },
 });
 
 router.get('/', (_req, res) => {
