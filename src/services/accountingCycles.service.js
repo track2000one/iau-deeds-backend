@@ -37,6 +37,37 @@ const normalizeIdentityPart = (value) => {
   return normalized && !UNAVAILABLE_IDENTITY_VALUES.has(normalized) ? normalized : '';
 };
 
+export const LAND_DEED_NUMBER_COLUMN = 'AJ';
+export const LAND_DEED_DATE_COLUMN = 'AG';
+
+const normalizeArabicDigits = (value) => String(value ?? '')
+  .replace(/[٠-٩]/g, (digit) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+  .replace(/[۰-۹]/g, (digit) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)));
+
+const normalizeLandDeedDate = (value) => {
+  const raw = normalizeArabicDigits(normalizeAccountingText(value));
+  if (!raw) return '';
+  const parts = raw.replace(/[.\-]/g, '/').split('/').map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 3 && parts.every((part) => /^\d+$/.test(part))) {
+    return parts.map((part) => String(Number(part))).join('-');
+  }
+  return normalizeIdentityPart(raw);
+};
+
+export const getAccountingLandDeedIdentity = (payload = {}) => {
+  const rawDeedNumber = normalizeArabicDigits(normalizeAccountingText(payload?.[LAND_DEED_NUMBER_COLUMN]));
+  const rawDeedDate = normalizeArabicDigits(normalizeAccountingText(payload?.[LAND_DEED_DATE_COLUMN]));
+  const deedNumber = normalizeIdentityPart(rawDeedNumber);
+  const deedDate = normalizeLandDeedDate(rawDeedDate);
+  return {
+    deedNumber,
+    deedDate,
+    complete: Boolean(deedNumber && deedDate),
+    rawDeedNumber: rawDeedNumber || null,
+    rawDeedDate: rawDeedDate || null,
+  };
+};
+
 export const accountingCoreFromPayload = (recordType, payload = {}) => {
   const map = ACCOUNTING_CORE_COLUMNS[recordType] || ACCOUNTING_CORE_COLUMNS.land;
   return {
@@ -80,6 +111,14 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
   const entityCode = normalizeKeyPart(core.entityCode);
   const entityAsset = normalizeIdentityPart(core.entityAssetNumber);
   const mof = normalizeIdentityPart(core.mofAssetNumber);
+
+  // Land identity is governed by the deed itself. AJ = deed number and AG = deed date.
+  // This must be evaluated before legacy MOF/entity numbers so distinct deeds cannot
+  // collapse into one accounting row merely because another administrative number repeats.
+  if (recordType === 'land') {
+    const deed = getAccountingLandDeedIdentity(payload);
+    if (deed.complete) return `land:deed:${deed.deedNumber}:${deed.deedDate}`;
+  }
 
   if (recordType === 'fixed_asset') {
     if (mof) return `asset:mof:${mof}`;
@@ -144,6 +183,11 @@ export const createAccountingStableKey = (recordType, payload = {}, coreInput = 
   return `${type}:fallback:${crypto.createHash('sha256').update(fallback || JSON.stringify(payload)).digest('hex').slice(0, 32)}`;
 };
 
+export const getAccountingRecordMatchKey = (record = {}) => {
+  const generated = createAccountingStableKey(record.recordType, record.payload || {});
+  return canonicalizeAccountingStableKey(generated || record.stableKey);
+};
+
 export const buildAccountingSnapshotData = (input, authUser, extra = {}) => {
   const sourcePayload = input.payload || {};
   const modelBValidation = input.recordType === 'fixed_asset' ? validateModelBPayload(sourcePayload) : null;
@@ -172,6 +216,26 @@ export const buildAccountingSnapshotData = (input, authUser, extra = {}) => {
     stableKey,
     ...extra,
   };
+};
+
+export const synchronizeAccountingLandStableKeys = async (client = prisma) => {
+  const records = await client.accountingTransformationRecord.findMany({
+    where: { recordType: 'land' },
+    select: { id: true, stableKey: true, payload: true },
+  });
+  let updated = 0;
+  for (const record of records) {
+    const deed = getAccountingLandDeedIdentity(record.payload || {});
+    if (!deed.complete) continue;
+    const expected = createAccountingStableKey('land', record.payload || {});
+    if (!expected || expected === record.stableKey) continue;
+    await client.accountingTransformationRecord.update({
+      where: { id: record.id },
+      data: { stableKey: expected },
+    });
+    updated += 1;
+  }
+  return updated;
 };
 
 export const getCurrentAccountingCycle = () =>
@@ -253,6 +317,11 @@ export const ensureAccountingTransformationBaseline = async () => {
     });
   }
 
+  // Re-key deed-bearing land records on startup without deleting or recreating rows.
+  // This keeps existing record IDs, attachments and audit history intact while making
+  // AJ + AG the authoritative matching identity for all current and historical cycles.
+  await synchronizeAccountingLandStableKeys(prisma);
+
   return current;
 };
 
@@ -271,7 +340,7 @@ export const getAccountingCycleComparison = async (cycle) => {
     prisma.accountingTransformationRecord.findMany({
       where: { cycleId: cycle.id },
       select: {
-        id: true, stableKey: true, changeType: true, recordNumber: true, recordType: true,
+        id: true, stableKey: true, changeType: true, recordNumber: true, recordType: true, payload: true,
         entityName: true, entityAssetNumber: true, assetDescription: true,
       },
     }),
@@ -279,16 +348,16 @@ export const getAccountingCycleComparison = async (cycle) => {
       ? prisma.accountingTransformationRecord.findMany({
           where: { cycleId: cycle.basedOnCycleId },
           select: {
-            id: true, stableKey: true, recordNumber: true, recordType: true,
+            id: true, stableKey: true, recordNumber: true, recordType: true, payload: true,
             entityName: true, entityAssetNumber: true, assetDescription: true,
           },
         })
       : Promise.resolve([]),
   ]);
 
-  const targetKeys = new Set(targetRecords.map((item) => canonicalizeAccountingStableKey(item.stableKey)).filter(Boolean));
+  const targetKeys = new Set(targetRecords.map((item) => getAccountingRecordMatchKey(item)).filter(Boolean));
   const removedRecords = baseRecords.filter((item) => {
-    const key = canonicalizeAccountingStableKey(item.stableKey);
+    const key = getAccountingRecordMatchKey(item);
     return key && !targetKeys.has(key);
   });
   const countByType = targetRecords.reduce((acc, item) => {
