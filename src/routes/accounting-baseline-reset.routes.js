@@ -19,6 +19,7 @@ import {
 const router = Router();
 
 const CONFIRMATION_PHRASE = 'إعادة تأسيس بيانات اللجنة';
+const ZERO_CONFIRMATION_PHRASE = 'تصفير سجل الأصول ومتطلبات التحول';
 const CURRENT_YEAR = new Date().getFullYear();
 const DEFAULT_BASELINE_NAME = `البيانات الأساسية المعتمدة ${CURRENT_YEAR}`;
 
@@ -47,6 +48,15 @@ const resetSchema = previewSchema.extend({
     cycleTemplateSnapshots: z.number().int().nonnegative(),
   }),
   expectedDatasetFingerprint: z.string().trim().min(32).max(128),
+});
+
+const zeroResetSchema = z.object({
+  confirmation: z.string().trim(),
+  expectedImpact: z.object({
+    cycles: z.number().int().nonnegative(),
+    records: z.number().int().nonnegative(),
+    cycleTemplateSnapshots: z.number().int().nonnegative(),
+  }),
 });
 
 const userLabel = (req) => req.authUser?.email || req.authUser?.username || null;
@@ -162,6 +172,93 @@ const impactMatches = (expected, actual) =>
   Number(expected.cycles) === Number(actual.cycles)
   && Number(expected.records) === Number(actual.records)
   && Number(expected.cycleTemplateSnapshots) === Number(actual.cycleTemplateSnapshots);
+
+router.post('/reset-empty/preview', async (req, res, next) => {
+  try {
+    if (req.authUser?.role !== 'admin') {
+      return res.status(403).json({ message: 'معاينة تصفير سجل الأصول ومتطلبات التحول متاحة لمسؤول النظام فقط.' });
+    }
+    const impact = await getImpact();
+    return res.json({
+      confirmationPhrase: ZERO_CONFIRMATION_PHRASE,
+      impact,
+      resultAfterReset: { cycles: 0, records: 0, cycleTemplateSnapshots: 0 },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reset-empty', async (req, res, next) => {
+  try {
+    if (req.authUser?.role !== 'admin') {
+      return res.status(403).json({ message: 'تصفير سجل الأصول ومتطلبات التحول متاح لمسؤول النظام فقط.' });
+    }
+
+    const input = zeroResetSchema.parse(req.body);
+    if (input.confirmation !== ZERO_CONFIRMATION_PHRASE) {
+      return res.status(400).json({ message: `اكتب عبارة التأكيد حرفيًا: ${ZERO_CONFIRMATION_PHRASE}` });
+    }
+
+    const ipAddress = getClientIp(req);
+    const userAgent = req.headers['user-agent'] || null;
+    const transactionResult = await prisma.$transaction(async (tx) => {
+      const liveImpact = await getImpact(tx);
+      if (!impactMatches(input.expectedImpact, liveImpact.destructive)) {
+        const staleError = new Error('STALE_ZERO_IMPACT');
+        staleError.code = 'STALE_ZERO_IMPACT';
+        staleError.liveImpact = liveImpact;
+        throw staleError;
+      }
+
+      await tx.accountingCycleTemplateSnapshot.deleteMany({});
+      await tx.accountingTransformationRecord.deleteMany({});
+      await tx.accountingTransformationCycle.deleteMany({});
+
+      await tx.auditLog.create({
+        data: {
+          userId: req.authUser?.id || null,
+          username: req.authUser?.username || null,
+          userEmail: req.authUser?.email || null,
+          userRole: req.authUser?.role || null,
+          action: 'zero_accounting_transformation_records',
+          module: 'accounting_transformation',
+          entity: 'accounting_transformation',
+          entityId: 'accounting-transformation-zero',
+          entityLabel: 'سجل الأصول ومتطلبات التحول',
+          status: 'success',
+          description: `تصفير سجل الأصول ومتطلبات التحول: حذف ${liveImpact.destructive.records} سجل و${liveImpact.destructive.cycles} دورة و${liveImpact.destructive.cycleTemplateSnapshots} لقطة دورة، مع الإبقاء على المستخدمين والصلاحيات وسجل التدقيق والنماذج الرسمية.`,
+          previousData: liveImpact,
+          newData: {
+            cycles: 0,
+            records: 0,
+            cycleTemplateSnapshots: 0,
+            preserved: liveImpact.preserved,
+          },
+          ipAddress,
+          userAgent,
+        },
+      });
+
+      return liveImpact;
+    }, { timeout: 120000, isolationLevel: 'Serializable' });
+
+    return res.json({
+      message: 'تم تصفير سجل الأصول ومتطلبات التحول بنجاح. السجل الآن فارغ وجاهز لإدخال بيانات جديدة.',
+      deleted: transactionResult.destructive,
+      preserved: transactionResult.preserved,
+      remaining: { cycles: 0, records: 0, cycleTemplateSnapshots: 0 },
+    });
+  } catch (error) {
+    if (error?.code === 'STALE_ZERO_IMPACT' || error?.message === 'STALE_ZERO_IMPACT') {
+      return res.status(409).json({
+        message: 'تغيرت بيانات السجل منذ آخر معاينة. لم يتم حذف أي شيء. أعد المعاينة ثم حاول مرة أخرى.',
+        impact: error.liveImpact || null,
+      });
+    }
+    next(error);
+  }
+});
 
 router.post('/reset-baseline/preview', async (req, res, next) => {
   try {
