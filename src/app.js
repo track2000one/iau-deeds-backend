@@ -29,6 +29,7 @@ import accountingTemplateVersionsRoutes from './routes/accounting-template-versi
 import accountingAssetClassificationRoutes from './routes/accounting-asset-classification.routes.js';
 import accountingHierarchyRoutes from './routes/accounting-hierarchy.routes.js';
 import accountingBaselineResetRoutes from './routes/accounting-baseline-reset.routes.js';
+import accountingEvidenceAuditAdminRoutes from './routes/accounting-evidence-audit-admin.routes.js';
 import {
   requireAdmin,
   requireAuth,
@@ -223,6 +224,16 @@ app.use(
   auditTrail('accounting_transformation'),
   requirePermission('accounting_transformation'),
   accountingHierarchyRoutes
+);
+
+// Administrative accounting tools live under /admin and require administrator role.
+app.use(
+  '/api/accounting-transformation/admin',
+  requireAuth,
+  requireAdmin,
+  auditTrail('accounting_transformation'),
+  requirePermission('accounting_transformation'),
+  accountingEvidenceAuditAdminRoutes
 );
 
 // Destructive baseline reset is isolated under /admin and also checks role=admin
