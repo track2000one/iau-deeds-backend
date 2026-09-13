@@ -263,6 +263,19 @@ export const ensureAccountingTransformationBaseline = async () => {
   }
 
   if (!current && cycleCount === 0) {
+    const explicitZero = await prisma.auditLog.findFirst({
+      where: {
+        module: 'accounting_transformation',
+        action: 'zero_accounting_transformation_records',
+        status: 'success',
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    // A deliberate administrator reset must survive service restarts. New installs
+    // still receive the historical bootstrap cycle because no zero-reset marker exists.
+    if (explicitZero) return null;
+
     current = await prisma.accountingTransformationCycle.create({
       data: {
         cycleNumber: 1,
