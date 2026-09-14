@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import { google } from 'googleapis';
 import XLSX from 'xlsx';
 import { prisma } from '../prisma.js';
 import {
@@ -34,18 +33,6 @@ let runtimeStatus = {
   appliedAt: null,
   currentRecords: null,
   message: 'بانتظار مزامنة ملف المرحلة السادسة.',
-};
-
-const getOAuthClient = () => {
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
-  const refreshToken = process.env.GOOGLE_OAUTH_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) {
-    throw new Error('Google OAuth credentials are incomplete; cannot read the Stage 6 spreadsheet.');
-  }
-  const client = new google.auth.OAuth2(clientId, clientSecret);
-  client.setCredentials({ refresh_token: refreshToken });
-  return client;
 };
 
 const columnName = (index) => {
@@ -122,12 +109,16 @@ export const validateStage6Items = (items = []) => {
 };
 
 const readStage6Spreadsheet = async () => {
-  const drive = google.drive({ version: 'v3', auth: getOAuthClient() });
-  const response = await drive.files.get(
-    { fileId: ACCOUNTING_STAGE6_SOURCE.rawDriveFileId, alt: 'media' },
-    { responseType: 'arraybuffer' },
-  );
-  const buffer = Buffer.from(response.data);
+  // The reviewed workbook lives in the same Drive folder used by the platform and
+  // is shared read-only. Read the exact XLSX bytes through the public media endpoint
+  // rather than depending on an OAuth token whose drive.file scope may not include
+  // files created outside that OAuth grant. Integrity is still enforced by SHA-256.
+  const publicUrl = `https://drive.usercontent.google.com/download?id=${encodeURIComponent(ACCOUNTING_STAGE6_SOURCE.rawDriveFileId)}&export=download&confirm=t`;
+  const response = await fetch(publicUrl, { redirect: 'follow' });
+  if (!response.ok) {
+    throw new Error(`Unable to download reviewed Stage 6 workbook (HTTP ${response.status}). No accounting data was replaced.`);
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
   if (sha256 !== ACCOUNTING_STAGE6_SOURCE.originalFileSha256) {
     throw new Error(`Stage 6 source hash mismatch. Expected ${ACCOUNTING_STAGE6_SOURCE.originalFileSha256}, received ${sha256}. No accounting data was replaced.`);
