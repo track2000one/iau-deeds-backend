@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import { google } from 'googleapis';
+import XLSX from 'xlsx';
 import { prisma } from '../prisma.js';
 import {
   buildAccountingSnapshotData,
@@ -120,20 +122,39 @@ export const validateStage6Items = (items = []) => {
 };
 
 const readStage6Spreadsheet = async () => {
-  const sheets = google.sheets({ version: 'v4', auth: getOAuthClient() });
-  const response = await sheets.spreadsheets.values.batchGet({
-    spreadsheetId: ACCOUNTING_STAGE6_SOURCE.spreadsheetId,
-    ranges: [ACCOUNTING_STAGE6_SOURCE.landRange, ACCOUNTING_STAGE6_SOURCE.buildingRange],
-    valueRenderOption: 'FORMATTED_VALUE',
-    dateTimeRenderOption: 'FORMATTED_STRING',
+  const drive = google.drive({ version: 'v3', auth: getOAuthClient() });
+  const response = await drive.files.get(
+    { fileId: ACCOUNTING_STAGE6_SOURCE.rawDriveFileId, alt: 'media' },
+    { responseType: 'arraybuffer' },
+  );
+  const buffer = Buffer.from(response.data);
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  if (sha256 !== ACCOUNTING_STAGE6_SOURCE.originalFileSha256) {
+    throw new Error(`Stage 6 source hash mismatch. Expected ${ACCOUNTING_STAGE6_SOURCE.originalFileSha256}, received ${sha256}. No accounting data was replaced.`);
+  }
+
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false, raw: false });
+  const landSheet = workbook.Sheets[ACCOUNTING_STAGE6_SOURCE.landSheet];
+  const buildingSheet = workbook.Sheets[ACCOUNTING_STAGE6_SOURCE.buildingSheet];
+  if (!landSheet || !buildingSheet) {
+    throw new Error('Stage 6 workbook is missing one or both required baseline sheets. No accounting data was replaced.');
+  }
+
+  const landValues = XLSX.utils.sheet_to_json(landSheet, {
+    header: 1,
+    range: 'A8:BQ23',
+    defval: '',
+    raw: false,
   });
-  const [landRange, buildingRange] = response.data.valueRanges || [];
-  const items = stage6MatricesToItems({
-    landValues: landRange?.values || [],
-    buildingValues: buildingRange?.values || [],
+  const buildingValues = XLSX.utils.sheet_to_json(buildingSheet, {
+    header: 1,
+    range: 'A8:CM632',
+    defval: '',
+    raw: false,
   });
+  const items = stage6MatricesToItems({ landValues, buildingValues });
   const counts = validateStage6Items(items);
-  return { items, counts };
+  return { items, counts, sha256 };
 };
 
 const getExistingApplication = (client = prisma) => client.auditLog.findFirst({
@@ -178,7 +199,7 @@ export const applyAccountingStage6Baseline = async ({ force = false, client = pr
   runtimeStatus = {
     ...runtimeStatus,
     state: 'reading_source',
-    message: 'جاري قراءة آخر ملف Excel المراجع من Google Sheets.',
+    message: 'جاري تنزيل آخر ملف Excel المراجع والتحقق من بصمته قبل الاستيراد.',
   };
 
   const { items, counts } = await readStage6Spreadsheet();
