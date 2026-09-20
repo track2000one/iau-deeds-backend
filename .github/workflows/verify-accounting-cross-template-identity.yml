@@ -1,0 +1,46 @@
+name: Verify Accounting Cross Template Identity
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: node --check src/services/accountingCycles.service.js
+      - name: Verify strong and weak cross-template identities
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { canonicalizeAccountingStableKey } from './src/services/accountingCycles.service.js';
+
+          const strongLegacy = 'building:entity:0029:360607002075:ll-1:building-a';
+          assert.equal(
+            canonicalizeAccountingStableKey(strongLegacy),
+            'asset:entity:0029:360607002075',
+            'strong legacy building identity must match Model B entity identity',
+          );
+
+          const weakLegacy = 'building:entity:0029:a4:land-11:building-west';
+          assert.equal(
+            canonicalizeAccountingStableKey(weakLegacy),
+            weakLegacy,
+            'weak repeated building labels must preserve physical discriminator',
+          );
+
+          assert.equal(
+            canonicalizeAccountingStableKey('land:entity:0029:730105021013'),
+            'asset:entity:0029:730105021013',
+          );
+          assert.equal(
+            canonicalizeAccountingStableKey('asset:mof:987563'),
+            'asset:mof:987563',
+          );
+          console.log('cross-template identity assertions passed');
+          NODE
