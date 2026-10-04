@@ -56,6 +56,53 @@ const isApprovedAttachmentHost = (url) => {
   }
 };
 
+router.post('/deed-batch-manifest', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      deedIds: z.array(z.string().min(1)).min(1).max(1000),
+    });
+    const { deedIds } = schema.parse(req.body);
+
+    const attachments = await prisma.attachment.findMany({
+      where: {
+        entityType: 'deed',
+        entityId: { in: deedIds },
+      },
+      orderBy: [
+        { entityId: 'asc' },
+        { createdAt: 'asc' },
+      ],
+      select: {
+        id: true,
+        entityId: true,
+        attachmentType: true,
+        title: true,
+        driveUrl: true,
+        driveFileId: true,
+        mimeType: true,
+        createdAt: true,
+      },
+    });
+
+    const grouped = Object.fromEntries(deedIds.map((deedId) => [deedId, []]));
+    for (const attachment of attachments) {
+      if (!grouped[attachment.entityId]) grouped[attachment.entityId] = [];
+      grouped[attachment.entityId].push(attachment);
+    }
+
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    return res.json({
+      totalAttachments: attachments.length,
+      deedCount: deedIds.length,
+      deedsWithAttachments: Object.values(grouped).filter((items) => items.length > 0).length,
+      grouped,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/file/:id/content', async (req, res, next) => {
   try {
     const attachment = await prisma.attachment.findUnique({
