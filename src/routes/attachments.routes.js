@@ -145,7 +145,7 @@ router.get('/file/:id/content', async (req, res, next) => {
           signal: controller.signal,
           headers: {
             'User-Agent': 'IAU-Deeds/1.0',
-            Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            Accept: 'application/pdf,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
           },
         });
 
@@ -158,7 +158,7 @@ router.get('/file/:id/content', async (req, res, next) => {
         const maxBytes = 35 * 1024 * 1024;
         const declaredLength = Number(response.headers.get('content-length') || 0);
         if (declaredLength > maxBytes) {
-          return res.status(413).json({ message: 'حجم صورة الصك يتجاوز الحد المسموح للتجميع' });
+          return res.status(413).json({ message: 'حجم مستند الصك يتجاوز الحد المسموح للتجميع' });
         }
 
         const payload = Buffer.from(await response.arrayBuffer());
@@ -180,7 +180,7 @@ router.get('/file/:id/content', async (req, res, next) => {
     }
 
     return res.status(lastStatus === 404 ? 404 : 502).json({
-      message: 'تعذر تحميل صورة الصك من Google Drive. تحقق من صلاحية الرابط وإتاحة الملف.',
+      message: 'تعذر تحميل مستند الصك من Google Drive. تحقق من صلاحية الرابط وإتاحة الملف.',
     });
   } catch (err) {
     next(err);
