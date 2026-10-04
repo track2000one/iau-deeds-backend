@@ -31,6 +31,115 @@ const attachmentSchema = z.object({
   createdBy: z.string().optional().nullable(),
 });
 
+const extractDriveFileId = (attachment) => {
+  if (attachment?.driveFileId) return String(attachment.driveFileId);
+  const rawUrl = String(attachment?.driveUrl || '').trim();
+  if (!rawUrl) return '';
+
+  try {
+    const parsed = new URL(rawUrl);
+    const queryId = parsed.searchParams.get('id');
+    if (queryId) return queryId;
+  } catch {}
+
+  return rawUrl.match(/\/(?:file\/d|d)\/([^/?#]+)/)?.[1] || '';
+};
+
+const isApprovedAttachmentHost = (url) => {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'drive.google.com'
+      || host === 'docs.google.com'
+      || host.endsWith('.googleusercontent.com');
+  } catch {
+    return false;
+  }
+};
+
+router.get('/file/:id/content', async (req, res, next) => {
+  try {
+    const attachment = await prisma.attachment.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!attachment) {
+      return res.status(404).json({ message: 'المرفق غير موجود' });
+    }
+
+    const originalUrl = String(attachment.driveUrl || '').trim();
+    const fileId = extractDriveFileId(attachment);
+
+    if (!fileId && !isApprovedAttachmentHost(originalUrl)) {
+      return res.status(422).json({
+        message: 'لا يمكن تمرير هذا المصدر عبر خادم المنصة. استخدم رابط Google Drive صالحًا.',
+      });
+    }
+
+    const candidates = fileId
+      ? [
+          `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`,
+          `https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download&confirm=t`,
+          `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w4000`,
+        ]
+      : [originalUrl];
+
+    let lastStatus = 502;
+
+    for (const candidate of candidates) {
+      if (!isApprovedAttachmentHost(candidate)) continue;
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20_000);
+
+      try {
+        const response = await fetch(candidate, {
+          method: 'GET',
+          redirect: 'follow',
+          signal: controller.signal,
+          headers: {
+            'User-Agent': 'IAU-Deeds/1.0',
+            Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+          },
+        });
+
+        lastStatus = response.status || lastStatus;
+        if (!response.ok) continue;
+
+        const contentType = String(response.headers.get('content-type') || attachment.mimeType || '').toLowerCase();
+        if (contentType.includes('text/html')) continue;
+
+        const maxBytes = 35 * 1024 * 1024;
+        const declaredLength = Number(response.headers.get('content-length') || 0);
+        if (declaredLength > maxBytes) {
+          return res.status(413).json({ message: 'حجم صورة الصك يتجاوز الحد المسموح للتجميع' });
+        }
+
+        const payload = Buffer.from(await response.arrayBuffer());
+        if (!payload.length) continue;
+        if (payload.length > maxBytes) {
+          return res.status(413).json({ message: 'حجم صورة الصك يتجاوز الحد المسموح للتجميع' });
+        }
+
+        res.setHeader('Content-Type', contentType || 'application/octet-stream');
+        res.setHeader('Content-Length', String(payload.length));
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        return res.status(200).send(payload);
+      } catch (error) {
+        if (error?.name !== 'AbortError') lastStatus = 502;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    return res.status(lastStatus === 404 ? 404 : 502).json({
+      message: 'تعذر تحميل صورة الصك من Google Drive. تحقق من صلاحية الرابط وإتاحة الملف.',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/:entityType/:entityId', async (req, res, next) => {
   try {
     const attachments = await prisma.attachment.findMany({
@@ -40,6 +149,8 @@ router.get('/:entityType/:entityId', async (req, res, next) => {
       },
       orderBy: { createdAt: 'desc' },
     });
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
     res.json(attachments);
   } catch (err) {
     next(err);
