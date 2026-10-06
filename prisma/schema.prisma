@@ -152,8 +152,10 @@ model InvestmentSite {
   deedId      String?
   deed        Deed?    @relation(fields: [deedId], references: [id], onDelete: SetNull)
 
-  latitude    Decimal? @db.Decimal(10, 7)
-  longitude   Decimal? @db.Decimal(10, 7)
+  latitude         Decimal?          @db.Decimal(10, 7)
+  longitude        Decimal?          @db.Decimal(10, 7)
+  geoJson          Json?
+  geometryAccuracy GeometryAccuracy  @default(APPROXIMATE)
 
   region      String?
   city        String?
