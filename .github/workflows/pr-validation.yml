@@ -10,6 +10,8 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://validator:validator@localhost:5432/validator?schema=public
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
