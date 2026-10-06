@@ -198,6 +198,15 @@ router.patch('/:id', async (req, res, next) => {
     }
 
     if (input.code && input.code !== existing.code) {
+      const linkedAreas = await prisma.investmentArea.count({
+        where: { siteId: existing.id, isActive: true },
+      });
+      if (linkedAreas > 0) {
+        return res.status(409).json({
+          message: 'لا يمكن تغيير رمز موقع له مساحات نشطة؛ حفاظًا على رموز المساحات المرتبطة به',
+        });
+      }
+
       const duplicate = await prisma.investmentSite.findUnique({
         where: { code: input.code },
       });
