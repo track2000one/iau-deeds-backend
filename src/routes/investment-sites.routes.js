@@ -16,6 +16,7 @@ const createSiteSchema = z.object({
   name: z.string().trim().min(2, 'اسم الموقع مطلوب').max(250),
   description: nullableText(3000),
   deedId: z.string().trim().optional().nullable(),
+  deedIds: z.array(z.string().trim().min(1)).max(10).optional(),
   latitude: latitudeSchema,
   longitude: longitudeSchema,
   region: z.string().trim().max(120).optional().nullable(),
@@ -41,6 +42,36 @@ const deedSummary = {
   region: true,
   district: true,
   area: true,
+};
+
+
+const siteInclude = {
+  deed: { select: deedSummary },
+  deedLinks: {
+    include: { deed: { select: deedSummary } },
+    orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+  },
+};
+
+const uniqueIds = (values = []) =>
+  [...new Set(values.filter(Boolean).map((value) => String(value).trim()))];
+
+const ensureDeedsExist = async (db, deedIds) => {
+  if (!deedIds.length) return;
+
+  const existing = await db.deed.findMany({
+    where: { id: { in: deedIds } },
+    select: { id: true },
+  });
+
+  if (existing.length !== deedIds.length) {
+    const found = new Set(existing.map((item) => item.id));
+    const missing = deedIds.filter((id) => !found.has(id));
+
+    const error = new Error(`الصكوك المرتبطة غير موجودة: ${missing.join(', ')}`);
+    error.statusCode = 400;
+    throw error;
+  }
 };
 
 router.get('/deed-options', async (req, res, next) => {
@@ -90,17 +121,7 @@ router.get('/', async (req, res, next) => {
       prisma.investmentSite.findMany({
         where,
         include: {
-          deed: {
-            select: {
-              id: true,
-              deedNumber: true,
-              propertyDescription: true,
-              area: true,
-              city: true,
-              district: true,
-              region: true,
-            },
-          },
+          ...siteInclude,
           _count: {
             select: {
               areas: { where: { isActive: true } },
@@ -133,7 +154,7 @@ router.get('/:id', async (req, res, next) => {
     const site = await prisma.investmentSite.findUnique({
       where: { id: req.params.id },
       include: {
-        deed: { select: deedSummary },
+        ...siteInclude,
         areas: {
           where: { isActive: true },
           orderBy: { areaNumber: 'asc' },
@@ -154,6 +175,7 @@ router.get('/:id', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const input = createSiteSchema.parse(req.body);
+    const { deedIds = [], deedId = null, ...siteData } = input;
 
     const existing = await prisma.investmentSite.findUnique({
       where: { code: input.code },
@@ -163,21 +185,37 @@ router.post('/', async (req, res, next) => {
       return res.status(409).json({ message: 'رمز الموقع مستخدم مسبقًا' });
     }
 
-    if (input.deedId) {
-      const deed = await prisma.deed.findUnique({ where: { id: input.deedId } });
-      if (!deed) {
-        return res.status(400).json({ message: 'الصك المرتبط غير موجود' });
-      }
-    }
+    const linkedDeedIds = uniqueIds([deedId, ...deedIds]);
+    await ensureDeedsExist(prisma, linkedDeedIds);
 
-    const site = await prisma.investmentSite.create({
-      data: {
-        ...input,
-        latitude: input.latitude == null ? null : input.latitude,
-        longitude: input.longitude == null ? null : input.longitude,
-        createdBy: req.authUser?.id || null,
-      },
-      include: { deed: { select: deedSummary } },
+    const primaryDeedId = deedId || linkedDeedIds[0] || null;
+
+    const site = await prisma.$transaction(async (tx) => {
+      const created = await tx.investmentSite.create({
+        data: {
+          ...siteData,
+          deedId: primaryDeedId,
+          latitude: siteData.latitude == null ? null : siteData.latitude,
+          longitude: siteData.longitude == null ? null : siteData.longitude,
+          createdBy: req.authUser?.id || null,
+        },
+      });
+
+      if (linkedDeedIds.length) {
+        await tx.investmentSiteDeed.createMany({
+          data: linkedDeedIds.map((linkedDeedId) => ({
+            siteId: created.id,
+            deedId: linkedDeedId,
+            isPrimary: linkedDeedId === primaryDeedId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      return tx.investmentSite.findUnique({
+        where: { id: created.id },
+        include: siteInclude,
+      });
     });
 
     res.status(201).json(site);
@@ -189,8 +227,11 @@ router.post('/', async (req, res, next) => {
 router.patch('/:id', async (req, res, next) => {
   try {
     const input = updateSiteSchema.parse(req.body);
+    const { deedIds, deedId, ...siteData } = input;
+
     const existing = await prisma.investmentSite.findUnique({
       where: { id: req.params.id },
+      include: { deedLinks: true },
     });
 
     if (!existing) {
@@ -215,17 +256,58 @@ router.patch('/:id', async (req, res, next) => {
       }
     }
 
-    if (input.deedId) {
-      const deed = await prisma.deed.findUnique({ where: { id: input.deedId } });
-      if (!deed) {
-        return res.status(400).json({ message: 'الصك المرتبط غير موجود' });
+    const deedLinksRequested =
+      Object.prototype.hasOwnProperty.call(input, 'deedIds') ||
+      Object.prototype.hasOwnProperty.call(input, 'deedId');
+
+    let linkedDeedIds = null;
+    let primaryDeedId = existing.deedId;
+
+    if (deedLinksRequested) {
+      if (deedIds !== undefined) {
+        linkedDeedIds = uniqueIds([deedId, ...deedIds]);
+      } else if (deedId) {
+        linkedDeedIds = uniqueIds([
+          deedId,
+          ...existing.deedLinks.map((link) => link.deedId),
+        ]);
+      } else {
+        linkedDeedIds = [];
       }
+
+      await ensureDeedsExist(prisma, linkedDeedIds);
+      primaryDeedId = deedId || linkedDeedIds[0] || null;
     }
 
-    const site = await prisma.investmentSite.update({
-      where: { id: req.params.id },
-      data: input,
-      include: { deed: { select: deedSummary } },
+    const site = await prisma.$transaction(async (tx) => {
+      await tx.investmentSite.update({
+        where: { id: req.params.id },
+        data: {
+          ...siteData,
+          ...(deedLinksRequested ? { deedId: primaryDeedId } : {}),
+        },
+      });
+
+      if (deedLinksRequested && linkedDeedIds) {
+        await tx.investmentSiteDeed.deleteMany({
+          where: { siteId: req.params.id },
+        });
+
+        if (linkedDeedIds.length) {
+          await tx.investmentSiteDeed.createMany({
+            data: linkedDeedIds.map((linkedDeedId) => ({
+              siteId: req.params.id,
+              deedId: linkedDeedId,
+              isPrimary: linkedDeedId === primaryDeedId,
+            })),
+          });
+        }
+      }
+
+      return tx.investmentSite.findUnique({
+        where: { id: req.params.id },
+        include: siteInclude,
+      });
     });
 
     res.json(site);
