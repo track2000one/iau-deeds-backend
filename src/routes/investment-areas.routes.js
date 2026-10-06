@@ -92,6 +92,16 @@ const bulkBatchImportSchema = z.object({
   batches: z.array(bulkImportSchema).min(1).max(20),
 });
 
+const bulkGeometryUpdateSchema = z.object({
+  items: z.array(z.object({
+    areaId: z.string().min(1),
+    geoJson: polygonGeoJsonSchema,
+    latitude: z.coerce.number().min(-90).max(90),
+    longitude: z.coerce.number().min(-180).max(180),
+    geometryAccuracy: accuracySchema.optional(),
+  })).min(1).max(500),
+});
+
 const listSchema = z.object({
   siteId: z.string().optional(),
   status: areaStatusSchema.optional(),
@@ -179,6 +189,79 @@ router.get('/:id', async (req, res, next) => {
     }
 
     res.json(area);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/geometry-bulk', async (req, res, next) => {
+  try {
+    const input = bulkGeometryUpdateSchema.parse(req.body);
+    const areaIds = input.items.map((item) => item.areaId);
+
+    if (new Set(areaIds).size !== areaIds.length) {
+      return res.status(400).json({
+        message: 'طلب تحديث الحدود يحتوي على المساحة نفسها أكثر من مرة',
+      });
+    }
+
+    const existingAreas = await prisma.investmentArea.findMany({
+      where: {
+        id: { in: areaIds },
+        isActive: true,
+      },
+      select: {
+        id: true,
+        areaCode: true,
+        geometryAccuracy: true,
+      },
+    });
+
+    if (existingAreas.length !== areaIds.length) {
+      const found = new Set(existingAreas.map((area) => area.id));
+      const missing = areaIds.filter((id) => !found.has(id));
+      return res.status(400).json({
+        message: `بعض المساحات غير موجودة أو مؤرشفة: ${missing.join(', ')}`,
+      });
+    }
+
+    const existingById = new Map(existingAreas.map((area) => [area.id, area]));
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const results = [];
+
+      for (const item of input.items) {
+        const existing = existingById.get(item.areaId);
+
+        const area = await tx.investmentArea.update({
+          where: { id: item.areaId },
+          data: {
+            geoJson: item.geoJson,
+            latitude: item.latitude,
+            longitude: item.longitude,
+            geometryAccuracy: item.geometryAccuracy || existing.geometryAccuracy,
+          },
+          select: {
+            id: true,
+            areaCode: true,
+            latitude: true,
+            longitude: true,
+            geometryAccuracy: true,
+            updatedAt: true,
+          },
+        });
+
+        results.push(area);
+      }
+
+      return results;
+    });
+
+    res.json({
+      requested: input.items.length,
+      updated: updated.length,
+      items: updated,
+    });
   } catch (error) {
     next(error);
   }
