@@ -10,6 +10,45 @@ const nullableText = (max = 2000) =>
 const latitudeSchema = z.coerce.number().min(-90).max(90).optional().nullable();
 const longitudeSchema = z.coerce.number().min(-180).max(180).optional().nullable();
 
+const accuracySchema = z.enum([
+  'APPROXIMATE',
+  'FIELD_VERIFIED',
+  'SURVEYED',
+  'OFFICIAL',
+]);
+
+const polygonCoordinateSchema = z.tuple([
+  z.number().min(-180).max(180),
+  z.number().min(-90).max(90),
+]);
+
+const polygonRingSchema = z
+  .array(polygonCoordinateSchema)
+  .min(4, 'حدود الموقع يجب أن تحتوي على ثلاث نقاط على الأقل')
+  .max(2000)
+  .refine(
+    (ring) => {
+      const first = ring[0];
+      const last = ring[ring.length - 1];
+      return first?.[0] === last?.[0] && first?.[1] === last?.[1];
+    },
+    'يجب إغلاق حدود الموقع بإعادة أول نقطة في نهاية المضلع'
+  );
+
+const polygonGeometrySchema = z.object({
+  type: z.literal('Polygon'),
+  coordinates: z.array(polygonRingSchema).min(1).max(50),
+}).passthrough();
+
+const polygonGeoJsonSchema = z.union([
+  polygonGeometrySchema,
+  z.object({
+    type: z.literal('Feature'),
+    geometry: polygonGeometrySchema,
+    properties: z.record(z.unknown()).optional().nullable(),
+  }).passthrough(),
+]).optional().nullable();
+
 const createSiteSchema = z.object({
   code: z.string().trim().min(2, 'رمز الموقع مطلوب').max(30)
     .transform((value) => value.toUpperCase()),
@@ -19,6 +58,8 @@ const createSiteSchema = z.object({
   deedIds: z.array(z.string().trim().min(1)).max(10).optional(),
   latitude: latitudeSchema,
   longitude: longitudeSchema,
+  geoJson: polygonGeoJsonSchema,
+  geometryAccuracy: accuracySchema.optional(),
   region: z.string().trim().max(120).optional().nullable(),
   city: z.string().trim().max(120).optional().nullable(),
   district: z.string().trim().max(120).optional().nullable(),
