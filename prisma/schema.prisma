@@ -140,6 +140,7 @@ model Deed {
   updatedAt           DateTime  @updatedAt
 
   investmentSites     InvestmentSite[]
+  investmentSiteDeeds InvestmentSiteDeed[]
 }
 
 model InvestmentSite {
@@ -165,10 +166,26 @@ model InvestmentSite {
   updatedAt   DateTime @updatedAt
 
   areas       InvestmentArea[]
+  deedLinks   InvestmentSiteDeed[]
 
   @@index([deedId])
   @@index([name])
   @@index([isActive])
+}
+
+model InvestmentSiteDeed {
+  id        String         @id @default(cuid())
+  siteId    String
+  deedId    String
+  isPrimary Boolean        @default(false)
+  createdAt DateTime       @default(now())
+
+  site      InvestmentSite @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  deed      Deed           @relation(fields: [deedId], references: [id], onDelete: Cascade)
+
+  @@unique([siteId, deedId])
+  @@index([deedId])
+  @@index([siteId, isPrimary])
 }
 
 model InvestmentArea {
