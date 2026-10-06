@@ -17,6 +17,7 @@ const attachmentSchema = z.object({
   entityId: z.string().min(1),
   attachmentType: z.enum([
     'deed_image',
+    'survey_document',
     'plan_image',
     'location_image',
     'contract_image',
