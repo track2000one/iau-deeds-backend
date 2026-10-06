@@ -32,6 +32,43 @@ const listSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
 });
 
+// Investment-only staff can link a site to a deed without accessing deed documents.
+const deedSummary = {
+  id: true,
+  deedNumber: true,
+  propertyDescription: true,
+  city: true,
+  region: true,
+  district: true,
+  area: true,
+};
+
+router.get('/deed-options', async (req, res, next) => {
+  try {
+    const query = z.object({
+      search: z.string().trim().min(2).max(100),
+      limit: z.coerce.number().int().min(1).max(30).default(15),
+    }).parse(req.query);
+
+    const items = await prisma.deed.findMany({
+      where: {
+        OR: [
+          { deedNumber: { contains: query.search, mode: 'insensitive' } },
+          { propertyDescription: { contains: query.search, mode: 'insensitive' } },
+          { city: { contains: query.search, mode: 'insensitive' } },
+        ],
+      },
+      select: deedSummary,
+      take: query.limit,
+      orderBy: { deedNumber: 'asc' },
+    });
+
+    res.json({ items });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/', async (req, res, next) => {
   try {
     const query = listSchema.parse(req.query);
@@ -96,7 +133,7 @@ router.get('/:id', async (req, res, next) => {
     const site = await prisma.investmentSite.findUnique({
       where: { id: req.params.id },
       include: {
-        deed: true,
+        deed: { select: deedSummary },
         areas: {
           where: { isActive: true },
           orderBy: { areaNumber: 'asc' },
@@ -140,7 +177,7 @@ router.post('/', async (req, res, next) => {
         longitude: input.longitude == null ? null : input.longitude,
         createdBy: req.authUser?.id || null,
       },
-      include: { deed: true },
+      include: { deed: { select: deedSummary } },
     });
 
     res.status(201).json(site);
@@ -179,7 +216,7 @@ router.patch('/:id', async (req, res, next) => {
     const site = await prisma.investmentSite.update({
       where: { id: req.params.id },
       data: input,
-      include: { deed: true },
+      include: { deed: { select: deedSummary } },
     });
 
     res.json(site);
