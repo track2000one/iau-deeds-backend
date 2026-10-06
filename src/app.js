@@ -14,6 +14,8 @@ import usersRoutes from './routes/users.routes.js';
 import organizationRoutes from './routes/organization.routes.js';
 import auditRoutes from './routes/audit.routes.js';
 import siteInspectionsRoutes from './routes/site-inspections.routes.js';
+import investmentSitesRoutes from './routes/investment-sites.routes.js';
+import investmentAreasRoutes from './routes/investment-areas.routes.js';
 import assetsRoutes from './routes/assets.routes.js';
 import assetCyclesRoutes from './routes/asset-cycles.routes.js';
 import assetsFastRoutes from './routes/assets-fast.routes.js';
@@ -152,6 +154,22 @@ app.use(
   auditTrail('site_inspections'),
   requirePermission('site_inspections'),
   siteInspectionsRoutes
+);
+
+app.use(
+  '/api/investment-sites',
+  requireAuth,
+  auditTrail('investments'),
+  requirePermission('investments'),
+  investmentSitesRoutes
+);
+
+app.use(
+  '/api/investment-areas',
+  requireAuth,
+  auditTrail('investments'),
+  requirePermission('investments'),
+  investmentAreasRoutes
 );
 
 app.use(
