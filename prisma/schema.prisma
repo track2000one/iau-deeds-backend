@@ -16,6 +16,8 @@ enum AttachmentEntityType {
   leased_building_out
   leased_building_in
   site_inspection
+  investment_site
+  investment_area
   asset
 }
 
@@ -27,6 +29,29 @@ enum AttachmentType {
   delivery_minutes
   inspection_image
   other
+}
+
+enum InvestmentAreaStatus {
+  AVAILABLE
+  OCCUPIED
+  PARTIALLY_OCCUPIED
+  RESERVED
+  ALLOCATED
+  UNAVAILABLE
+}
+
+enum InvestmentReadiness {
+  NOT_ASSESSED
+  UNDER_REVIEW
+  READY
+  NOT_SUITABLE
+}
+
+enum GeometryAccuracy {
+  APPROXIMATE
+  FIELD_VERIFIED
+  SURVEYED
+  OFFICIAL
 }
 
 enum AppUserRole {
@@ -113,6 +138,75 @@ model Deed {
   createdBy           String?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
+
+  investmentSites     InvestmentSite[]
+}
+
+model InvestmentSite {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+
+  deedId      String?
+  deed        Deed?    @relation(fields: [deedId], references: [id], onDelete: SetNull)
+
+  latitude    Decimal? @db.Decimal(10, 7)
+  longitude   Decimal? @db.Decimal(10, 7)
+
+  region      String?
+  city        String?
+  district    String?
+
+  isActive    Boolean  @default(true)
+
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  areas       InvestmentArea[]
+
+  @@index([deedId])
+  @@index([name])
+  @@index([isActive])
+}
+
+model InvestmentArea {
+  id                  String               @id @default(cuid())
+  siteId              String
+  site                InvestmentSite       @relation(fields: [siteId], references: [id], onDelete: Restrict)
+
+  areaNumber          Int
+  areaCode            String               @unique
+  name                String?
+  description         String?
+
+  approximateArea     Decimal?             @db.Decimal(18, 2)
+  surveyedArea        Decimal?             @db.Decimal(18, 2)
+
+  latitude            Decimal?             @db.Decimal(10, 7)
+  longitude           Decimal?             @db.Decimal(10, 7)
+  geoJson             Json?
+
+  geometryAccuracy    GeometryAccuracy     @default(APPROXIMATE)
+  occupancyStatus     InvestmentAreaStatus @default(AVAILABLE)
+  investmentReadiness InvestmentReadiness  @default(NOT_ASSESSED)
+
+  currentUse          String?
+  proposedUse         String?
+  notes               String?
+
+  isActive            Boolean              @default(true)
+
+  createdBy           String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  @@unique([siteId, areaNumber])
+  @@index([siteId])
+  @@index([occupancyStatus])
+  @@index([investmentReadiness])
+  @@index([isActive])
 }
 
 model AllocatedLand {
