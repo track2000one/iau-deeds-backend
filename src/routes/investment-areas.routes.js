@@ -49,6 +49,13 @@ const createAreaSchema = z.object({
 
 const updateAreaSchema = createAreaSchema.partial();
 
+const bulkImportSchema = z.object({
+  siteId: z.string().min(1, 'الموقع الرئيسي مطلوب'),
+  areas: z.array(
+    createAreaSchema.omit({ siteId: true })
+  ).min(1).max(200),
+});
+
 const listSchema = z.object({
   siteId: z.string().optional(),
   status: areaStatusSchema.optional(),
@@ -136,6 +143,107 @@ router.get('/:id', async (req, res, next) => {
     }
 
     res.json(area);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/bulk', async (req, res, next) => {
+  try {
+    const input = bulkImportSchema.parse(req.body);
+
+    const site = await prisma.investmentSite.findUnique({
+      where: { id: input.siteId },
+    });
+
+    if (!site || !site.isActive) {
+      return res.status(400).json({
+        message: 'الموقع الرئيسي غير موجود أو غير نشط',
+      });
+    }
+
+    const normalized = input.areas.map((area) => ({
+      ...area,
+      siteId: input.siteId,
+      areaCode: String(area.areaCode || '').trim().toUpperCase(),
+      createdBy: req.authUser?.id || null,
+    }));
+
+    const areaNumbers = normalized.map((area) => area.areaNumber);
+    const areaCodes = normalized.map((area) => area.areaCode);
+
+    if (new Set(areaNumbers).size !== areaNumbers.length) {
+      return res.status(400).json({
+        message: 'ملف الاستيراد يحتوي على أرقام مواقع مكررة داخل نفس الموقع الرئيسي',
+      });
+    }
+
+    if (new Set(areaCodes).size !== areaCodes.length) {
+      return res.status(400).json({
+        message: 'ملف الاستيراد يحتوي على رموز مساحات مكررة',
+      });
+    }
+
+    const invalidCode = normalized.find(
+      (area) => !area.areaCode.startsWith(`${site.code.toUpperCase()}-`)
+    );
+
+    if (invalidCode) {
+      return res.status(400).json({
+        message: `رمز المساحة ${invalidCode.areaCode} لا يتوافق مع رمز الموقع الرئيسي ${site.code}`,
+      });
+    }
+
+    const existing = await prisma.investmentArea.findMany({
+      where: {
+        OR: [
+          {
+            siteId: input.siteId,
+            areaNumber: { in: areaNumbers },
+          },
+          {
+            areaCode: { in: areaCodes },
+          },
+        ],
+      },
+      select: {
+        areaNumber: true,
+        areaCode: true,
+        isActive: true,
+      },
+    });
+
+    const existingNumbers = new Set(existing.map((item) => item.areaNumber));
+    const existingCodes = new Set(existing.map((item) => item.areaCode));
+
+    const pending = normalized.filter(
+      (area) =>
+        !existingNumbers.has(area.areaNumber) &&
+        !existingCodes.has(area.areaCode)
+    );
+
+    if (pending.length > 0) {
+      await prisma.investmentArea.createMany({
+        data: pending,
+        skipDuplicates: true,
+      });
+    }
+
+    const items = await prisma.investmentArea.findMany({
+      where: {
+        siteId: input.siteId,
+        areaNumber: { in: areaNumbers },
+      },
+      orderBy: { areaNumber: 'asc' },
+    });
+
+    res.status(201).json({
+      siteId: input.siteId,
+      requested: normalized.length,
+      created: pending.length,
+      skipped: normalized.length - pending.length,
+      items,
+    });
   } catch (error) {
     next(error);
   }
