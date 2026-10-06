@@ -27,6 +27,38 @@ const accuracySchema = z.enum([
   'OFFICIAL',
 ]);
 
+const polygonCoordinateSchema = z.tuple([
+  z.number().min(-180).max(180),
+  z.number().min(-90).max(90),
+]);
+
+const polygonRingSchema = z
+  .array(polygonCoordinateSchema)
+  .min(4, 'حدود المساحة يجب أن تحتوي على ثلاث نقاط على الأقل')
+  .max(1000)
+  .refine(
+    (ring) => {
+      const first = ring[0];
+      const last = ring[ring.length - 1];
+      return first?.[0] === last?.[0] && first?.[1] === last?.[1];
+    },
+    'يجب إغلاق حدود المساحة بإعادة أول نقطة في نهاية المضلع'
+  );
+
+const polygonGeometrySchema = z.object({
+  type: z.literal('Polygon'),
+  coordinates: z.array(polygonRingSchema).min(1).max(50),
+}).passthrough();
+
+const polygonGeoJsonSchema = z.union([
+  polygonGeometrySchema,
+  z.object({
+    type: z.literal('Feature'),
+    geometry: polygonGeometrySchema,
+    properties: z.record(z.unknown()).optional().nullable(),
+  }).passthrough(),
+]).optional().nullable();
+
 const createAreaSchema = z.object({
   siteId: z.string().min(1, 'الموقع الرئيسي مطلوب'),
   areaNumber: z.coerce.number().int().positive('رقم الموقع يجب أن يكون أكبر من صفر'),
@@ -38,7 +70,7 @@ const createAreaSchema = z.object({
   surveyedArea: z.coerce.number().positive().optional().nullable(),
   latitude: z.coerce.number().min(-90).max(90).optional().nullable(),
   longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
-  geoJson: z.unknown().optional().nullable(),
+  geoJson: polygonGeoJsonSchema,
   geometryAccuracy: accuracySchema.default('APPROXIMATE'),
   occupancyStatus: areaStatusSchema.default('AVAILABLE'),
   investmentReadiness: readinessSchema.default('NOT_ASSESSED'),
