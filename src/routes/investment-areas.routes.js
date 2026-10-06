@@ -56,6 +56,10 @@ const bulkImportSchema = z.object({
   ).min(1).max(200),
 });
 
+const bulkBatchImportSchema = z.object({
+  batches: z.array(bulkImportSchema).min(1).max(20),
+});
+
 const listSchema = z.object({
   siteId: z.string().optional(),
   status: areaStatusSchema.optional(),
@@ -143,6 +147,152 @@ router.get('/:id', async (req, res, next) => {
     }
 
     res.json(area);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/bulk-batch', async (req, res, next) => {
+  try {
+    const input = bulkBatchImportSchema.parse(req.body);
+
+    const siteIds = input.batches.map((batch) => batch.siteId);
+    if (new Set(siteIds).size !== siteIds.length) {
+      return res.status(400).json({
+        message: 'طلب الاستيراد يحتوي على الموقع الرئيسي نفسه أكثر من مرة',
+      });
+    }
+
+    const sites = await prisma.investmentSite.findMany({
+      where: {
+        id: { in: siteIds },
+        isActive: true,
+      },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+      },
+    });
+
+    if (sites.length !== siteIds.length) {
+      const found = new Set(sites.map((site) => site.id));
+      const missing = siteIds.filter((siteId) => !found.has(siteId));
+      return res.status(400).json({
+        message: `بعض المواقع الرئيسية غير موجودة أو غير نشطة: ${missing.join(', ')}`,
+      });
+    }
+
+    const sitesById = new Map(sites.map((site) => [site.id, site]));
+    const normalizedBatches = input.batches.map((batch) => {
+      const site = sitesById.get(batch.siteId);
+      const areas = batch.areas.map((area) => ({
+        ...area,
+        siteId: batch.siteId,
+        areaCode: String(area.areaCode || '').trim().toUpperCase(),
+        createdBy: req.authUser?.id || null,
+      }));
+
+      const areaNumbers = areas.map((area) => area.areaNumber);
+      const areaCodes = areas.map((area) => area.areaCode);
+
+      if (new Set(areaNumbers).size !== areaNumbers.length) {
+        const error = new Error(`الموقع ${site?.name || batch.siteId} يحتوي على أرقام مساحات مكررة`);
+        error.statusCode = 400;
+        throw error;
+      }
+
+      if (new Set(areaCodes).size !== areaCodes.length) {
+        const error = new Error(`الموقع ${site?.name || batch.siteId} يحتوي على رموز مساحات مكررة`);
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const invalidCode = areas.find(
+        (area) => !area.areaCode.startsWith(`${site.code.toUpperCase()}-`)
+      );
+
+      if (invalidCode) {
+        const error = new Error(
+          `رمز المساحة ${invalidCode.areaCode} لا يتوافق مع رمز الموقع الرئيسي ${site.code}`
+        );
+        error.statusCode = 400;
+        throw error;
+      }
+
+      return {
+        site,
+        siteId: batch.siteId,
+        areas,
+        areaNumbers,
+        areaCodes,
+      };
+    });
+
+    const allCodes = normalizedBatches.flatMap((batch) => batch.areaCodes);
+    if (new Set(allCodes).size !== allCodes.length) {
+      return res.status(400).json({
+        message: 'طلب الاستيراد يحتوي على رموز مساحات مكررة بين المواقع',
+      });
+    }
+
+    const results = await prisma.$transaction(async (tx) => {
+      const batchResults = [];
+
+      for (const batch of normalizedBatches) {
+        const existing = await tx.investmentArea.findMany({
+          where: {
+            OR: [
+              {
+                siteId: batch.siteId,
+                areaNumber: { in: batch.areaNumbers },
+              },
+              {
+                areaCode: { in: batch.areaCodes },
+              },
+            ],
+          },
+          select: {
+            areaNumber: true,
+            areaCode: true,
+          },
+        });
+
+        const existingNumbers = new Set(existing.map((item) => item.areaNumber));
+        const existingCodes = new Set(existing.map((item) => item.areaCode));
+
+        const pending = batch.areas.filter(
+          (area) =>
+            !existingNumbers.has(area.areaNumber) &&
+            !existingCodes.has(area.areaCode)
+        );
+
+        if (pending.length > 0) {
+          await tx.investmentArea.createMany({
+            data: pending,
+            skipDuplicates: true,
+          });
+        }
+
+        batchResults.push({
+          siteId: batch.siteId,
+          siteCode: batch.site.code,
+          siteName: batch.site.name,
+          requested: batch.areas.length,
+          created: pending.length,
+          skipped: batch.areas.length - pending.length,
+        });
+      }
+
+      return batchResults;
+    });
+
+    res.status(201).json({
+      requested: results.reduce((sum, item) => sum + item.requested, 0),
+      created: results.reduce((sum, item) => sum + item.created, 0),
+      skipped: results.reduce((sum, item) => sum + item.skipped, 0),
+      batches: results,
+    });
   } catch (error) {
     next(error);
   }
