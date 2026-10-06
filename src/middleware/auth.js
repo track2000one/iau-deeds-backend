@@ -151,6 +151,8 @@ export const requireAttachmentPermission = (req, res, next) => {
     leased_building_out: 'leased_buildings_out',
     leased_building_in: 'leased_buildings_in',
     site_inspection: 'site_inspections',
+    investment_site: 'investments',
+    investment_area: 'investments',
     asset: 'assets',
   };
 
