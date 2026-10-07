@@ -4180,6 +4180,80 @@ const syncImprovementGoalSustainability = async (year = null) => {
   for (const goal of goals) await evaluateImprovementGoalSustainability(goal);
 };
 
+const runKpiApprovalAutomation = async (snapshot) => {
+  const before = await prisma.mosqueImprovementGoal.findMany({
+    select: {
+      id: true,
+      status: true,
+      sustainabilityStatus: true,
+      followUpGoalId: true,
+    },
+  });
+  const beforeById = new Map(before.map((goal) => [goal.id, goal]));
+
+  await syncImprovementGoals();
+  await syncImprovementGoalSustainability();
+
+  const after = await prisma.mosqueImprovementGoal.findMany({
+    select: {
+      id: true,
+      status: true,
+      sustainabilityStatus: true,
+      followUpGoalId: true,
+      parentGoalId: true,
+      sourceMonth: true,
+      createdBy: true,
+    },
+  });
+
+  const newlyAchieved = after.filter((goal) => (
+    goal.status === 'achieved'
+    && beforeById.has(goal.id)
+    && beforeById.get(goal.id)?.status !== 'achieved'
+  )).length;
+  const newlyAtRisk = after.filter((goal) => (
+    goal.status === 'at_risk'
+    && beforeById.has(goal.id)
+    && beforeById.get(goal.id)?.status !== 'at_risk'
+  )).length;
+  const sustainabilityChanged = after.filter((goal) => {
+    const previous = beforeById.get(goal.id);
+    return previous
+      && goal.status === 'closed'
+      && (goal.sustainabilityStatus || 'not_started') !== (previous.sustainabilityStatus || 'not_started');
+  }).length;
+  const followUpDraftsCreated = after.filter((goal) => (
+    !beforeById.has(goal.id)
+    && goal.parentGoalId
+    && goal.createdBy === 'system'
+    && goal.sourceMonth === snapshot.month
+  )).length;
+
+  const closedGoals = after.filter((goal) => goal.status === 'closed');
+  const summary = {
+    snapshotMonth: snapshot.month,
+    evaluatedGoals: before.filter((goal) => ['active', 'at_risk'].includes(goal.status)).length,
+    newlyAchieved,
+    newlyAtRisk,
+    closedGoalsMonitored: closedGoals.length,
+    sustainabilityChanged,
+    sustained: closedGoals.filter((goal) => goal.sustainabilityStatus === 'sustained').length,
+    needsFollowUp: closedGoals.filter((goal) => goal.sustainabilityStatus === 'needs_follow_up').length,
+    regressed: closedGoals.filter((goal) => goal.sustainabilityStatus === 'regressed').length,
+    followUpDraftsCreated,
+  };
+
+  await notify({
+    roleTarget: 'head',
+    title: 'اكتملت أتمتة ما بعد اعتماد KPI',
+    message: `شهر ${snapshot.month}: قياس ${summary.evaluatedGoals} هدف، تحقق ${summary.newlyAchieved}، تعثر ${summary.newlyAtRisk}، انتكاس ${summary.regressed}، ومسودات متابعة جديدة ${summary.followUpDraftsCreated}`,
+    entityType: 'completion_kpi_approval_automation',
+    entityId: snapshot.id,
+  });
+
+  return summary;
+};
+
 router.get('/improvement-goal-assignees', requireRoles('head', 'supervisor'), async (_req, res, next) => {
   try {
     res.json(await completionTaskAssigneeDirectory());
@@ -4977,6 +5051,34 @@ router.patch('/completion-kpi-snapshots/:id/status', requireRoles('head'), async
       where: { id: current.id },
       data,
     });
+
+    if (input.status === 'approved') {
+      try {
+        const automation = await runKpiApprovalAutomation(updated);
+        return res.json({ ...updated, automation: { status: 'success', ...automation } });
+      } catch (automationError) {
+        console.error('KPI approval automation failed', automationError);
+        try {
+          await notify({
+            roleTarget: 'head',
+            title: 'تنبيه: تعذر استكمال أتمتة ما بعد اعتماد KPI',
+            message: `تم اعتماد نتيجة KPI لشهر ${updated.month}، لكن تعذر تحديث دورة أهداف التحسين تلقائيًا. يمكن تشغيل التحديث اليدوي من خطة التحسين.`,
+            entityType: 'completion_kpi_approval_automation_failed',
+            entityId: updated.id,
+          });
+        } catch (notificationError) {
+          console.error('KPI approval automation failure notification failed', notificationError);
+        }
+        return res.json({
+          ...updated,
+          automation: {
+            status: 'failed',
+            message: 'تم اعتماد KPI، لكن تعذر استكمال أتمتة أهداف التحسين. يمكن تشغيل التحديث اليدوي من خطة التحسين.',
+          },
+        });
+      }
+    }
+
     res.json(updated);
   } catch (error) { next(error); }
 });
