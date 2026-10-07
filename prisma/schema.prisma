@@ -1379,6 +1379,16 @@ model MosqueImprovementGoal {
   notes                 String?
   measurementNote       String?
   achievedAt            DateTime?
+  closureSummary        String?
+  closureEvidence       Json?
+  evidenceStatus        String   @default("not_submitted")
+  evidenceSubmittedBy   String?
+  evidenceSubmittedName String?
+  evidenceSubmittedAt   DateTime?
+  evidenceReviewedBy    String?
+  evidenceReviewedName  String?
+  evidenceReviewedAt    DateTime?
+  evidenceReviewNote    String?
   closedAt              DateTime?
   lastEvaluatedAt       DateTime?
   createdBy             String?
@@ -1396,6 +1406,8 @@ model MosqueImprovementGoal {
   @@index([assigneeUserId])
   @@index([dueDate])
   @@index([currentMonth])
+  @@index([evidenceStatus])
+  @@index([evidenceSubmittedAt])
 }
 
 model MosqueNotification {
