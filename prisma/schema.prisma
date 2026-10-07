@@ -900,8 +900,10 @@ model MosqueSite {
   campusLocation   String?
   area             Float?
   capacity         Int?
-  quranTargetCount Int?
-  latitude         Float?
+  quranTargetCount     Int?
+  hasWomenPrayerArea   Boolean  @default(false)
+  womenPrayerArea      Json?
+  latitude             Float?
   longitude        Float?
   mapUrl           String?
   status           String   @default("active")
@@ -964,6 +966,7 @@ model MosqueFieldVisit {
   tourId             String?
   siteId             String
   visitType          String    @default("initial")
+  visitScope         String    @default("whole_site")
   visitDate          DateTime
   departureAt        DateTime?
   representativeName String?
