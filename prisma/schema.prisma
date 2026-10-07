@@ -1390,6 +1390,16 @@ model MosqueImprovementGoal {
   evidenceReviewedAt    DateTime?
   evidenceReviewNote    String?
   closedAt              DateTime?
+  sustainabilityStatus  String   @default("not_started")
+  sustainabilityValue   Float?
+  sustainabilityMonth   String?
+  sustainabilityObservedMonths Int @default(0)
+  sustainabilityTargetMonths   Int @default(3)
+  sustainabilityNote    String?
+  sustainabilityEvaluatedAt DateTime?
+  relapseDetectedAt     DateTime?
+  parentGoalId          String?
+  followUpGoalId        String?
   lastEvaluatedAt       DateTime?
   createdBy             String?
   createdByName         String?
@@ -1397,6 +1407,8 @@ model MosqueImprovementGoal {
   updatedByName         String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
+
+  sustainabilityChecks MosqueImprovementSustainabilityCheck[]
 
   @@index([year])
   @@index([status])
@@ -1408,6 +1420,33 @@ model MosqueImprovementGoal {
   @@index([currentMonth])
   @@index([evidenceStatus])
   @@index([evidenceSubmittedAt])
+  @@index([sustainabilityStatus])
+  @@index([sustainabilityMonth])
+  @@index([parentGoalId])
+  @@index([followUpGoalId])
+}
+
+model MosqueImprovementSustainabilityCheck {
+  id               String   @id @default(cuid())
+  goalId           String
+  month            String
+  snapshotId       String
+  value            Float?
+  targetValue      Float
+  status           String
+  retentionPercent Int?
+  note             String?
+  evaluatedAt      DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  goal MosqueImprovementGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@unique([goalId, month])
+  @@index([goalId])
+  @@index([month])
+  @@index([status])
+  @@index([snapshotId])
 }
 
 model MosqueNotification {
