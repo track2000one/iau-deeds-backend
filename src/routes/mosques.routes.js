@@ -3925,6 +3925,261 @@ const syncImprovementGoals = async (year = null) => {
   for (const goal of goals) await evaluateImprovementGoal(goal);
 };
 
+const SUSTAINABILITY_TARGET_MONTHS = 3;
+
+const sustainabilityRetentionPercent = (goal, currentValue) => {
+  if (currentValue === null || currentValue === undefined || !Number.isFinite(Number(currentValue))) return null;
+  const baseline = Number(goal.baselineValue);
+  const target = Number(goal.targetValue);
+  const current = Number(currentValue);
+  const span = Math.abs(target - baseline);
+
+  if (!Number.isFinite(span) || span < 0.000001) {
+    return improvementGoalMet(goal, current) ? 100 : 0;
+  }
+
+  const retained = goal.targetDirection === 'gte'
+    ? (current - baseline) / span
+    : (baseline - current) / span;
+  return Math.max(0, Math.min(100, Math.round(retained * 100)));
+};
+
+const sustainabilityCheckStatus = (goal, currentValue) => {
+  if (currentValue === null || currentValue === undefined || !Number.isFinite(Number(currentValue))) {
+    return { status: 'no_data', retentionPercent: null };
+  }
+  if (improvementGoalMet(goal, currentValue)) {
+    return { status: 'sustained', retentionPercent: 100 };
+  }
+  const retentionPercent = sustainabilityRetentionPercent(goal, currentValue);
+  return {
+    status: Number(retentionPercent) >= 50 ? 'needs_follow_up' : 'regressed',
+    retentionPercent,
+  };
+};
+
+const createRelapseFollowUpGoal = async (goal, latestCheck) => {
+  if (goal.followUpGoalId) {
+    const linked = await prisma.mosqueImprovementGoal.findUnique({ where: { id: goal.followUpGoalId } });
+    if (linked && linked.status !== 'cancelled') return linked;
+  }
+
+  const existing = await prisma.mosqueImprovementGoal.findFirst({
+    where: {
+      parentGoalId: goal.id,
+      status: { not: 'cancelled' },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (existing) return existing;
+
+  const dueDate = new Date();
+  dueDate.setUTCDate(dueDate.getUTCDate() + 90);
+  const followUp = await prisma.mosqueImprovementGoal.create({
+    data: {
+      goalNumber: trackingNumber('IMP'),
+      year: Number(String(latestCheck.month).slice(0, 4)) || goal.year,
+      title: `معالجة تراجع استدامة التحسين: ${goal.title}`,
+      category: goal.category,
+      metricKey: goal.metricKey,
+      sourceMonth: latestCheck.month,
+      sourceSnapshotId: latestCheck.snapshotId,
+      assigneeUserId: goal.assigneeUserId,
+      assigneeName: goal.assigneeName,
+      gapKey: goal.gapKey,
+      baselineValue: Number(latestCheck.value),
+      targetValue: Number(goal.targetValue),
+      targetDirection: goal.targetDirection,
+      currentValue: Number(latestCheck.value),
+      currentMonth: latestCheck.month,
+      progressPercent: 0,
+      actionProgressPercent: 0,
+      status: 'draft',
+      ownerUserId: goal.ownerUserId,
+      ownerName: goal.ownerName,
+      dueDate,
+      correctiveActions: [{
+        id: crypto.randomUUID(),
+        title: 'تحليل أسباب تراجع المؤشر بعد الإغلاق ووضع إجراء تصحيحي جديد',
+        status: 'planned',
+        dueDate: null,
+        note: `أنشئت تلقائيًا من متابعة استدامة الهدف ${goal.goalNumber}`,
+      }],
+      notes: `مسودة متابعة أنشأها النظام تلقائيًا بعد رصد تراجع جوهري في استدامة الهدف المغلق ${goal.goalNumber}.`,
+      measurementNote: `خط الأساس الجديد من نتيجة KPI الرسمية لشهر ${latestCheck.month}`,
+      parentGoalId: goal.id,
+      createdBy: 'system',
+      createdByName: 'النظام',
+      updatedBy: 'system',
+      updatedByName: 'النظام',
+    },
+  });
+
+  await prisma.mosqueImprovementGoal.update({
+    where: { id: goal.id },
+    data: { followUpGoalId: followUp.id },
+  });
+
+  await notify({
+    roleTarget: 'head',
+    title: 'تم إنشاء مسودة خطة متابعة بعد تراجع الاستدامة',
+    message: `${goal.goalNumber} — رصد النظام تراجعًا جوهريًا وأنشأ ${followUp.goalNumber} كمسودة متابعة`,
+    entityType: 'improvement_goal_sustainability_relapse',
+    entityId: goal.id,
+  });
+  if (followUp.ownerUserId) {
+    await notify({
+      userId: followUp.ownerUserId,
+      title: 'مسودة متابعة لتحسين متراجع',
+      message: `${followUp.goalNumber} — ${followUp.title}`,
+      entityType: 'improvement_goal_sustainability_follow_up',
+      entityId: followUp.id,
+    });
+  }
+
+  return followUp;
+};
+
+const evaluateImprovementGoalSustainability = async (goal, { notifyChanges = true } = {}) => {
+  if (goal.status !== 'closed' || !goal.closedAt) return goal;
+
+  const closedMonth = riyadhDateKey(goal.closedAt).slice(0, 7);
+  const snapshots = await prisma.mosqueCompletionKpiSnapshot.findMany({
+    where: {
+      status: { in: ['approved', 'archived'] },
+      month: { gt: closedMonth },
+    },
+    orderBy: { month: 'asc' },
+  });
+
+  for (const snapshot of snapshots) {
+    const currentValue = improvementMetricValue(goal, snapshot);
+    const classified = sustainabilityCheckStatus(goal, currentValue);
+    const note = classified.status === 'sustained'
+      ? 'المؤشر ما زال محققًا للمستهدف بعد الإغلاق'
+      : classified.status === 'needs_follow_up'
+        ? 'المؤشر انخفض عن المستهدف مع احتفاظه بما لا يقل عن نصف التحسن المتحقق'
+        : classified.status === 'regressed'
+          ? 'تراجع جوهري: فقد المؤشر أكثر من نصف التحسن المتحقق قبل الإغلاق'
+          : 'لا تتوفر عينة كافية للقياس في هذا الشهر';
+
+    await prisma.mosqueImprovementSustainabilityCheck.upsert({
+      where: { goalId_month: { goalId: goal.id, month: snapshot.month } },
+      update: {
+        snapshotId: snapshot.id,
+        value: currentValue === null || currentValue === undefined ? null : Number(currentValue),
+        targetValue: Number(goal.targetValue),
+        status: classified.status,
+        retentionPercent: classified.retentionPercent,
+        note,
+        evaluatedAt: new Date(),
+      },
+      create: {
+        goalId: goal.id,
+        month: snapshot.month,
+        snapshotId: snapshot.id,
+        value: currentValue === null || currentValue === undefined ? null : Number(currentValue),
+        targetValue: Number(goal.targetValue),
+        status: classified.status,
+        retentionPercent: classified.retentionPercent,
+        note,
+      },
+    });
+  }
+
+  const checks = await prisma.mosqueImprovementSustainabilityCheck.findMany({
+    where: { goalId: goal.id },
+    orderBy: { month: 'asc' },
+  });
+  const measurable = checks.filter((check) => check.status !== 'no_data');
+  const latest = measurable[measurable.length - 1] || null;
+  const recent = measurable.slice(-SUSTAINABILITY_TARGET_MONTHS);
+
+  let sustainabilityStatus = 'not_started';
+  let sustainabilityNote = 'بانتظار أول نتيجة KPI رسمية بعد إغلاق الهدف.';
+  if (latest) {
+    if (latest.status === 'regressed') {
+      sustainabilityStatus = 'regressed';
+      sustainabilityNote = 'رصد تراجع جوهري في آخر قياس بعد الإغلاق، وتم تصعيده لخطة متابعة.';
+    } else if (latest.status === 'needs_follow_up' || recent.some((check) => check.status === 'needs_follow_up')) {
+      sustainabilityStatus = 'needs_follow_up';
+      sustainabilityNote = 'التحسن ما زال قائمًا جزئيًا لكنه يحتاج متابعة قبل اعتباره مستدامًا.';
+    } else if (recent.length >= SUSTAINABILITY_TARGET_MONTHS && recent.every((check) => check.status === 'sustained')) {
+      sustainabilityStatus = 'sustained';
+      sustainabilityNote = `استمر تحقيق المستهدف لمدة ${SUSTAINABILITY_TARGET_MONTHS} أشهر رسمية متتالية بعد الإغلاق.`;
+    } else {
+      sustainabilityStatus = 'monitoring';
+      sustainabilityNote = `تحقق المستهدف في ${recent.filter((check) => check.status === 'sustained').length} من ${SUSTAINABILITY_TARGET_MONTHS} أشهر مطلوبة لإثبات الاستدامة.`;
+    }
+  }
+
+  const previousStatus = goal.sustainabilityStatus || 'not_started';
+  let followUpGoalId = goal.followUpGoalId || null;
+  let relapseDetectedAt = goal.relapseDetectedAt || null;
+
+  if (sustainabilityStatus === 'regressed' && latest) {
+    const followUp = await createRelapseFollowUpGoal(goal, latest);
+    followUpGoalId = followUp?.id || followUpGoalId;
+    relapseDetectedAt = goal.relapseDetectedAt || new Date();
+  }
+
+  const updated = await prisma.mosqueImprovementGoal.update({
+    where: { id: goal.id },
+    data: {
+      sustainabilityStatus,
+      sustainabilityValue: latest?.value ?? null,
+      sustainabilityMonth: latest?.month ?? null,
+      sustainabilityObservedMonths: measurable.length,
+      sustainabilityTargetMonths: SUSTAINABILITY_TARGET_MONTHS,
+      sustainabilityNote,
+      sustainabilityEvaluatedAt: new Date(),
+      followUpGoalId,
+      relapseDetectedAt,
+    },
+  });
+
+  if (notifyChanges && sustainabilityStatus !== previousStatus) {
+    if (sustainabilityStatus === 'sustained') {
+      await notify({
+        roleTarget: 'head',
+        title: 'تأكدت استدامة هدف التحسين',
+        message: `${goal.goalNumber} — استمر تحقيق المستهدف لمدة ${SUSTAINABILITY_TARGET_MONTHS} أشهر رسمية بعد الإغلاق`,
+        entityType: 'improvement_goal_sustainability_sustained',
+        entityId: goal.id,
+      });
+    } else if (sustainabilityStatus === 'needs_follow_up') {
+      await notify({
+        roleTarget: 'head',
+        title: 'هدف مغلق يحتاج متابعة استدامة',
+        message: `${goal.goalNumber} — انخفض المؤشر عن المستهدف دون وصوله إلى تراجع جوهري`,
+        entityType: 'improvement_goal_sustainability_watch',
+        entityId: goal.id,
+      });
+      if (goal.ownerUserId) {
+        await notify({
+          userId: goal.ownerUserId,
+          title: 'متابعة استدامة هدف تحسين',
+          message: `${goal.goalNumber} — المؤشر يحتاج متابعة بعد الإغلاق`,
+          entityType: 'improvement_goal_sustainability_watch_owner',
+          entityId: goal.id,
+        });
+      }
+    }
+  }
+
+  return updated;
+};
+
+const syncImprovementGoalSustainability = async (year = null) => {
+  const goals = await prisma.mosqueImprovementGoal.findMany({
+    where: {
+      status: 'closed',
+      ...(year ? { year } : {}),
+    },
+  });
+  for (const goal of goals) await evaluateImprovementGoalSustainability(goal);
+};
+
 router.get('/improvement-goal-assignees', requireRoles('head', 'supervisor'), async (_req, res, next) => {
   try {
     res.json(await completionTaskAssigneeDirectory());
