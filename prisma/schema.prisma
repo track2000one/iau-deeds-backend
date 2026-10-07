@@ -1409,6 +1409,7 @@ model MosqueImprovementGoal {
   updatedAt             DateTime @updatedAt
 
   sustainabilityChecks MosqueImprovementSustainabilityCheck[]
+  executiveDecisions   MosqueExecutiveDecision[]
 
   @@index([year])
   @@index([status])
@@ -1447,6 +1448,35 @@ model MosqueImprovementSustainabilityCheck {
   @@index([month])
   @@index([status])
   @@index([snapshotId])
+}
+
+model MosqueExecutiveDecision {
+  id               String   @id @default(cuid())
+  decisionNumber   String   @unique
+  decisionType     String
+  title            String
+  rationale        String
+  entityType       String?
+  entityId         String?
+  goalId           String?
+  metricKey        String?
+  sourceSnapshotId String?
+  beforeState      Json?
+  afterState       Json?
+  actorUserId      String?
+  actorName        String?
+  actorRole        String?
+  decidedAt        DateTime @default(now())
+  createdAt        DateTime @default(now())
+
+  goal MosqueImprovementGoal? @relation(fields: [goalId], references: [id], onDelete: SetNull)
+
+  @@index([decisionType])
+  @@index([goalId])
+  @@index([entityType, entityId])
+  @@index([metricKey])
+  @@index([actorUserId])
+  @@index([decidedAt])
 }
 
 model MosqueNotification {

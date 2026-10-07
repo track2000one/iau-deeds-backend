@@ -889,6 +889,7 @@ const improvementGoalCreateSchema = z.object({
   correctiveActions: z.array(improvementActionSchema).max(30).optional().default([]),
   notes: z.string().trim().max(4000).optional().nullable(),
   status: z.enum(['draft', 'active']).optional().default('draft'),
+  decisionReason: z.string().trim().min(3).max(4000).optional().nullable(),
 }).superRefine((input, ctx) => {
   if (input.category === 'assignee_metric' && !nullableText(input.assigneeUserId) && !nullableText(input.assigneeName)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['assigneeUserId'], message: 'المسؤول المستهدف مطلوب لهدف أداء فردي' });
@@ -915,6 +916,7 @@ const improvementGoalUpdateSchema = z.object({
   correctiveActions: z.array(improvementActionSchema).max(30).optional(),
   notes: z.string().trim().max(4000).optional().nullable(),
   status: z.enum(IMPROVEMENT_GOAL_STATUSES).optional(),
+  decisionReason: z.string().trim().min(3).max(4000).optional().nullable(),
 });
 
 const improvementGoalEvidenceItemSchema = z.object({
@@ -933,6 +935,7 @@ const improvementGoalEvidenceSubmitSchema = z.object({
 const improvementGoalEvidenceReviewSchema = z.object({
   decision: z.enum(['approve', 'return']),
   note: z.string().trim().max(4000).optional().nullable(),
+  decisionReason: z.string().trim().min(3).max(4000).optional().nullable(),
 }).superRefine((input, ctx) => {
   if (input.decision === 'return' && !nullableText(input.note)) {
     ctx.addIssue({
@@ -3827,6 +3830,63 @@ const improvementGoalMet = (goal, currentValue) => {
     : Number(currentValue) <= Number(goal.targetValue);
 };
 
+const improvementGoalDecisionState = (goal) => goal ? ({
+  id: goal.id,
+  goalNumber: goal.goalNumber,
+  title: goal.title,
+  category: goal.category,
+  metricKey: goal.metricKey,
+  status: goal.status,
+  ownerUserId: goal.ownerUserId || null,
+  ownerName: goal.ownerName || null,
+  dueDate: goal.dueDate ? new Date(goal.dueDate).toISOString() : null,
+  baselineValue: goal.baselineValue,
+  targetValue: goal.targetValue,
+  currentValue: goal.currentValue ?? null,
+  currentMonth: goal.currentMonth || null,
+  progressPercent: goal.progressPercent ?? 0,
+  actionProgressPercent: goal.actionProgressPercent ?? 0,
+  evidenceStatus: goal.evidenceStatus || null,
+  sustainabilityStatus: goal.sustainabilityStatus || null,
+  sustainabilityValue: goal.sustainabilityValue ?? null,
+  sustainabilityMonth: goal.sustainabilityMonth || null,
+  parentGoalId: goal.parentGoalId || null,
+  followUpGoalId: goal.followUpGoalId || null,
+}) : null;
+
+const recordExecutiveDecision = async ({
+  decisionType,
+  title,
+  rationale,
+  goal = null,
+  beforeState = null,
+  afterState = null,
+  actor,
+  actorRole = 'head',
+  entityType = 'improvement_goal',
+  entityId = null,
+  metricKey = null,
+  sourceSnapshotId = null,
+}) => prisma.mosqueExecutiveDecision.create({
+  data: {
+    decisionNumber: trackingNumber('DEC'),
+    decisionType,
+    title,
+    rationale: nullableText(rationale) || 'قرار تنفيذي موثق بالنظام',
+    entityType: nullableText(entityType),
+    entityId: nullableText(entityId) || goal?.id || null,
+    goalId: goal?.id || null,
+    metricKey: nullableText(metricKey) || goal?.metricKey || null,
+    sourceSnapshotId: nullableText(sourceSnapshotId) || goal?.sourceSnapshotId || null,
+    beforeState: beforeState || undefined,
+    afterState: afterState || undefined,
+    actorUserId: actor?.id || null,
+    actorName: actor?.name || null,
+    actorRole: nullableText(actorRole),
+    decidedAt: new Date(),
+  },
+});
+
 const latestOfficialSnapshotForGoal = async (goal) => {
   const rows = await prisma.mosqueCompletionKpiSnapshot.findMany({
     where: {
@@ -4254,6 +4314,37 @@ const runKpiApprovalAutomation = async (snapshot) => {
   return summary;
 };
 
+router.get('/executive-decisions', requireRoles('head'), async (req, res, next) => {
+  try {
+    const fromText = nullableText(req.query.from);
+    const toText = nullableText(req.query.to);
+    const decisionType = nullableText(req.query.decisionType);
+    const goalId = nullableText(req.query.goalId);
+
+    const from = fromText ? new Date(`${fromText}T00:00:00+03:00`) : null;
+    const to = toText ? new Date(`${toText}T23:59:59.999+03:00`) : null;
+    if (from && Number.isNaN(from.getTime())) return res.status(400).json({ message: 'تاريخ البداية غير صحيح' });
+    if (to && Number.isNaN(to.getTime())) return res.status(400).json({ message: 'تاريخ النهاية غير صحيح' });
+    if (from && to && from > to) return res.status(400).json({ message: 'تاريخ البداية يجب ألا يتجاوز تاريخ النهاية' });
+
+    const items = await prisma.mosqueExecutiveDecision.findMany({
+      where: {
+        ...(decisionType ? { decisionType } : {}),
+        ...(goalId ? { goalId } : {}),
+        ...(from || to ? {
+          decidedAt: {
+            ...(from ? { gte: from } : {}),
+            ...(to ? { lte: to } : {}),
+          },
+        } : {}),
+      },
+      orderBy: { decidedAt: 'desc' },
+      take: 1000,
+    });
+    res.json(items);
+  } catch (error) { next(error); }
+});
+
 router.get('/improvement-goal-assignees', requireRoles('head', 'supervisor'), async (_req, res, next) => {
   try {
     res.json(await completionTaskAssigneeDirectory());
@@ -4485,6 +4576,24 @@ router.post('/improvement-goals', requireRoles('head'), async (req, res, next) =
     }
 
     const evaluated = input.status === 'active' ? await evaluateImprovementGoal(created, { notifyChanges: false }) : created;
+
+    if (nullableText(input.decisionReason)) {
+      await recordExecutiveDecision({
+        decisionType: 'create_improvement_goal',
+        title: `إنشاء هدف تحسين: ${evaluated.title}`,
+        rationale: input.decisionReason,
+        goal: evaluated,
+        beforeState: null,
+        afterState: improvementGoalDecisionState(evaluated),
+        actor,
+        actorRole: 'head',
+        entityType: 'improvement_goal',
+        entityId: evaluated.id,
+        metricKey: evaluated.metricKey,
+        sourceSnapshotId: evaluated.sourceSnapshotId,
+      });
+    }
+
     res.status(201).json(evaluated);
   } catch (error) { next(error); }
 });
@@ -4581,6 +4690,49 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
     const evaluated = updated.status === 'active' || updated.status === 'at_risk'
       ? await evaluateImprovementGoal(updated, { notifyChanges: false })
       : updated;
+
+    if (context.role === 'head' && nullableText(input.decisionReason)) {
+      const dueDateChanged = input.dueDate !== undefined
+        && String(current.dueDate ? new Date(current.dueDate).toISOString() : '') !== String(evaluated.dueDate ? new Date(evaluated.dueDate).toISOString() : '');
+      const ownerChanged = input.ownerUserId !== undefined && (current.ownerUserId || null) !== (evaluated.ownerUserId || null);
+      const targetChanged = input.targetValue !== undefined && Number(current.targetValue) !== Number(evaluated.targetValue);
+      const statusChanged = input.status !== undefined && current.status !== evaluated.status;
+
+      let decisionType = 'update_improvement_goal';
+      let decisionTitle = `تعديل هدف تحسين: ${evaluated.title}`;
+      if (statusChanged && current.status === 'draft' && evaluated.status === 'active' && current.parentGoalId) {
+        decisionType = 'activate_follow_up_goal';
+        decisionTitle = `تفعيل خطة متابعة بعد انتكاس: ${evaluated.title}`;
+      } else if (statusChanged && current.status === 'draft' && evaluated.status === 'active') {
+        decisionType = 'activate_improvement_goal';
+        decisionTitle = `تفعيل هدف تحسين: ${evaluated.title}`;
+      } else if (statusChanged && evaluated.status === 'cancelled') {
+        decisionType = 'cancel_improvement_goal';
+        decisionTitle = `إلغاء هدف تحسين: ${evaluated.title}`;
+      } else if (dueDateChanged) {
+        decisionType = 'change_goal_due_date';
+        decisionTitle = `تعديل موعد استحقاق هدف: ${evaluated.title}`;
+      } else if (ownerChanged) {
+        decisionType = 'reassign_goal_owner';
+        decisionTitle = `إعادة إسناد هدف تحسين: ${evaluated.title}`;
+      } else if (targetChanged) {
+        decisionType = 'change_goal_target';
+        decisionTitle = `تعديل مستهدف هدف تحسين: ${evaluated.title}`;
+      }
+
+      await recordExecutiveDecision({
+        decisionType,
+        title: decisionTitle,
+        rationale: input.decisionReason,
+        goal: evaluated,
+        beforeState: improvementGoalDecisionState(current),
+        afterState: improvementGoalDecisionState(evaluated),
+        actor,
+        actorRole: context.role,
+        entityType: 'improvement_goal',
+        entityId: evaluated.id,
+      });
+    }
 
     res.json(evaluated);
   } catch (error) { next(error); }
@@ -4690,6 +4842,21 @@ router.patch('/improvement-goals/:id/evidence-review', requireRoles('head'), asy
         entityId: updated.id,
       });
     }
+
+    await recordExecutiveDecision({
+      decisionType: approved ? 'approve_closure_evidence' : 'return_closure_evidence',
+      title: approved
+        ? `اعتماد إغلاق هدف التحسين: ${updated.title}`
+        : `إعادة إثبات إغلاق هدف التحسين للاستكمال: ${updated.title}`,
+      rationale: nullableText(input.decisionReason) || nullableText(input.note) || (approved ? 'اعتماد الأدلة المؤيدة بعد المراجعة' : 'إعادة الإثبات لاستكمال المتطلبات'),
+      goal: updated,
+      beforeState: improvementGoalDecisionState(current),
+      afterState: improvementGoalDecisionState(updated),
+      actor,
+      actorRole: 'head',
+      entityType: 'improvement_goal',
+      entityId: updated.id,
+    });
 
     res.json(updated);
   } catch (error) { next(error); }
@@ -5053,6 +5220,33 @@ router.patch('/completion-kpi-snapshots/:id/status', requireRoles('head'), async
     });
 
     if (input.status === 'approved') {
+      await recordExecutiveDecision({
+        decisionType: 'approve_monthly_kpi',
+        title: `اعتماد نتيجة KPI لشهر ${updated.month}`,
+        rationale: nullableText(input.note) || 'اعتماد نتيجة KPI الشهرية وإقفالها للقياس والمتابعة',
+        beforeState: {
+          id: current.id,
+          month: current.month,
+          status: current.status,
+          kpiScore: current.kpiScore,
+          kpiStatus: current.kpiStatus,
+        },
+        afterState: {
+          id: updated.id,
+          month: updated.month,
+          status: updated.status,
+          kpiScore: updated.kpiScore,
+          kpiStatus: updated.kpiStatus,
+          approvedAt: updated.approvedAt ? new Date(updated.approvedAt).toISOString() : null,
+        },
+        actor,
+        actorRole: 'head',
+        entityType: 'completion_kpi_snapshot',
+        entityId: updated.id,
+        metricKey: 'unitKpi',
+        sourceSnapshotId: updated.id,
+      });
+
       try {
         const automation = await runKpiApprovalAutomation(updated);
         return res.json({ ...updated, automation: { status: 'success', ...automation } });
