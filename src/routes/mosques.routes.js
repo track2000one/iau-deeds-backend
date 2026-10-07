@@ -311,6 +311,118 @@ const notify = async ({ userId = null, roleTarget = null, siteId = null, title, 
   }
 };
 
+const RIYADH_TIME_ZONE = 'Asia/Riyadh';
+const riyadhDateKey = (value = new Date()) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: RIYADH_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(value));
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${byType.year}-${byType.month}-${byType.day}`;
+};
+const calendarDayNumber = (dateKey) => {
+  const [year, month, day] = String(dateKey).split('-').map(Number);
+  return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+};
+const completionTaskTiming = (task, todayKey = riyadhDateKey()) => {
+  if (!task?.dueDate || !['open', 'in_progress'].includes(task.status)) return 'none';
+  const days = calendarDayNumber(riyadhDateKey(task.dueDate)) - calendarDayNumber(todayKey);
+  if (days < 0) return 'overdue';
+  if (days === 0) return 'today';
+  if (days <= 3) return 'soon';
+  return 'future';
+};
+const summarizeCompletionTaskTiming = (tasks, todayKey = riyadhDateKey()) => ({
+  active: tasks.filter((task) => ['open', 'in_progress'].includes(task.status)).length,
+  overdue: tasks.filter((task) => completionTaskTiming(task, todayKey) === 'overdue').length,
+  dueToday: tasks.filter((task) => completionTaskTiming(task, todayKey) === 'today').length,
+  dueSoon: tasks.filter((task) => completionTaskTiming(task, todayKey) === 'soon').length,
+  unassigned: tasks.filter((task) => ['open', 'in_progress'].includes(task.status) && !task.assignedToUserId).length,
+});
+
+const notifyCompletionTaskOnce = async ({ task, userId = null, roleTarget = null, title, message, entityType }) => {
+  const existing = await prisma.mosqueNotification.findFirst({
+    where: {
+      entityType,
+      entityId: task.id,
+      userId: userId || null,
+      roleTarget: roleTarget || null,
+    },
+    select: { id: true },
+  });
+  if (existing) return false;
+  await notify({
+    userId,
+    roleTarget,
+    siteId: task.siteId,
+    title,
+    message,
+    entityType,
+    entityId: task.id,
+  });
+  return true;
+};
+
+export const syncCompletionTaskAlerts = async () => {
+  try {
+    const tasks = await prisma.mosqueCompletionTask.findMany({
+      where: {
+        status: { in: ['open', 'in_progress'] },
+        dueDate: { not: null },
+      },
+      include: { site: { select: { name: true } } },
+    });
+    const todayKey = riyadhDateKey();
+
+    for (const task of tasks) {
+      const timing = completionTaskTiming(task, todayKey);
+      if (!['soon', 'today', 'overdue'].includes(timing)) continue;
+      const siteName = task.site?.name || 'الموقع';
+      const dueLabel = riyadhDateKey(task.dueDate);
+      const recipient = task.assignedToUserId
+        ? { userId: task.assignedToUserId, roleTarget: null }
+        : { userId: null, roleTarget: 'head' };
+
+      if (timing === 'soon') {
+        await notifyCompletionTaskOnce({
+          task,
+          ...recipient,
+          title: 'اقتراب موعد مهمة استكمال',
+          message: `${task.taskNumber} — ${siteName}: الموعد ${dueLabel}`,
+          entityType: 'completion_task_due_soon',
+        });
+      } else if (timing === 'today') {
+        await notifyCompletionTaskOnce({
+          task,
+          ...recipient,
+          title: 'مهمة استكمال مستحقة اليوم',
+          message: `${task.taskNumber} — ${siteName}: يستحق الإنجاز اليوم`,
+          entityType: 'completion_task_due_today',
+        });
+      } else if (timing === 'overdue') {
+        await notifyCompletionTaskOnce({
+          task,
+          ...recipient,
+          title: 'مهمة استكمال متأخرة',
+          message: `${task.taskNumber} — ${siteName}: تجاوزت موعد الإنجاز ${dueLabel}`,
+          entityType: 'completion_task_overdue_assignee',
+        });
+        await notifyCompletionTaskOnce({
+          task,
+          roleTarget: 'head',
+          title: 'تصعيد مهمة استكمال متأخرة',
+          message: `${task.taskNumber} — ${siteName}: المهمة متأخرة وتتطلب متابعة إدارية`,
+          entityType: 'completion_task_overdue_head',
+        });
+      }
+    }
+  } catch (error) {
+    console.warn('Unable to sync mosque completion task alerts:', error?.message || error);
+  }
+};
+
 const siteSchema = z.object({
   name: z.string().trim().min(2),
   siteType: z.enum(['mosque', 'jami', 'prayer_room']).default('mosque'),
@@ -1052,10 +1164,14 @@ router.get('/dashboard', async (req, res, next) => {
           sites, newRequests: 0, reviewRequests: 0, approvedRequests: 0, lateRequests: 0,
           openTickets: 0, pendingLeaves: 0, jobs: 0, managedSites: 0, assignedRequests: 0,
           urgentRequests: 0, newTickets: 0, myRequests: 0, myLeaves: 0,
+          completionTasksActive: 0, completionTasksOverdue: 0, completionTasksDueToday: 0,
+          completionTasksDueSoon: 0, completionTasksUnassigned: 0,
         },
-        recentRequests: [], recentTickets: [], linkedSite: null, managedSiteIds: [],
+        recentRequests: [], recentTickets: [], recentCompletionTasks: [], linkedSite: null, managedSiteIds: [],
       });
     }
+
+    if (['head', 'supervisor'].includes(context.role)) await syncCompletionTaskAlerts();
 
     const managedSiteIds = await getManagedSiteIds(req, context);
     const siteIdWhere = managedSiteIds === null ? {} : { siteId: { in: managedSiteIds } };
@@ -1090,6 +1206,18 @@ router.get('/dashboard', async (req, res, next) => {
         : Promise.resolve([]),
     ]);
 
+    const completionTasks = ['head', 'supervisor'].includes(context.role)
+      ? await prisma.mosqueCompletionTask.findMany({
+          where: {
+            ...siteIdWhere,
+            status: { in: ['open', 'in_progress'] },
+          },
+          include: { site: { select: { id: true, name: true } } },
+          orderBy: [{ dueDate: 'asc' }, { priority: 'desc' }, { createdAt: 'desc' }],
+        })
+      : [];
+    const completionTaskStats = summarizeCompletionTaskTiming(completionTasks);
+
     const linkedSite = context.role === 'personnel' && context.siteId
       ? await prisma.mosqueSite.findUnique({
           where: { id: context.siteId },
@@ -1109,8 +1237,16 @@ router.get('/dashboard', async (req, res, next) => {
         sites, newRequests, reviewRequests, approvedRequests, lateRequests, openTickets, pendingLeaves, jobs,
         managedSites: context.role === 'supervisor' ? sites : 0,
         assignedRequests, urgentRequests, newTickets, myRequests, myLeaves,
+        completionTasksActive: completionTaskStats.active,
+        completionTasksOverdue: completionTaskStats.overdue,
+        completionTasksDueToday: completionTaskStats.dueToday,
+        completionTasksDueSoon: completionTaskStats.dueSoon,
+        completionTasksUnassigned: completionTaskStats.unassigned,
       },
-      recentRequests, recentTickets, linkedSite,
+      recentRequests,
+      recentTickets,
+      recentCompletionTasks: completionTasks.slice(0, 5),
+      linkedSite,
       managedSiteIds: context.role === 'supervisor' ? (managedSiteIds || []) : [],
     });
   } catch (error) { next(error); }
@@ -3522,6 +3658,7 @@ router.get('/completion-task-assignees', requireRoles('head', 'supervisor'), asy
 
 router.get('/completion-tasks', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
+    await syncCompletionTaskAlerts();
     const context = req.mosqueRole || await getModuleRole(req);
     const managedSiteIds = context.role === 'head' ? null : await getManagedSiteIds(req, context);
     const status = nullableText(req.query.status);
@@ -3685,6 +3822,7 @@ router.patch('/completion-tasks/:id', requireRoles('head', 'supervisor'), async 
 router.get('/notifications', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
+    if (['head', 'supervisor'].includes(context.role)) await syncCompletionTaskAlerts();
     const filters = [{ userId: req.authUser.id }];
     if (context.role === 'head') filters.push({ roleTarget: 'head' });
     if (context.role === 'supervisor') {
