@@ -4314,6 +4314,37 @@ const runKpiApprovalAutomation = async (snapshot) => {
   return summary;
 };
 
+router.get('/executive-decisions', requireRoles('head'), async (req, res, next) => {
+  try {
+    const fromText = nullableText(req.query.from);
+    const toText = nullableText(req.query.to);
+    const decisionType = nullableText(req.query.decisionType);
+    const goalId = nullableText(req.query.goalId);
+
+    const from = fromText ? new Date(`${fromText}T00:00:00+03:00`) : null;
+    const to = toText ? new Date(`${toText}T23:59:59.999+03:00`) : null;
+    if (from && Number.isNaN(from.getTime())) return res.status(400).json({ message: 'تاريخ البداية غير صحيح' });
+    if (to && Number.isNaN(to.getTime())) return res.status(400).json({ message: 'تاريخ النهاية غير صحيح' });
+    if (from && to && from > to) return res.status(400).json({ message: 'تاريخ البداية يجب ألا يتجاوز تاريخ النهاية' });
+
+    const items = await prisma.mosqueExecutiveDecision.findMany({
+      where: {
+        ...(decisionType ? { decisionType } : {}),
+        ...(goalId ? { goalId } : {}),
+        ...(from || to ? {
+          decidedAt: {
+            ...(from ? { gte: from } : {}),
+            ...(to ? { lte: to } : {}),
+          },
+        } : {}),
+      },
+      orderBy: { decidedAt: 'desc' },
+      take: 1000,
+    });
+    res.json(items);
+  } catch (error) { next(error); }
+});
+
 router.get('/improvement-goal-assignees', requireRoles('head', 'supervisor'), async (_req, res, next) => {
   try {
     res.json(await completionTaskAssigneeDirectory());
