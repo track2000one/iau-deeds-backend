@@ -4138,6 +4138,14 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
     const current = await prisma.mosqueImprovementGoal.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'هدف التحسين غير موجود' });
 
+    if (['evidence_review', 'closed', 'cancelled'].includes(current.status)) {
+      return res.status(409).json({
+        message: current.status === 'evidence_review'
+          ? 'الهدف قيد مراجعة إثبات الإغلاق ولا يقبل تعديلات تشغيلية حتى صدور قرار المراجعة'
+          : 'لا يمكن تعديل هدف مغلق أو ملغى',
+      });
+    }
+
     if (context.role === 'supervisor') {
       if (current.ownerUserId !== req.authUser.id) {
         return res.status(403).json({ message: 'يمكن للمشرف تحديث أهداف التحسين المسندة إليه فقط' });
@@ -4152,7 +4160,8 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
       draft: ['active', 'cancelled'],
       active: ['cancelled'],
       at_risk: ['cancelled'],
-      achieved: ['closed'],
+      achieved: [],
+      evidence_review: [],
       closed: [],
       cancelled: [],
     };
@@ -4180,7 +4189,6 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
         ownerName: owner?.username || null,
       } : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.status === 'closed' ? { closedAt: new Date() } : {}),
       updatedBy: actor.id,
       updatedByName: actor.name,
     };
