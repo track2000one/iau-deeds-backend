@@ -3732,6 +3732,291 @@ const completedOnTime = (task) => {
   return calendarDayNumber(completedKey) <= calendarDayNumber(dueKey);
 };
 
+const KPI_SNAPSHOT_TRANSITIONS = {
+  draft: ['review'],
+  review: ['draft', 'approved'],
+  approved: ['archived'],
+  archived: [],
+};
+
+const completionKpiSnapshotTransitionSchema = z.object({
+  status: z.enum(['draft', 'review', 'approved', 'archived']),
+  note: z.string().trim().max(3000).optional().nullable(),
+});
+
+const completionKpiSnapshotMonthSchema = z.string().regex(/^\d{4}-\d{2}$/, 'صيغة الشهر يجب أن تكون YYYY-MM');
+
+const completionSnapshotActor = async (req) => {
+  const user = await prisma.appUser.findUnique({
+    where: { id: req.authUser.id },
+    select: { username: true },
+  });
+  return {
+    id: req.authUser.id,
+    name: req.authUser?.username || user?.username || 'مستخدم',
+  };
+};
+
+const buildUnitCompletionAnalytics = async (monthInput) => {
+  const { month, start, endExclusive } = completionTaskMonthRange(monthInput);
+
+  const [allTasks, periodCreated, periodCompleted] = await Promise.all([
+    prisma.mosqueCompletionTask.findMany({
+      include: completionTaskInclude,
+      orderBy: { createdAt: 'asc' },
+    }),
+    prisma.mosqueCompletionTask.findMany({
+      where: { createdAt: { gte: start, lt: endExclusive } },
+      include: completionTaskInclude,
+      orderBy: { createdAt: 'asc' },
+    }),
+    prisma.mosqueCompletionTask.findMany({
+      where: { completedAt: { gte: start, lt: endExclusive } },
+      include: completionTaskInclude,
+      orderBy: { completedAt: 'asc' },
+    }),
+  ]);
+
+  const activeTasks = allTasks.filter((task) => ['open', 'in_progress'].includes(task.status));
+  const timing = summarizeCompletionTaskTiming(activeTasks);
+  const completedWithDueDate = periodCompleted.filter((task) => task.dueDate);
+  const onTimeCompleted = completedWithDueDate.filter((task) => completedOnTime(task) === true);
+  const createdAndCompletedWithinPeriod = periodCreated.filter(
+    (task) => task.completedAt && new Date(task.completedAt) < endExclusive
+  );
+  const completionDurations = periodCompleted.map(completionHours).filter((value) => value !== null);
+  const avgCompletionHours = completionDurations.length
+    ? Math.round((completionDurations.reduce((sum, value) => sum + value, 0) / completionDurations.length) * 10) / 10
+    : null;
+
+  const assigneeKeys = new Set(
+    allTasks.map((task) => task.assignedToUserId || (task.assignedToName ? `name:${task.assignedToName}` : 'unassigned'))
+  );
+  const byAssignee = [...assigneeKeys].map((key) => {
+    const matches = (task) => (task.assignedToUserId || (task.assignedToName ? `name:${task.assignedToName}` : 'unassigned')) === key;
+    const scopedAll = allTasks.filter(matches);
+    const scopedCreated = periodCreated.filter(matches);
+    const scopedCompleted = periodCompleted.filter(matches);
+    const scopedActive = scopedAll.filter((task) => ['open', 'in_progress'].includes(task.status));
+    const scopedDue = scopedCompleted.filter((task) => task.dueDate);
+    const scopedOnTime = scopedDue.filter((task) => completedOnTime(task) === true);
+    const durations = scopedCompleted.map(completionHours).filter((value) => value !== null);
+    const scopedCreatedAndCompleted = scopedCreated.filter(
+      (task) => task.completedAt && new Date(task.completedAt) < endExclusive
+    );
+    const overdue = scopedActive.filter((task) => completionTaskTiming(task) === 'overdue').length;
+    const completionRate = scopedCreated.length ? Math.round((scopedCreatedAndCompleted.length / scopedCreated.length) * 100) : null;
+    const onTimeRate = scopedDue.length ? Math.round((scopedOnTime.length / scopedDue.length) * 100) : null;
+    const scopedAvgHours = durations.length
+      ? Math.round((durations.reduce((sum, value) => sum + value, 0) / durations.length) * 10) / 10
+      : null;
+    const overdueRate = scopedActive.length ? Math.round((overdue / scopedActive.length) * 100) : 0;
+    const sample = scopedAll[0] || scopedCreated[0] || scopedCompleted[0];
+    const kpi = buildCompletionKpi({
+      completionRate,
+      onTimeRate,
+      avgCompletionDays: scopedAvgHours === null ? null : Math.round((scopedAvgHours / 24) * 10) / 10,
+      overdueRate,
+    });
+
+    return {
+      assigneeUserId: sample?.assignedToUserId || null,
+      assigneeName: sample?.assignedToName || 'غير مسندة',
+      created: scopedCreated.length,
+      completed: scopedCompleted.length,
+      completionRate,
+      active: scopedActive.length,
+      overdue,
+      overdueRate,
+      dueToday: scopedActive.filter((task) => completionTaskTiming(task) === 'today').length,
+      onTimeCompleted: scopedOnTime.length,
+      completedWithDueDate: scopedDue.length,
+      onTimeRate,
+      avgCompletionHours: scopedAvgHours,
+      kpi,
+    };
+  }).sort((a, b) => b.overdue - a.overdue || b.active - a.active || b.completed - a.completed);
+
+  const missingKeys = [...new Set(allTasks.map((task) => task.missingKey))];
+  const byMissingKey = missingKeys.map((missingKey) => {
+    const all = allTasks.filter((task) => task.missingKey === missingKey);
+    const created = periodCreated.filter((task) => task.missingKey === missingKey);
+    const completed = periodCompleted.filter((task) => task.missingKey === missingKey);
+    const active = all.filter((task) => ['open', 'in_progress'].includes(task.status));
+    return {
+      missingKey,
+      total: all.length,
+      created: created.length,
+      completed: completed.length,
+      active: active.length,
+      overdue: active.filter((task) => completionTaskTiming(task) === 'overdue').length,
+    };
+  }).sort((a, b) => b.created - a.created || b.active - a.active || b.total - a.total);
+
+  const monthKeys = [];
+  const [selectedYear, selectedMonth] = month.split('-').map(Number);
+  for (let offset = 5; offset >= 0; offset -= 1) {
+    const date = new Date(Date.UTC(selectedYear, selectedMonth - 1 - offset, 1));
+    monthKeys.push(`${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`);
+  }
+  const trend = monthKeys.map((monthKey) => {
+    const range = completionTaskMonthRange(monthKey);
+    const created = allTasks.filter((task) => new Date(task.createdAt) >= range.start && new Date(task.createdAt) < range.endExclusive);
+    const completed = allTasks.filter((task) => task.completedAt && new Date(task.completedAt) >= range.start && new Date(task.completedAt) < range.endExclusive);
+    const completedDue = completed.filter((task) => task.dueDate);
+    const onTime = completedDue.filter((task) => completedOnTime(task) === true);
+    return {
+      month: monthKey,
+      created: created.length,
+      completed: completed.length,
+      onTimeRate: completedDue.length ? Math.round((onTime.length / completedDue.length) * 100) : null,
+    };
+  });
+
+  const completionRate = periodCreated.length ? Math.round((createdAndCompletedWithinPeriod.length / periodCreated.length) * 100) : 0;
+  const onTimeRate = completedWithDueDate.length ? Math.round((onTimeCompleted.length / completedWithDueDate.length) * 100) : null;
+  const avgCompletionDays = avgCompletionHours === null ? null : Math.round((avgCompletionHours / 24) * 10) / 10;
+  const overdueRate = timing.active ? Math.round((timing.overdue / timing.active) * 100) : 0;
+  const unitKpi = buildCompletionKpi({
+    completionRate: periodCreated.length ? completionRate : null,
+    onTimeRate,
+    avgCompletionDays,
+    overdueRate,
+  });
+
+  return {
+    month,
+    period: { from: start.toISOString(), toExclusive: endExclusive.toISOString() },
+    kpiStandard: COMPLETION_KPI_STANDARD,
+    unitKpi,
+    summary: {
+      created: periodCreated.length,
+      completed: periodCompleted.length,
+      completionRate,
+      active: timing.active,
+      overdue: timing.overdue,
+      overdueRate,
+      dueToday: timing.dueToday,
+      dueSoon: timing.dueSoon,
+      unassigned: timing.unassigned,
+      completedWithDueDate: completedWithDueDate.length,
+      onTimeCompleted: onTimeCompleted.length,
+      onTimeRate,
+      avgCompletionHours,
+      avgCompletionDays,
+    },
+    byAssignee,
+    byMissingKey,
+    trend,
+    periodTasks: {
+      created: periodCreated,
+      completed: periodCompleted,
+    },
+  };
+};
+
+router.get('/completion-kpi-snapshots', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const month = nullableText(req.query.month);
+    const status = nullableText(req.query.status);
+    if (month) completionKpiSnapshotMonthSchema.parse(month);
+
+    const items = await prisma.mosqueCompletionKpiSnapshot.findMany({
+      where: {
+        ...(month ? { month } : {}),
+        ...(status ? { status } : {}),
+      },
+      orderBy: [{ month: 'desc' }, { createdAt: 'desc' }],
+    });
+    res.json(items);
+  } catch (error) { next(error); }
+});
+
+router.post('/completion-kpi-snapshots/:month', requireRoles('head'), async (req, res, next) => {
+  try {
+    const month = completionKpiSnapshotMonthSchema.parse(req.params.month);
+    if (month > riyadhDateKey().slice(0, 7)) {
+      return res.status(400).json({ message: 'لا يمكن إنشاء لقطة KPI لشهر مستقبلي' });
+    }
+
+    const current = await prisma.mosqueCompletionKpiSnapshot.findUnique({ where: { month } });
+    if (current && current.status !== 'draft') {
+      return res.status(409).json({ message: 'لا يمكن إعادة احتساب اللقطة بعد إرسالها للمراجعة أو اعتمادها' });
+    }
+
+    const analytics = await buildUnitCompletionAnalytics(month);
+    const actor = await completionSnapshotActor(req);
+    const data = {
+      status: 'draft',
+      standardCode: analytics.kpiStandard.code,
+      kpiScore: analytics.unitKpi.score,
+      kpiStatus: analytics.unitKpi.status,
+      payload: analytics,
+      note: nullableText(req.body?.note),
+      generatedBy: actor.id,
+      generatedByName: actor.name,
+      generatedAt: new Date(),
+    };
+
+    const snapshot = current
+      ? await prisma.mosqueCompletionKpiSnapshot.update({ where: { id: current.id }, data })
+      : await prisma.mosqueCompletionKpiSnapshot.create({ data: { month, ...data } });
+
+    res.status(current ? 200 : 201).json(snapshot);
+  } catch (error) { next(error); }
+});
+
+router.patch('/completion-kpi-snapshots/:id/status', requireRoles('head'), async (req, res, next) => {
+  try {
+    const input = completionKpiSnapshotTransitionSchema.parse(req.body);
+    const current = await prisma.mosqueCompletionKpiSnapshot.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'لقطة KPI غير موجودة' });
+
+    if (current.status === input.status) return res.json(current);
+    const allowed = KPI_SNAPSHOT_TRANSITIONS[current.status] || [];
+    if (!allowed.includes(input.status)) {
+      return res.status(400).json({ message: `لا يمكن تغيير حالة اللقطة من ${current.status} إلى ${input.status}` });
+    }
+
+    if (input.status === 'approved' && current.month >= riyadhDateKey().slice(0, 7)) {
+      return res.status(400).json({ message: 'لا يمكن اعتماد نتيجة KPI قبل انتهاء الشهر' });
+    }
+    if (current.status === 'review' && input.status === 'draft' && !nullableText(input.note)) {
+      return res.status(400).json({ message: 'ملاحظة الإعادة إلى المسودة مطلوبة' });
+    }
+
+    const actor = await completionSnapshotActor(req);
+    const data = {
+      status: input.status,
+      ...(input.note !== undefined ? { note: nullableText(input.note) } : {}),
+    };
+
+    if (input.status === 'review') {
+      data.reviewedBy = actor.id;
+      data.reviewedByName = actor.name;
+      data.reviewedAt = new Date();
+    } else if (input.status === 'draft') {
+      data.reviewedBy = null;
+      data.reviewedByName = null;
+      data.reviewedAt = null;
+    } else if (input.status === 'approved') {
+      data.approvedBy = actor.id;
+      data.approvedByName = actor.name;
+      data.approvedAt = new Date();
+    } else if (input.status === 'archived') {
+      data.archivedBy = actor.id;
+      data.archivedByName = actor.name;
+      data.archivedAt = new Date();
+    }
+
+    const updated = await prisma.mosqueCompletionKpiSnapshot.update({
+      where: { id: current.id },
+      data,
+    });
+    res.json(updated);
+  } catch (error) { next(error); }
+});
+
 router.get('/completion-tasks/analytics', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
     const context = req.mosqueRole || await getModuleRole(req);
