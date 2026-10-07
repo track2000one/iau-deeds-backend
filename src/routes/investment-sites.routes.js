@@ -40,14 +40,16 @@ const polygonGeometrySchema = z.object({
   coordinates: z.array(polygonRingSchema).min(1).max(50),
 }).passthrough();
 
-const polygonGeoJsonSchema = z.union([
+const requiredPolygonGeoJsonSchema = z.union([
   polygonGeometrySchema,
   z.object({
     type: z.literal('Feature'),
     geometry: polygonGeometrySchema,
     properties: z.record(z.unknown()).optional().nullable(),
   }).passthrough(),
-]).optional().nullable();
+]);
+
+const polygonGeoJsonSchema = requiredPolygonGeoJsonSchema.optional().nullable();
 
 const createSiteSchema = z.object({
   code: z.string().trim().min(2, 'رمز الموقع مطلوب').max(30)
@@ -70,7 +72,7 @@ const updateSiteSchema = createSiteSchema.partial();
 const bulkSiteGeometryUpdateSchema = z.object({
   items: z.array(z.object({
     siteId: z.string().min(1),
-    geoJson: polygonGeoJsonSchema,
+    geoJson: requiredPolygonGeoJsonSchema,
     latitude: z.coerce.number().min(-90).max(90),
     longitude: z.coerce.number().min(-180).max(180),
     geometryAccuracy: accuracySchema.optional(),
