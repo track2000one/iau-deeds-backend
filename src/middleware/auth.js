@@ -91,6 +91,16 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canCreateUser';
   }
 
+  // GIS bulk geometry changes are editing operations even though they use POST
+  // to submit a transactional batch payload.
+  if (
+    moduleName === 'investments' &&
+    method === 'POST' &&
+    /\/geometry-bulk\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canEdit';
+  }
+
   // Data-cycle administration uses dedicated high-impact permissions.
   // Creating a cycle and approving it are deliberately separated from generic Add/Edit.
   if (
