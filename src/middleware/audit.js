@@ -19,6 +19,7 @@ const moduleLabels = {
   records: 'السجلات',
   archive: 'الأرشفة',
   users: 'المستخدمون',
+  investments: 'المساحات والفرص الاستثمارية',
 };
 
 const prismaModelByModule = {
