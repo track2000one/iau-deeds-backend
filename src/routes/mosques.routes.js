@@ -701,6 +701,50 @@ const assignmentSchema = z.object({
   personnelRole: z.enum(['imam', 'muezzin', 'khateeb', 'collaborating_khateeb', 'collaborator']).optional().nullable(),
 });
 
+const COMPLETION_TASK_MISSING_KEYS = [
+  'identity',
+  'gender',
+  'building',
+  'location',
+  'coordinates',
+  'area',
+  'capacity',
+  'contact',
+  'photos',
+  'documents',
+  'women_verification',
+  'women_details',
+  'visit',
+];
+
+const completionTaskCreateSchema = z.object({
+  siteId: z.string().min(1),
+  missingKey: z.enum(COMPLETION_TASK_MISSING_KEYS),
+  title: z.string().trim().min(3).max(300),
+  description: z.string().trim().max(3000).optional().nullable(),
+  priority: z.enum(['normal', 'medium', 'high', 'urgent']).optional().default('medium'),
+  assignedToUserId: z.string().trim().optional().nullable(),
+  dueDate: z.coerce.date().optional().nullable(),
+});
+
+const completionTaskUpdateSchema = z.object({
+  title: z.string().trim().min(3).max(300).optional(),
+  description: z.string().trim().max(3000).optional().nullable(),
+  priority: z.enum(['normal', 'medium', 'high', 'urgent']).optional(),
+  assignedToUserId: z.string().trim().optional().nullable(),
+  dueDate: z.coerce.date().optional().nullable(),
+  status: z.enum(['open', 'in_progress', 'completed', 'cancelled']).optional(),
+  completionNote: z.string().trim().max(3000).optional().nullable(),
+}).superRefine((input, ctx) => {
+  if (input.status === 'completed' && !nullableText(input.completionNote)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['completionNote'],
+      message: 'ملاحظة الإنجاز مطلوبة عند إكمال مهمة الاستكمال',
+    });
+  }
+});
+
 
 const personnelAccountSchema = z.object({
   siteId: z.string().min(1),
@@ -3386,6 +3430,255 @@ router.put('/assignments/:userId', async (req, res, next) => {
     });
 
     res.json(assignment);
+  } catch (error) { next(error); }
+});
+
+
+const completionTaskInclude = {
+  site: {
+    select: {
+      id: true,
+      name: true,
+      siteType: true,
+      prayerRoomGender: true,
+      campusLocation: true,
+      buildingId: true,
+      supervisorUserId: true,
+    },
+  },
+};
+
+const completionTaskAssigneeDirectory = async ({ siteId = null } = {}) => {
+  const [users, assignments, permissions, site] = await Promise.all([
+    prisma.appUser.findMany({
+      where: { isActive: true },
+      select: { id: true, username: true, email: true, role: true, isActive: true },
+      orderBy: { username: 'asc' },
+    }),
+    prisma.mosqueUserAssignment.findMany(),
+    prisma.userPermission.findMany({
+      where: { module: 'mosques', canView: true },
+      select: { userId: true, canView: true, canAdd: true, canEdit: true, canDelete: true, canPrint: true },
+    }),
+    siteId
+      ? prisma.mosqueSite.findUnique({ where: { id: siteId }, select: { supervisorUserId: true } })
+      : Promise.resolve(null),
+  ]);
+
+  const assignmentByUser = new Map(assignments.map((item) => [item.userId, item]));
+  const permissionByUser = new Map(permissions.map((item) => [item.userId, item]));
+
+  return users
+    .map((user) => {
+      const assignment = assignmentByUser.get(user.id);
+      const permission = permissionByUser.get(user.id);
+      const fullPermission = Boolean(
+        permission?.canView
+        && permission?.canAdd
+        && permission?.canEdit
+        && permission?.canDelete
+        && permission?.canPrint
+      );
+      const moduleRole = user.role === 'admin' || fullPermission
+        ? 'head'
+        : normalizeMosqueRole(assignment?.role || 'university_member');
+
+      return {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        moduleRole,
+        fullPermission,
+        assignmentSiteId: assignment?.siteId || null,
+      };
+    })
+    .filter((user) => {
+      if (user.moduleRole === 'head') return true;
+      if (user.moduleRole !== 'supervisor') return false;
+      if (!siteId) return true;
+      return site?.supervisorUserId === user.id;
+    });
+};
+
+const assertCompletionTaskAssignee = async (userId, siteId) => {
+  if (!userId) return null;
+  const assignees = await completionTaskAssigneeDirectory({ siteId });
+  const assignee = assignees.find((item) => item.id === userId);
+  if (!assignee) {
+    const error = new Error('المستخدم المحدد غير متاح لإسناد مهمة استكمال هذا الموقع');
+    error.statusCode = 400;
+    throw error;
+  }
+  return assignee;
+};
+
+router.get('/completion-task-assignees', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const siteId = nullableText(req.query.siteId);
+    if (siteId) await assertSupervisorSiteAccess(req, siteId, req.mosqueRole);
+    res.json(await completionTaskAssigneeDirectory({ siteId }));
+  } catch (error) { next(error); }
+});
+
+router.get('/completion-tasks', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const managedSiteIds = context.role === 'head' ? null : await getManagedSiteIds(req, context);
+    const status = nullableText(req.query.status);
+    const siteId = nullableText(req.query.siteId);
+
+    if (siteId && managedSiteIds !== null && !(managedSiteIds || []).includes(siteId)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية عرض مهام الاستكمال لهذا الموقع' });
+    }
+
+    const where = {
+      ...(managedSiteIds === null ? {} : { siteId: { in: managedSiteIds || [] } }),
+      ...(siteId ? { siteId } : {}),
+      ...(status ? { status } : {}),
+    };
+
+    const items = await prisma.mosqueCompletionTask.findMany({
+      where,
+      include: completionTaskInclude,
+      orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
+    });
+    res.json(items);
+  } catch (error) { next(error); }
+});
+
+router.post('/completion-tasks', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const input = completionTaskCreateSchema.parse(req.body);
+    await assertSupervisorSiteAccess(req, input.siteId, req.mosqueRole);
+
+    const site = await prisma.mosqueSite.findUnique({
+      where: { id: input.siteId },
+      select: { id: true, name: true },
+    });
+    if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
+
+    const duplicate = await prisma.mosqueCompletionTask.findFirst({
+      where: {
+        siteId: input.siteId,
+        missingKey: input.missingKey,
+        status: { in: ['open', 'in_progress'] },
+      },
+      include: completionTaskInclude,
+    });
+    if (duplicate) {
+      return res.status(409).json({
+        message: 'توجد مهمة متابعة نشطة لهذا البند بالفعل',
+        task: duplicate,
+      });
+    }
+
+    const assignee = await assertCompletionTaskAssignee(input.assignedToUserId, input.siteId);
+    const actorName = req.authUser?.username
+      || (await prisma.appUser.findUnique({ where: { id: req.authUser.id }, select: { username: true } }))?.username
+      || 'مستخدم';
+
+    const created = await prisma.mosqueCompletionTask.create({
+      data: {
+        taskNumber: trackingNumber('CMP'),
+        siteId: input.siteId,
+        missingKey: input.missingKey,
+        title: input.title,
+        description: nullableText(input.description),
+        priority: input.priority,
+        assignedToUserId: assignee?.id || null,
+        assignedToName: assignee?.username || null,
+        dueDate: input.dueDate || null,
+        createdBy: req.authUser.id,
+        createdByName: actorName,
+      },
+      include: completionTaskInclude,
+    });
+
+    if (assignee) {
+      await notify({
+        userId: assignee.id,
+        siteId: input.siteId,
+        title: 'مهمة استكمال بيانات جديدة',
+        message: `${created.taskNumber} — ${site.name}: ${created.title}`,
+        entityType: 'completion_task',
+        entityId: created.id,
+      });
+    }
+
+    res.status(201).json(created);
+  } catch (error) { next(error); }
+});
+
+router.patch('/completion-tasks/:id', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const input = completionTaskUpdateSchema.parse(req.body);
+    const current = await prisma.mosqueCompletionTask.findUnique({
+      where: { id: req.params.id },
+      include: completionTaskInclude,
+    });
+    if (!current) return res.status(404).json({ message: 'مهمة الاستكمال غير موجودة' });
+
+    await assertSupervisorSiteAccess(req, current.siteId, req.mosqueRole);
+    const assignee = input.assignedToUserId === undefined
+      ? undefined
+      : await assertCompletionTaskAssignee(input.assignedToUserId, current.siteId);
+
+    const nextStatus = input.status || current.status;
+    if (current.status === 'completed' && !['completed', 'open'].includes(nextStatus)) {
+      return res.status(400).json({ message: 'يمكن إعادة فتح المهمة المكتملة أو إبقاؤها مكتملة فقط' });
+    }
+    if (current.status === 'cancelled' && nextStatus !== 'open' && nextStatus !== 'cancelled') {
+      return res.status(400).json({ message: 'أعد فتح المهمة الملغاة قبل بدء تنفيذها' });
+    }
+
+    const data = {
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.description !== undefined ? { description: nullableText(input.description) } : {}),
+      ...(input.priority !== undefined ? { priority: input.priority } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: input.dueDate || null } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.completionNote !== undefined ? { completionNote: nullableText(input.completionNote) } : {}),
+      ...(assignee !== undefined ? {
+        assignedToUserId: assignee?.id || null,
+        assignedToName: assignee?.username || null,
+      } : {}),
+    };
+
+    if (input.status === 'completed') data.completedAt = new Date();
+    if (input.status === 'open' && current.status === 'completed') {
+      data.completedAt = null;
+      data.completionNote = nullableText(input.completionNote);
+    }
+
+    const updated = await prisma.mosqueCompletionTask.update({
+      where: { id: current.id },
+      data,
+      include: completionTaskInclude,
+    });
+
+    if (assignee && assignee.id !== current.assignedToUserId) {
+      await notify({
+        userId: assignee.id,
+        siteId: current.siteId,
+        title: 'تم إسناد مهمة استكمال بيانات إليك',
+        message: `${updated.taskNumber} — ${updated.site.name}: ${updated.title}`,
+        entityType: 'completion_task',
+        entityId: updated.id,
+      });
+    }
+
+    if (input.status === 'completed' && current.status !== 'completed') {
+      await notify({
+        roleTarget: 'head',
+        siteId: current.siteId,
+        title: 'اكتملت مهمة استكمال بيانات',
+        message: `${updated.taskNumber} — ${updated.site.name}: ${updated.title}`,
+        entityType: 'completion_task',
+        entityId: updated.id,
+      });
+    }
+
+    res.json(updated);
   } catch (error) { next(error); }
 });
 
