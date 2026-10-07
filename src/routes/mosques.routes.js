@@ -860,7 +860,7 @@ const completionTaskUpdateSchema = z.object({
 
 const IMPROVEMENT_GOAL_CATEGORIES = ['unit_metric', 'assignee_metric', 'gap_reduction'];
 const IMPROVEMENT_GOAL_METRICS = ['completionRate', 'onTimeRate', 'avgCompletionDays', 'overdueRate', 'kpiScore', 'gapCreatedCount'];
-const IMPROVEMENT_GOAL_STATUSES = ['draft', 'active', 'at_risk', 'achieved', 'closed', 'cancelled'];
+const IMPROVEMENT_GOAL_STATUSES = ['draft', 'active', 'at_risk', 'achieved', 'evidence_review', 'closed', 'cancelled'];
 const IMPROVEMENT_ACTION_STATUSES = ['planned', 'in_progress', 'completed'];
 
 const improvementActionSchema = z.object({
@@ -915,6 +915,32 @@ const improvementGoalUpdateSchema = z.object({
   correctiveActions: z.array(improvementActionSchema).max(30).optional(),
   notes: z.string().trim().max(4000).optional().nullable(),
   status: z.enum(IMPROVEMENT_GOAL_STATUSES).optional(),
+});
+
+const improvementGoalEvidenceItemSchema = z.object({
+  url: z.string().url(),
+  fileId: z.string().trim().max(300).optional().nullable(),
+  fileName: z.string().trim().max(500).optional().nullable(),
+  mimeType: z.string().trim().max(200).optional().nullable(),
+  kind: z.enum(['image', 'document']),
+});
+
+const improvementGoalEvidenceSubmitSchema = z.object({
+  summary: z.string().trim().min(10).max(5000),
+  evidence: z.array(improvementGoalEvidenceItemSchema).min(1).max(20),
+});
+
+const improvementGoalEvidenceReviewSchema = z.object({
+  decision: z.enum(['approve', 'return']),
+  note: z.string().trim().max(4000).optional().nullable(),
+}).superRefine((input, ctx) => {
+  if (input.decision === 'return' && !nullableText(input.note)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['note'],
+      message: 'ملاحظة إعادة الإثبات للاستكمال مطلوبة',
+    });
+  }
 });
 
 const personnelAccountSchema = z.object({
@@ -4112,6 +4138,21 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
     const current = await prisma.mosqueImprovementGoal.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'هدف التحسين غير موجود' });
 
+    if (['evidence_review', 'closed', 'cancelled'].includes(current.status)) {
+      return res.status(409).json({
+        message: current.status === 'evidence_review'
+          ? 'الهدف قيد مراجعة إثبات الإغلاق ولا يقبل تعديلات تشغيلية حتى صدور قرار المراجعة'
+          : 'لا يمكن تعديل هدف مغلق أو ملغى',
+      });
+    }
+
+    if (current.status === 'achieved') {
+      const frozenFields = ['title', 'targetValue', 'ownerUserId', 'dueDate', 'status'];
+      if (frozenFields.some((field) => input[field] !== undefined)) {
+        return res.status(409).json({ message: 'بعد تحقق الهدف رقميًا تثبت بيانات الهدف والمستهدف، ويسمح فقط باستكمال الإجراءات والملاحظات وإثبات الإغلاق' });
+      }
+    }
+
     if (context.role === 'supervisor') {
       if (current.ownerUserId !== req.authUser.id) {
         return res.status(403).json({ message: 'يمكن للمشرف تحديث أهداف التحسين المسندة إليه فقط' });
@@ -4126,7 +4167,8 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
       draft: ['active', 'cancelled'],
       active: ['cancelled'],
       at_risk: ['cancelled'],
-      achieved: ['closed'],
+      achieved: [],
+      evidence_review: [],
       closed: [],
       cancelled: [],
     };
@@ -4154,7 +4196,6 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
         ownerName: owner?.username || null,
       } : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.status === 'closed' ? { closedAt: new Date() } : {}),
       updatedBy: actor.id,
       updatedByName: actor.name,
     };
@@ -4184,6 +4225,115 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
       : updated;
 
     res.json(evaluated);
+  } catch (error) { next(error); }
+});
+
+router.post('/improvement-goals/:id/evidence', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const input = improvementGoalEvidenceSubmitSchema.parse(req.body);
+    const current = await prisma.mosqueImprovementGoal.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'هدف التحسين غير موجود' });
+
+    if (current.status !== 'achieved') {
+      return res.status(409).json({ message: 'يمكن رفع إثبات الإغلاق بعد تحقق الهدف رقميًا فقط' });
+    }
+    if (context.role === 'supervisor' && current.ownerUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'يمكن للمشرف رفع الإثبات للأهداف المسندة إليه فقط' });
+    }
+
+    const actions = Array.isArray(current.correctiveActions) ? current.correctiveActions : [];
+    if (actions.length && actions.some((action) => action?.status !== 'completed')) {
+      return res.status(400).json({ message: 'أكمل جميع الإجراءات التصحيحية قبل إرسال إثبات الإغلاق للمراجعة' });
+    }
+
+    const actor = await completionSnapshotActor(req);
+    const submittedAt = new Date();
+    const evidence = input.evidence.map((item) => ({
+      ...item,
+      fileId: nullableText(item.fileId),
+      fileName: nullableText(item.fileName),
+      mimeType: nullableText(item.mimeType),
+      submittedAt: submittedAt.toISOString(),
+    }));
+
+    const updated = await prisma.mosqueImprovementGoal.update({
+      where: { id: current.id },
+      data: {
+        status: 'evidence_review',
+        closureSummary: input.summary,
+        closureEvidence: evidence,
+        evidenceStatus: 'submitted',
+        evidenceSubmittedBy: actor.id,
+        evidenceSubmittedName: actor.name,
+        evidenceSubmittedAt: submittedAt,
+        evidenceReviewedBy: null,
+        evidenceReviewedName: null,
+        evidenceReviewedAt: null,
+        evidenceReviewNote: null,
+        updatedBy: actor.id,
+        updatedByName: actor.name,
+      },
+    });
+
+    await notify({
+      roleTarget: 'head',
+      title: 'إثبات إغلاق هدف تحسين بانتظار المراجعة',
+      message: `${updated.goalNumber} — ${updated.title}: تم رفع ${evidence.length} مرفق/مرفقات للإغلاق`,
+      entityType: 'improvement_goal_evidence_review',
+      entityId: updated.id,
+    });
+
+    res.json(updated);
+  } catch (error) { next(error); }
+});
+
+router.patch('/improvement-goals/:id/evidence-review', requireRoles('head'), async (req, res, next) => {
+  try {
+    const input = improvementGoalEvidenceReviewSchema.parse(req.body);
+    const current = await prisma.mosqueImprovementGoal.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'هدف التحسين غير موجود' });
+    if (current.status !== 'evidence_review' || current.evidenceStatus !== 'submitted') {
+      return res.status(409).json({ message: 'لا توجد حزمة إثبات قيد المراجعة لهذا الهدف' });
+    }
+
+    const evidence = Array.isArray(current.closureEvidence) ? current.closureEvidence : [];
+    if (!evidence.length || !nullableText(current.closureSummary)) {
+      return res.status(400).json({ message: 'بيانات إثبات الإغلاق غير مكتملة' });
+    }
+
+    const actor = await completionSnapshotActor(req);
+    const reviewedAt = new Date();
+    const approved = input.decision === 'approve';
+
+    const updated = await prisma.mosqueImprovementGoal.update({
+      where: { id: current.id },
+      data: {
+        status: approved ? 'closed' : 'achieved',
+        evidenceStatus: approved ? 'approved' : 'returned',
+        evidenceReviewedBy: actor.id,
+        evidenceReviewedName: actor.name,
+        evidenceReviewedAt: reviewedAt,
+        evidenceReviewNote: nullableText(input.note),
+        closedAt: approved ? reviewedAt : null,
+        updatedBy: actor.id,
+        updatedByName: actor.name,
+      },
+    });
+
+    if (updated.ownerUserId) {
+      await notify({
+        userId: updated.ownerUserId,
+        title: approved ? 'تم اعتماد إغلاق هدف التحسين' : 'أعيد إثبات إغلاق هدف التحسين للاستكمال',
+        message: approved
+          ? `${updated.goalNumber} — ${updated.title}: تم اعتماد الأدلة وإغلاق الهدف`
+          : `${updated.goalNumber} — ${updated.title}: ${nullableText(input.note) || 'يرجى استكمال الإثبات'}`,
+        entityType: approved ? 'improvement_goal_closed' : 'improvement_goal_evidence_returned',
+        entityId: updated.id,
+      });
+    }
+
+    res.json(updated);
   } catch (error) { next(error); }
 });
 
