@@ -507,9 +507,10 @@ router.patch('/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'الفرصة الاستثمارية غير موجودة' });
     }
 
-    if (['INVESTED', 'CANCELLED'].includes(existing.status)) {
+    if (!['IDENTIFIED', 'UNDER_STUDY', 'REJECTED'].includes(existing.status)) {
       return res.status(409).json({
-        message: 'لا يمكن تعديل بيانات فرصة بعد وصولها إلى حالة نهائية',
+        message:
+          'بيانات الفرصة مقفلة في الحالة الحالية. أعد الفرصة إلى «تحت الدراسة» قبل تعديل البيانات، متى كان هذا الانتقال متاحًا.',
       });
     }
 
@@ -520,9 +521,29 @@ router.patch('/:id', async (req, res, next) => {
         : existing.allocatedArea
     );
 
-    const updated = await prisma.investmentOpportunity.update({
+    const actor = userSnapshot(req);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.investmentOpportunity.update({
+        where: { id: existing.id },
+        data: input,
+      });
+
+      await tx.investmentOpportunityEvent.create({
+        data: {
+          opportunityId: existing.id,
+          fromStatus: existing.status,
+          toStatus: existing.status,
+          action: 'UPDATED',
+          note: 'تم تحديث بيانات الفرصة الاستثمارية.',
+          changedById: actor.id,
+          changedByName: actor.name,
+        },
+      });
+    });
+
+    const updated = await prisma.investmentOpportunity.findUnique({
       where: { id: existing.id },
-      data: input,
       include: includeOpportunity,
     });
 
