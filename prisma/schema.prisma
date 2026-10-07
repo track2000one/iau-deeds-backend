@@ -930,6 +930,7 @@ model MosqueSite {
   quranRackInventories MosqueQuranRackInventory[]
   quranRackMovements   MosqueQuranRackMovement[]
   fieldVisits          MosqueFieldVisit[]
+  completionTasks      MosqueCompletionTask[]
   building             MosqueBuilding?            @relation(fields: [buildingId], references: [id], onDelete: SetNull)
 
   @@index([siteType])
@@ -1289,6 +1290,36 @@ model MosqueUserAssignment {
 
   @@index([role])
   @@index([siteId])
+}
+
+model MosqueCompletionTask {
+  id               String    @id @default(cuid())
+  taskNumber       String    @unique
+  siteId           String
+  missingKey       String
+  title            String
+  description      String?
+  priority         String    @default("medium")
+  status           String    @default("open")
+  assignedToUserId String?
+  assignedToName   String?
+  dueDate          DateTime?
+  completionNote   String?
+  completedAt      DateTime?
+  createdBy        String?
+  createdByName    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  site MosqueSite @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@index([missingKey])
+  @@index([priority])
+  @@index([status])
+  @@index([assignedToUserId])
+  @@index([dueDate])
+  @@index([createdAt])
 }
 
 model MosqueNotification {
