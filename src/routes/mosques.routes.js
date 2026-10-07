@@ -860,7 +860,7 @@ const completionTaskUpdateSchema = z.object({
 
 const IMPROVEMENT_GOAL_CATEGORIES = ['unit_metric', 'assignee_metric', 'gap_reduction'];
 const IMPROVEMENT_GOAL_METRICS = ['completionRate', 'onTimeRate', 'avgCompletionDays', 'overdueRate', 'kpiScore', 'gapCreatedCount'];
-const IMPROVEMENT_GOAL_STATUSES = ['draft', 'active', 'at_risk', 'achieved', 'closed', 'cancelled'];
+const IMPROVEMENT_GOAL_STATUSES = ['draft', 'active', 'at_risk', 'achieved', 'evidence_review', 'closed', 'cancelled'];
 const IMPROVEMENT_ACTION_STATUSES = ['planned', 'in_progress', 'completed'];
 
 const improvementActionSchema = z.object({
@@ -915,6 +915,32 @@ const improvementGoalUpdateSchema = z.object({
   correctiveActions: z.array(improvementActionSchema).max(30).optional(),
   notes: z.string().trim().max(4000).optional().nullable(),
   status: z.enum(IMPROVEMENT_GOAL_STATUSES).optional(),
+});
+
+const improvementGoalEvidenceItemSchema = z.object({
+  url: z.string().url(),
+  fileId: z.string().trim().max(300).optional().nullable(),
+  fileName: z.string().trim().max(500).optional().nullable(),
+  mimeType: z.string().trim().max(200).optional().nullable(),
+  kind: z.enum(['image', 'document']),
+});
+
+const improvementGoalEvidenceSubmitSchema = z.object({
+  summary: z.string().trim().min(10).max(5000),
+  evidence: z.array(improvementGoalEvidenceItemSchema).min(1).max(20),
+});
+
+const improvementGoalEvidenceReviewSchema = z.object({
+  decision: z.enum(['approve', 'return']),
+  note: z.string().trim().max(4000).optional().nullable(),
+}).superRefine((input, ctx) => {
+  if (input.decision === 'return' && !nullableText(input.note)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['note'],
+      message: 'ملاحظة إعادة الإثبات للاستكمال مطلوبة',
+    });
+  }
 });
 
 const personnelAccountSchema = z.object({
