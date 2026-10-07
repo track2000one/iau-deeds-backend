@@ -5220,6 +5220,33 @@ router.patch('/completion-kpi-snapshots/:id/status', requireRoles('head'), async
     });
 
     if (input.status === 'approved') {
+      await recordExecutiveDecision({
+        decisionType: 'approve_monthly_kpi',
+        title: `اعتماد نتيجة KPI لشهر ${updated.month}`,
+        rationale: nullableText(input.note) || 'اعتماد نتيجة KPI الشهرية وإقفالها للقياس والمتابعة',
+        beforeState: {
+          id: current.id,
+          month: current.month,
+          status: current.status,
+          kpiScore: current.kpiScore,
+          kpiStatus: current.kpiStatus,
+        },
+        afterState: {
+          id: updated.id,
+          month: updated.month,
+          status: updated.status,
+          kpiScore: updated.kpiScore,
+          kpiStatus: updated.kpiStatus,
+          approvedAt: updated.approvedAt ? new Date(updated.approvedAt).toISOString() : null,
+        },
+        actor,
+        actorRole: 'head',
+        entityType: 'completion_kpi_snapshot',
+        entityId: updated.id,
+        metricKey: 'unitKpi',
+        sourceSnapshotId: updated.id,
+      });
+
       try {
         const automation = await runKpiApprovalAutomation(updated);
         return res.json({ ...updated, automation: { status: 'success', ...automation } });
