@@ -432,6 +432,11 @@ const normalizeWomenPrayerArea = (input, actor = null, currentSite = null) => {
     || nullableText(previousMeta.verificationNotes);
 
   if (requestedPresence === 'verified_absent') {
+    if (!verificationNotes) {
+      const error = new Error('ملاحظة أو مرجع التحقق إلزامي عند اعتماد عدم وجود مصلى نساء');
+      error.statusCode = 400;
+      throw error;
+    }
     input.hasWomenPrayerArea = false;
     input.womenPrayerArea = {
       presenceStatus: 'verified_absent',
@@ -1209,6 +1214,22 @@ const shouldIncludeWomenSection = (site, visitScope = 'whole_site') => {
   return ['whole_site', 'women_section', 'both_sections'].includes(visitScope);
 };
 
+const validateWomenVisitScope = (site, visitScope) => {
+  if (!['women_section', 'both_sections'].includes(visitScope)) return;
+  if (site?.siteType === 'prayer_room' && site.prayerRoomGender === 'women' && visitScope === 'women_section') return;
+  if (['mosque', 'jami'].includes(site?.siteType) && womenPrayerPresenceStatus(site) === 'present') return;
+
+  const presence = womenPrayerPresenceStatus(site);
+  const message = presence === 'verified_absent'
+    ? 'لا يمكن اختيار نطاق مصلى النساء؛ سجل الموقع مؤكد بأنه لا يوجد به مصلى نساء.'
+    : presence === 'unverified'
+      ? 'لا يمكن اختيار نطاق مصلى النساء قبل التحقق من وجوده في سجل المسجد أو الجامع.'
+      : 'نطاق مصلى النساء غير متاح لهذا النوع من المواقع.';
+  const error = new Error(message);
+  error.statusCode = 400;
+  throw error;
+};
+
 const newFieldChecklist = ({ site = null, visitScope = 'whole_site' } = {}) => [
   ...FIELD_VISIT_CHECKLIST,
   ...(shouldIncludeWomenSection(site, visitScope) ? WOMEN_PRAYER_AREA_CHECKLIST : []),
@@ -1618,9 +1639,10 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
     const site = await prisma.mosqueSite.findUnique({
       where: { id: input.siteId },
-      select: { id: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true },
+      select: { id: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true, womenPrayerArea: true },
     });
     if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
+    validateWomenVisitScope(site, input.visitScope);
     const conflict = await findActiveFieldVisitConflict([input.siteId]);
     if (conflict) {
       return res.status(409).json({
@@ -1672,6 +1694,12 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
     }
     const input = fieldVisitSchema.parse(req.body);
     validateFieldVisitTreatmentEvidence(input);
+    const targetSite = await prisma.mosqueSite.findUnique({
+      where: { id: input.siteId },
+      select: { id: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true, womenPrayerArea: true },
+    });
+    if (!targetSite) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
+    validateWomenVisitScope(targetSite, input.visitScope);
     if (ACTIVE_FIELD_VISIT_STATUSES.includes(input.workflowStatus)) {
       const conflict = await findActiveFieldVisitConflict([input.siteId], current.id);
       if (conflict) {
