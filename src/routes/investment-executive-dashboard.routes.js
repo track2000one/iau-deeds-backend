@@ -321,6 +321,11 @@ router.get('/', async (_req, res, next) => {
     const readyAreas = allAreas.filter(
       (area) => area.investmentReadiness === 'READY'
     );
+    const availableAndReadyAreas = allAreas.filter(
+      (area) =>
+        area.occupancyStatus === 'AVAILABLE' &&
+        area.investmentReadiness === 'READY'
+    );
     const polygonAreas = allAreas.filter((area) => area.hasPolygon);
     const approvedAreaGeometry = allAreas.filter(
       (area) => area.geometryApprovalStatus === 'APPROVED'
@@ -442,6 +447,11 @@ router.get('/', async (_req, res, next) => {
         ),
         readyAreaCount: readyAreas.length,
         readyReferenceArea: readyAreas.reduce(
+          (sum, area) => sum + area.referenceArea,
+          0
+        ),
+        availableAndReadyAreaCount: availableAndReadyAreas.length,
+        availableAndReadyReferenceArea: availableAndReadyAreas.reduce(
           (sum, area) => sum + area.referenceArea,
           0
         ),
