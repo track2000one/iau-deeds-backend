@@ -1322,6 +1322,36 @@ model MosqueCompletionTask {
   @@index([createdAt])
 }
 
+model MosqueCompletionKpiSnapshot {
+  id               String   @id @default(cuid())
+  month            String   @unique
+  status           String   @default("draft")
+  standardCode     String
+  kpiScore         Int?
+  kpiStatus        String
+  payload          Json
+  note             String?
+  generatedBy      String?
+  generatedByName  String?
+  generatedAt      DateTime @default(now())
+  reviewedBy       String?
+  reviewedByName   String?
+  reviewedAt       DateTime?
+  approvedBy       String?
+  approvedByName   String?
+  approvedAt       DateTime?
+  archivedBy       String?
+  archivedByName   String?
+  archivedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([status])
+  @@index([month])
+  @@index([generatedAt])
+  @@index([approvedAt])
+}
+
 model MosqueNotification {
   id         String   @id @default(cuid())
   userId     String?
