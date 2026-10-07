@@ -40,14 +40,16 @@ const polygonGeometrySchema = z.object({
   coordinates: z.array(polygonRingSchema).min(1).max(50),
 }).passthrough();
 
-const polygonGeoJsonSchema = z.union([
+const requiredPolygonGeoJsonSchema = z.union([
   polygonGeometrySchema,
   z.object({
     type: z.literal('Feature'),
     geometry: polygonGeometrySchema,
     properties: z.record(z.unknown()).optional().nullable(),
   }).passthrough(),
-]).optional().nullable();
+]);
+
+const polygonGeoJsonSchema = requiredPolygonGeoJsonSchema.optional().nullable();
 
 const createSiteSchema = z.object({
   code: z.string().trim().min(2, 'رمز الموقع مطلوب').max(30)
@@ -66,6 +68,16 @@ const createSiteSchema = z.object({
 });
 
 const updateSiteSchema = createSiteSchema.partial();
+
+const bulkSiteGeometryUpdateSchema = z.object({
+  items: z.array(z.object({
+    siteId: z.string().min(1),
+    geoJson: requiredPolygonGeoJsonSchema,
+    latitude: z.coerce.number().min(-90).max(90),
+    longitude: z.coerce.number().min(-180).max(180),
+    geometryAccuracy: accuracySchema.optional(),
+  })).min(1).max(100),
+});
 
 const listSchema = z.object({
   search: z.string().trim().optional(),
@@ -208,6 +220,84 @@ router.get('/:id', async (req, res, next) => {
     }
 
     res.json(site);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/geometry-bulk', async (req, res, next) => {
+  try {
+    const input = bulkSiteGeometryUpdateSchema.parse(req.body);
+    const siteIds = input.items.map((item) => item.siteId);
+
+    if (new Set(siteIds).size !== siteIds.length) {
+      return res.status(400).json({
+        message: 'طلب تحديث الحدود يحتوي على الموقع الرئيسي نفسه أكثر من مرة',
+      });
+    }
+
+    const existingSites = await prisma.investmentSite.findMany({
+      where: {
+        id: { in: siteIds },
+        isActive: true,
+      },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        geometryAccuracy: true,
+      },
+    });
+
+    if (existingSites.length !== siteIds.length) {
+      const found = new Set(existingSites.map((site) => site.id));
+      const missing = siteIds.filter((id) => !found.has(id));
+      return res.status(400).json({
+        message: `بعض المواقع غير موجودة أو مؤرشفة: ${missing.join(', ')}`,
+      });
+    }
+
+    const existingById = new Map(
+      existingSites.map((site) => [site.id, site])
+    );
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const results = [];
+
+      for (const item of input.items) {
+        const existing = existingById.get(item.siteId);
+
+        const site = await tx.investmentSite.update({
+          where: { id: item.siteId },
+          data: {
+            geoJson: item.geoJson,
+            latitude: item.latitude,
+            longitude: item.longitude,
+            geometryAccuracy:
+              item.geometryAccuracy || existing.geometryAccuracy,
+          },
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            latitude: true,
+            longitude: true,
+            geometryAccuracy: true,
+            updatedAt: true,
+          },
+        });
+
+        results.push(site);
+      }
+
+      return results;
+    });
+
+    res.json({
+      requested: input.items.length,
+      updated: updated.length,
+      items: updated,
+    });
   } catch (error) {
     next(error);
   }
