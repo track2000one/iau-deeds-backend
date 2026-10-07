@@ -183,6 +183,24 @@ router.get('/', async (_req, res, next) => {
         areas: {
           where: { isActive: true },
           orderBy: { areaNumber: 'asc' },
+          include: {
+            opportunities: {
+              where: {
+                isActive: true,
+                status: {
+                  notIn: ['REJECTED', 'CANCELLED'],
+                },
+              },
+              select: {
+                id: true,
+                opportunityNumber: true,
+                status: true,
+                estimatedValue: true,
+              },
+              orderBy: { updatedAt: 'desc' },
+              take: 1,
+            },
+          },
         },
       },
       orderBy: { name: 'asc' },
@@ -211,6 +229,8 @@ router.get('/', async (_req, res, next) => {
         const referenceArea =
           surveyedArea > 0 ? surveyedArea : approximateArea;
 
+        const activeOpportunity = area.opportunities?.[0] || null;
+
         const analyzed = {
           id: area.id,
           siteId: site.id,
@@ -231,6 +251,9 @@ router.get('/', async (_req, res, next) => {
           blockerCount: blockers.length,
           completionPercent: completionPercent(blockers),
           opportunityCandidate: blockers.length === 0,
+          activeOpportunity,
+          availableForOpportunityCreation:
+            blockers.length === 0 && !activeOpportunity,
           updatedAt: area.updatedAt,
         };
 
@@ -248,7 +271,7 @@ router.get('/', async (_req, res, next) => {
       );
 
       const candidateAreas = analyzedAreas.filter(
-        (area) => area.opportunityCandidate
+        (area) => area.availableForOpportunityCreation
       );
       const readyAreas = analyzedAreas.filter(
         (area) => area.investmentReadiness === 'READY'
@@ -341,7 +364,13 @@ router.get('/', async (_req, res, next) => {
       (area) => hasText(area.proposedUse)
     );
     const candidates = allAreas.filter(
-      (area) => area.opportunityCandidate
+      (area) => area.availableForOpportunityCreation
+    );
+    const activeOpportunityAreas = allAreas.filter(
+      (area) => Boolean(area.activeOpportunity)
+    );
+    const investedOpportunityAreas = allAreas.filter(
+      (area) => area.activeOpportunity?.status === 'INVESTED'
     );
 
     const linkedSites = siteSummaries.filter(
@@ -407,7 +436,11 @@ router.get('/', async (_req, res, next) => {
     });
 
     const closestToOpportunity = allAreas
-      .filter((area) => !area.opportunityCandidate)
+      .filter(
+        (area) =>
+          !area.opportunityCandidate &&
+          !area.activeOpportunity
+      )
       .sort((a, b) => {
         if (a.blockerCount !== b.blockerCount) {
           return a.blockerCount - b.blockerCount;
@@ -464,7 +497,19 @@ router.get('/', async (_req, res, next) => {
           (sum, area) => sum + area.referenceArea,
           0
         ),
-        blockedAreaCount: allAreas.length - candidates.length,
+        activeOpportunityCount: activeOpportunityAreas.length,
+        investedOpportunityCount: investedOpportunityAreas.length,
+        activeOpportunityEstimatedValue: activeOpportunityAreas.reduce(
+          (sum, area) =>
+            sum + Number(area.activeOpportunity?.estimatedValue || 0),
+          0
+        ),
+        blockedAreaCount:
+          allAreas.filter(
+            (area) =>
+              !area.opportunityCandidate &&
+              !area.activeOpportunity
+          ).length,
         deedLinkedSiteCount: linkedSites.length,
         siteBoundaryCount: siteBoundarySites.length,
         approvedSiteBoundaryCount: approvedSiteBoundaries.length,

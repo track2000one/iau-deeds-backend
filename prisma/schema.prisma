@@ -18,11 +18,13 @@ enum AttachmentEntityType {
   site_inspection
   investment_site
   investment_area
+  investment_opportunity
   asset
 }
 
 enum AttachmentType {
   deed_image
+  survey_document
   plan_image
   location_image
   contract_image
@@ -59,6 +61,18 @@ enum GeometryApprovalStatus {
   REVIEWED
   APPROVED
   CHANGE_REQUESTED
+}
+
+enum InvestmentOpportunityStatus {
+  IDENTIFIED
+  UNDER_STUDY
+  PENDING_APPROVAL
+  APPROVED
+  OFFERED
+  NEGOTIATION
+  INVESTED
+  REJECTED
+  CANCELLED
 }
 
 enum AppUserRole {
@@ -247,11 +261,69 @@ model InvestmentArea {
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
 
+  opportunities        InvestmentOpportunity[]
+
   @@unique([siteId, areaNumber])
   @@index([siteId])
   @@index([occupancyStatus])
   @@index([investmentReadiness])
   @@index([isActive])
+}
+
+model InvestmentOpportunity {
+  id                     String                      @id @default(cuid())
+  opportunityNumber      String                      @unique
+  areaId                 String
+  area                   InvestmentArea              @relation(fields: [areaId], references: [id], onDelete: Restrict)
+
+  title                  String
+  investmentUse          String?
+  projectDescription     String?
+  allocatedArea          Decimal?                    @db.Decimal(18, 2)
+  durationMonths         Int?
+  estimatedValue         Decimal?                    @db.Decimal(18, 2)
+  currency               String                      @default("SAR")
+
+  status                 InvestmentOpportunityStatus @default(IDENTIFIED)
+  statusChangedAt        DateTime                    @default(now())
+  submittedAt            DateTime?
+  approvedAt             DateTime?
+  offeredAt              DateTime?
+  investedAt             DateTime?
+  cancelledAt            DateTime?
+  approvedById           String?
+  approvedByName         String?
+  notes                  String?
+
+  isActive               Boolean                     @default(true)
+  createdById            String?
+  createdByName          String?
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
+
+  events                 InvestmentOpportunityEvent[]
+
+  @@index([areaId])
+  @@index([status])
+  @@index([isActive])
+  @@index([createdAt])
+}
+
+model InvestmentOpportunityEvent {
+  id               String                      @id @default(cuid())
+  opportunityId    String
+  opportunity      InvestmentOpportunity       @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  fromStatus       InvestmentOpportunityStatus?
+  toStatus         InvestmentOpportunityStatus
+  action           String
+  note             String?
+  changedById      String?
+  changedByName    String?
+  createdAt        DateTime                    @default(now())
+
+  @@index([opportunityId])
+  @@index([createdAt])
 }
 
 model AllocatedLand {
