@@ -327,6 +327,11 @@ const siteSchema = z.object({
   quranTargetCount: z.coerce.number().int().min(0).max(1000000).optional().nullable(),
   hasWomenPrayerArea: z.boolean().optional().default(false),
   womenPrayerArea: z.object({
+    presenceStatus: z.enum(['present', 'verified_absent', 'unverified']).optional(),
+    verificationNotes: z.string().trim().max(3000).optional().nullable(),
+    verifiedAt: z.string().trim().optional().nullable(),
+    verifiedBy: z.string().trim().optional().nullable(),
+    verifiedByName: z.string().trim().max(300).optional().nullable(),
     capacity: z.coerce.number().int().nonnegative().optional().nullable(),
     floor: z.string().trim().max(120).optional().nullable(),
     locationDescription: z.string().trim().max(500).optional().nullable(),
@@ -384,17 +389,67 @@ const buildingSchema = z.object({
   notes: z.string().trim().optional().nullable(),
 });
 
-const normalizeWomenPrayerArea = (input) => {
+const womenPrayerPresenceStatus = (site) => {
+  if (!site || !['mosque', 'jami'].includes(site.siteType)) return 'not_applicable';
+  if (site.hasWomenPrayerArea) return 'present';
+  return site.womenPrayerArea?.presenceStatus === 'verified_absent' ? 'verified_absent' : 'unverified';
+};
+
+const normalizeWomenPrayerArea = (input, actor = null, currentSite = null) => {
   if (!['mosque', 'jami'].includes(input.siteType)) {
     input.hasWomenPrayerArea = false;
     input.womenPrayerArea = null;
     return;
   }
-  if (!input.hasWomenPrayerArea) {
+
+  const requestedPresence = input.hasWomenPrayerArea
+    ? 'present'
+    : input.womenPrayerArea?.presenceStatus === 'verified_absent'
+      ? 'verified_absent'
+      : 'unverified';
+
+  if (requestedPresence === 'unverified') {
+    input.hasWomenPrayerArea = false;
     input.womenPrayerArea = null;
     return;
   }
+
+  const previousPresence = womenPrayerPresenceStatus(currentSite);
+  const previousMeta = currentSite?.womenPrayerArea && typeof currentSite.womenPrayerArea === 'object'
+    ? currentSite.womenPrayerArea
+    : {};
+  const presenceChanged = requestedPresence !== previousPresence;
+  const verifiedAt = presenceChanged || !previousMeta.verifiedAt
+    ? new Date().toISOString()
+    : previousMeta.verifiedAt;
+  const verifiedBy = presenceChanged || !previousMeta.verifiedBy
+    ? (actor?.id || null)
+    : previousMeta.verifiedBy;
+  const verifiedByName = presenceChanged || !previousMeta.verifiedByName
+    ? (actor?.username || actor?.email || actor?.name || null)
+    : previousMeta.verifiedByName;
+  const verificationNotes = nullableText(input.womenPrayerArea?.verificationNotes)
+    || nullableText(previousMeta.verificationNotes);
+
+  if (requestedPresence === 'verified_absent') {
+    input.hasWomenPrayerArea = false;
+    input.womenPrayerArea = {
+      presenceStatus: 'verified_absent',
+      verificationNotes,
+      verifiedAt,
+      verifiedBy,
+      verifiedByName,
+    };
+    return;
+  }
+
+  input.hasWomenPrayerArea = true;
   input.womenPrayerArea = {
+    presenceStatus: 'present',
+    verificationNotes,
+    verifiedAt,
+    verifiedBy,
+    verifiedByName,
     capacity: input.womenPrayerArea?.capacity ?? null,
     floor: nullableText(input.womenPrayerArea?.floor),
     locationDescription: nullableText(input.womenPrayerArea?.locationDescription),
@@ -1098,7 +1153,7 @@ router.post('/sites' , requireRoles('head', 'supervisor'), async (req, res, next
   try {
     const context = req.mosqueRole || await getModuleRole(req);
     const input = siteSchema.parse(req.body);
-    normalizeWomenPrayerArea(input);
+    normalizeWomenPrayerArea(input, req.authUser, null);
     await assertMosqueBuildingLink(input);
     const site = await prisma.mosqueSite.create({
       data: {
@@ -1118,7 +1173,7 @@ router.put('/sites/:id', requireRoles('head', 'supervisor'), async (req, res, ne
     if (!current) return res.status(404).json({ message: 'الموقع غير موجود' });
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, current.id, context);
     const input = siteSchema.parse(req.body);
-    normalizeWomenPrayerArea(input);
+    normalizeWomenPrayerArea(input, req.authUser, current);
     await assertMosqueBuildingLink(input);
     const site = await prisma.mosqueSite.update({
       where: { id: req.params.id },
