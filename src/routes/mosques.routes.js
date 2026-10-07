@@ -4221,6 +4221,115 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
   } catch (error) { next(error); }
 });
 
+router.post('/improvement-goals/:id/evidence', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const input = improvementGoalEvidenceSubmitSchema.parse(req.body);
+    const current = await prisma.mosqueImprovementGoal.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'هدف التحسين غير موجود' });
+
+    if (current.status !== 'achieved') {
+      return res.status(409).json({ message: 'يمكن رفع إثبات الإغلاق بعد تحقق الهدف رقميًا فقط' });
+    }
+    if (context.role === 'supervisor' && current.ownerUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'يمكن للمشرف رفع الإثبات للأهداف المسندة إليه فقط' });
+    }
+
+    const actions = Array.isArray(current.correctiveActions) ? current.correctiveActions : [];
+    if (actions.length && actions.some((action) => action?.status !== 'completed')) {
+      return res.status(400).json({ message: 'أكمل جميع الإجراءات التصحيحية قبل إرسال إثبات الإغلاق للمراجعة' });
+    }
+
+    const actor = await completionSnapshotActor(req);
+    const submittedAt = new Date();
+    const evidence = input.evidence.map((item) => ({
+      ...item,
+      fileId: nullableText(item.fileId),
+      fileName: nullableText(item.fileName),
+      mimeType: nullableText(item.mimeType),
+      submittedAt: submittedAt.toISOString(),
+    }));
+
+    const updated = await prisma.mosqueImprovementGoal.update({
+      where: { id: current.id },
+      data: {
+        status: 'evidence_review',
+        closureSummary: input.summary,
+        closureEvidence: evidence,
+        evidenceStatus: 'submitted',
+        evidenceSubmittedBy: actor.id,
+        evidenceSubmittedName: actor.name,
+        evidenceSubmittedAt: submittedAt,
+        evidenceReviewedBy: null,
+        evidenceReviewedName: null,
+        evidenceReviewedAt: null,
+        evidenceReviewNote: null,
+        updatedBy: actor.id,
+        updatedByName: actor.name,
+      },
+    });
+
+    await notify({
+      roleTarget: 'head',
+      title: 'إثبات إغلاق هدف تحسين بانتظار المراجعة',
+      message: `${updated.goalNumber} — ${updated.title}: تم رفع ${evidence.length} مرفق/مرفقات للإغلاق`,
+      entityType: 'improvement_goal_evidence_review',
+      entityId: updated.id,
+    });
+
+    res.json(updated);
+  } catch (error) { next(error); }
+});
+
+router.patch('/improvement-goals/:id/evidence-review', requireRoles('head'), async (req, res, next) => {
+  try {
+    const input = improvementGoalEvidenceReviewSchema.parse(req.body);
+    const current = await prisma.mosqueImprovementGoal.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'هدف التحسين غير موجود' });
+    if (current.status !== 'evidence_review' || current.evidenceStatus !== 'submitted') {
+      return res.status(409).json({ message: 'لا توجد حزمة إثبات قيد المراجعة لهذا الهدف' });
+    }
+
+    const evidence = Array.isArray(current.closureEvidence) ? current.closureEvidence : [];
+    if (!evidence.length || !nullableText(current.closureSummary)) {
+      return res.status(400).json({ message: 'بيانات إثبات الإغلاق غير مكتملة' });
+    }
+
+    const actor = await completionSnapshotActor(req);
+    const reviewedAt = new Date();
+    const approved = input.decision === 'approve';
+
+    const updated = await prisma.mosqueImprovementGoal.update({
+      where: { id: current.id },
+      data: {
+        status: approved ? 'closed' : 'achieved',
+        evidenceStatus: approved ? 'approved' : 'returned',
+        evidenceReviewedBy: actor.id,
+        evidenceReviewedName: actor.name,
+        evidenceReviewedAt: reviewedAt,
+        evidenceReviewNote: nullableText(input.note),
+        closedAt: approved ? reviewedAt : null,
+        updatedBy: actor.id,
+        updatedByName: actor.name,
+      },
+    });
+
+    if (updated.ownerUserId) {
+      await notify({
+        userId: updated.ownerUserId,
+        title: approved ? 'تم اعتماد إغلاق هدف التحسين' : 'أعيد إثبات إغلاق هدف التحسين للاستكمال',
+        message: approved
+          ? `${updated.goalNumber} — ${updated.title}: تم اعتماد الأدلة وإغلاق الهدف`
+          : `${updated.goalNumber} — ${updated.title}: ${nullableText(input.note) || 'يرجى استكمال الإثبات'}`,
+        entityType: approved ? 'improvement_goal_closed' : 'improvement_goal_evidence_returned',
+        entityId: updated.id,
+      });
+    }
+
+    res.json(updated);
+  } catch (error) { next(error); }
+});
+
 const COMPLETION_KPI_STANDARD = Object.freeze({
   code: 'IAU-MOSQUES-KPI-V1',
   completionRateTarget: 90,
