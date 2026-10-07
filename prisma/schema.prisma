@@ -1352,6 +1352,52 @@ model MosqueCompletionKpiSnapshot {
   @@index([approvedAt])
 }
 
+model MosqueImprovementGoal {
+  id                    String   @id @default(cuid())
+  goalNumber            String   @unique
+  year                  Int
+  title                 String
+  category              String
+  metricKey             String
+  sourceMonth           String?
+  sourceSnapshotId      String?
+  assigneeUserId        String?
+  assigneeName          String?
+  gapKey                String?
+  baselineValue         Float
+  targetValue           Float
+  targetDirection       String
+  currentValue          Float?
+  currentMonth          String?
+  progressPercent       Int      @default(0)
+  actionProgressPercent Int      @default(0)
+  status                String   @default("draft")
+  ownerUserId           String?
+  ownerName             String?
+  dueDate               DateTime?
+  correctiveActions     Json?
+  notes                 String?
+  measurementNote       String?
+  achievedAt            DateTime?
+  closedAt              DateTime?
+  lastEvaluatedAt       DateTime?
+  createdBy             String?
+  createdByName         String?
+  updatedBy             String?
+  updatedByName         String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([year])
+  @@index([status])
+  @@index([category])
+  @@index([metricKey])
+  @@index([ownerUserId])
+  @@index([assigneeUserId])
+  @@index([dueDate])
+  @@index([currentMonth])
+}
+
 model MosqueNotification {
   id         String   @id @default(cuid())
   userId     String?
