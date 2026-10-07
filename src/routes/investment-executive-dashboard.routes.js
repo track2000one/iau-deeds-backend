@@ -105,7 +105,9 @@ const getAreaBlockers = (area, site) => {
 
   if (!hasPolygon(site.geoJson)) {
     blockers.push('MISSING_SITE_BOUNDARY');
-  } else if (site.geometryApprovalStatus !== 'APPROVED') {
+  }
+
+  if (site.geometryApprovalStatus !== 'APPROVED') {
     blockers.push('SITE_BOUNDARY_NOT_APPROVED');
   }
 
@@ -119,7 +121,9 @@ const getAreaBlockers = (area, site) => {
 
   if (!hasPolygon(area.geoJson)) {
     blockers.push('MISSING_AREA_BOUNDARY');
-  } else if (area.geometryApprovalStatus !== 'APPROVED') {
+  }
+
+  if (area.geometryApprovalStatus !== 'APPROVED') {
     blockers.push('AREA_BOUNDARY_NOT_APPROVED');
   }
 
