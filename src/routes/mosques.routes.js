@@ -3656,6 +3656,167 @@ router.get('/completion-task-assignees', requireRoles('head', 'supervisor'), asy
   } catch (error) { next(error); }
 });
 
+
+const completionTaskMonthRange = (monthInput = '') => {
+  const requested = /^\d{4}-\d{2}$/.test(String(monthInput || '')) ? String(monthInput) : riyadhDateKey().slice(0, 7);
+  const [year, month] = requested.split('-').map(Number);
+  if (!year || month < 1 || month > 12) {
+    const error = new Error('صيغة الشهر غير صحيحة');
+    error.statusCode = 400;
+    throw error;
+  }
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const start = new Date(`${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-01T00:00:00+03:00`);
+  const endExclusive = new Date(`${String(nextYear).padStart(4, '0')}-${String(nextMonth).padStart(2, '0')}-01T00:00:00+03:00`);
+  return { month: requested, start, endExclusive };
+};
+
+const completionHours = (task) => {
+  if (!task.completedAt) return null;
+  const start = new Date(task.createdAt).getTime();
+  const end = new Date(task.completedAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return (end - start) / 3600000;
+};
+
+const completedOnTime = (task) => {
+  if (!task.completedAt || !task.dueDate) return null;
+  const completedKey = riyadhDateKey(task.completedAt);
+  const dueKey = riyadhDateKey(task.dueDate);
+  return calendarDayNumber(completedKey) <= calendarDayNumber(dueKey);
+};
+
+router.get('/completion-tasks/analytics', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const managedSiteIds = context.role === 'head' ? null : await getManagedSiteIds(req, context);
+    const siteScope = managedSiteIds === null ? {} : { siteId: { in: managedSiteIds || [] } };
+    const { month, start, endExclusive } = completionTaskMonthRange(req.query.month);
+
+    const [allTasks, periodCreated, periodCompleted] = await Promise.all([
+      prisma.mosqueCompletionTask.findMany({
+        where: siteScope,
+        include: completionTaskInclude,
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.mosqueCompletionTask.findMany({
+        where: { ...siteScope, createdAt: { gte: start, lt: endExclusive } },
+        include: completionTaskInclude,
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.mosqueCompletionTask.findMany({
+        where: { ...siteScope, completedAt: { gte: start, lt: endExclusive } },
+        include: completionTaskInclude,
+        orderBy: { completedAt: 'asc' },
+      }),
+    ]);
+
+    const activeTasks = allTasks.filter((task) => ['open', 'in_progress'].includes(task.status));
+    const timing = summarizeCompletionTaskTiming(activeTasks);
+    const completedWithDueDate = periodCompleted.filter((task) => task.dueDate);
+    const onTimeCompleted = completedWithDueDate.filter((task) => completedOnTime(task) === true);
+    const completionDurations = periodCompleted.map(completionHours).filter((value) => value !== null);
+    const avgCompletionHours = completionDurations.length
+      ? Math.round((completionDurations.reduce((sum, value) => sum + value, 0) / completionDurations.length) * 10) / 10
+      : null;
+
+    const assigneeKeys = new Set(
+      allTasks
+        .map((task) => task.assignedToUserId || (task.assignedToName ? `name:${task.assignedToName}` : 'unassigned'))
+    );
+    const byAssignee = [...assigneeKeys].map((key) => {
+      const matches = (task) => (task.assignedToUserId || (task.assignedToName ? `name:${task.assignedToName}` : 'unassigned')) === key;
+      const scopedAll = allTasks.filter(matches);
+      const scopedCreated = periodCreated.filter(matches);
+      const scopedCompleted = periodCompleted.filter(matches);
+      const scopedActive = scopedAll.filter((task) => ['open', 'in_progress'].includes(task.status));
+      const scopedDue = scopedCompleted.filter((task) => task.dueDate);
+      const scopedOnTime = scopedDue.filter((task) => completedOnTime(task) === true);
+      const durations = scopedCompleted.map(completionHours).filter((value) => value !== null);
+      const sample = scopedAll[0] || scopedCreated[0] || scopedCompleted[0];
+
+      return {
+        assigneeUserId: sample?.assignedToUserId || null,
+        assigneeName: sample?.assignedToName || 'غير مسندة',
+        created: scopedCreated.length,
+        completed: scopedCompleted.length,
+        active: scopedActive.length,
+        overdue: scopedActive.filter((task) => completionTaskTiming(task) === 'overdue').length,
+        dueToday: scopedActive.filter((task) => completionTaskTiming(task) === 'today').length,
+        onTimeCompleted: scopedOnTime.length,
+        completedWithDueDate: scopedDue.length,
+        onTimeRate: scopedDue.length ? Math.round((scopedOnTime.length / scopedDue.length) * 100) : null,
+        avgCompletionHours: durations.length
+          ? Math.round((durations.reduce((sum, value) => sum + value, 0) / durations.length) * 10) / 10
+          : null,
+      };
+    }).sort((a, b) => b.overdue - a.overdue || b.active - a.active || b.completed - a.completed);
+
+    const missingKeys = [...new Set(allTasks.map((task) => task.missingKey))];
+    const byMissingKey = missingKeys.map((missingKey) => {
+      const all = allTasks.filter((task) => task.missingKey === missingKey);
+      const created = periodCreated.filter((task) => task.missingKey === missingKey);
+      const completed = periodCompleted.filter((task) => task.missingKey === missingKey);
+      const active = all.filter((task) => ['open', 'in_progress'].includes(task.status));
+      return {
+        missingKey,
+        total: all.length,
+        created: created.length,
+        completed: completed.length,
+        active: active.length,
+        overdue: active.filter((task) => completionTaskTiming(task) === 'overdue').length,
+      };
+    }).sort((a, b) => b.created - a.created || b.active - a.active || b.total - a.total);
+
+    const monthKeys = [];
+    const [selectedYear, selectedMonth] = month.split('-').map(Number);
+    for (let offset = 5; offset >= 0; offset -= 1) {
+      const date = new Date(Date.UTC(selectedYear, selectedMonth - 1 - offset, 1));
+      monthKeys.push(`${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`);
+    }
+    const trend = monthKeys.map((monthKey) => {
+      const range = completionTaskMonthRange(monthKey);
+      const created = allTasks.filter((task) => new Date(task.createdAt) >= range.start && new Date(task.createdAt) < range.endExclusive);
+      const completed = allTasks.filter((task) => task.completedAt && new Date(task.completedAt) >= range.start && new Date(task.completedAt) < range.endExclusive);
+      const completedDue = completed.filter((task) => task.dueDate);
+      const onTime = completedDue.filter((task) => completedOnTime(task) === true);
+      return {
+        month: monthKey,
+        created: created.length,
+        completed: completed.length,
+        onTimeRate: completedDue.length ? Math.round((onTime.length / completedDue.length) * 100) : null,
+      };
+    });
+
+    res.json({
+      month,
+      period: { from: start.toISOString(), toExclusive: endExclusive.toISOString() },
+      summary: {
+        created: periodCreated.length,
+        completed: periodCompleted.length,
+        completionRate: periodCreated.length ? Math.round((periodCompleted.length / periodCreated.length) * 100) : (periodCompleted.length ? 100 : 0),
+        active: timing.active,
+        overdue: timing.overdue,
+        dueToday: timing.dueToday,
+        dueSoon: timing.dueSoon,
+        unassigned: timing.unassigned,
+        completedWithDueDate: completedWithDueDate.length,
+        onTimeCompleted: onTimeCompleted.length,
+        onTimeRate: completedWithDueDate.length ? Math.round((onTimeCompleted.length / completedWithDueDate.length) * 100) : null,
+        avgCompletionHours,
+      },
+      byAssignee,
+      byMissingKey,
+      trend,
+      periodTasks: {
+        created: periodCreated,
+        completed: periodCompleted,
+      },
+    });
+  } catch (error) { next(error); }
+});
+
 router.get('/completion-tasks', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
     await syncCompletionTaskAlerts();
