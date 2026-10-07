@@ -755,7 +755,7 @@ mosquesPublicRoutes.get('/sites', async (_req, res, next) => {
     const sites = await prisma.mosqueSite.findMany({
       where: { status: { not: 'temporarily_closed' } },
       select: {
-        publicToken: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true,
+        publicToken: true, name: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true, womenPrayerArea: true, city: true, district: true,
         campusLocation: true, area: true, capacity: true, latitude: true, longitude: true, mapUrl: true, status: true,
       },
       orderBy: { name: 'asc' },
@@ -769,7 +769,7 @@ mosquesPublicRoutes.get('/sites/:token', async (req, res, next) => {
     const site = await prisma.mosqueSite.findUnique({
       where: { publicToken: req.params.token },
       select: {
-        publicToken: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true,
+        publicToken: true, name: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true, womenPrayerArea: true, city: true, district: true,
         campusLocation: true, area: true, capacity: true, latitude: true, longitude: true, mapUrl: true, status: true,
       },
     });
@@ -990,7 +990,7 @@ router.get('/dashboard', async (req, res, next) => {
       ? await prisma.mosqueSite.findUnique({
           where: { id: context.siteId },
           select: {
-            id: true, publicToken: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true,
+            id: true, publicToken: true, name: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true, womenPrayerArea: true, city: true, district: true,
             campusLocation: true, area: true, capacity: true, latitude: true, longitude: true,
             mapUrl: true, status: true,
           },
@@ -1085,7 +1085,7 @@ router.get('/sites', async (req, res, next) => {
     return res.json(await prisma.mosqueSite.findMany({
       where: { status: { not: 'temporarily_closed' } },
       select: {
-        id: true, publicToken: true, name: true, siteType: true, prayerRoomGender: true, city: true, district: true,
+        id: true, publicToken: true, name: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true, womenPrayerArea: true, city: true, district: true,
         campusLocation: true, area: true, capacity: true, latitude: true, longitude: true,
         mapUrl: true, status: true,
       },
