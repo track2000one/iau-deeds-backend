@@ -889,6 +889,7 @@ const improvementGoalCreateSchema = z.object({
   correctiveActions: z.array(improvementActionSchema).max(30).optional().default([]),
   notes: z.string().trim().max(4000).optional().nullable(),
   status: z.enum(['draft', 'active']).optional().default('draft'),
+  decisionReason: z.string().trim().min(3).max(4000).optional().nullable(),
 }).superRefine((input, ctx) => {
   if (input.category === 'assignee_metric' && !nullableText(input.assigneeUserId) && !nullableText(input.assigneeName)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['assigneeUserId'], message: 'المسؤول المستهدف مطلوب لهدف أداء فردي' });
@@ -915,6 +916,7 @@ const improvementGoalUpdateSchema = z.object({
   correctiveActions: z.array(improvementActionSchema).max(30).optional(),
   notes: z.string().trim().max(4000).optional().nullable(),
   status: z.enum(IMPROVEMENT_GOAL_STATUSES).optional(),
+  decisionReason: z.string().trim().min(3).max(4000).optional().nullable(),
 });
 
 const improvementGoalEvidenceItemSchema = z.object({
@@ -933,6 +935,7 @@ const improvementGoalEvidenceSubmitSchema = z.object({
 const improvementGoalEvidenceReviewSchema = z.object({
   decision: z.enum(['approve', 'return']),
   note: z.string().trim().max(4000).optional().nullable(),
+  decisionReason: z.string().trim().min(3).max(4000).optional().nullable(),
 }).superRefine((input, ctx) => {
   if (input.decision === 'return' && !nullableText(input.note)) {
     ctx.addIssue({
