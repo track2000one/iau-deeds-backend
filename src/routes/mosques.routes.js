@@ -3657,6 +3657,51 @@ router.get('/completion-task-assignees', requireRoles('head', 'supervisor'), asy
 });
 
 
+const COMPLETION_KPI_STANDARD = Object.freeze({
+  code: 'IAU-MOSQUES-KPI-V1',
+  completionRateTarget: 90,
+  onTimeRateTarget: 90,
+  avgCompletionDaysTarget: 5,
+  overdueRateMax: 10,
+});
+
+const scoreHigherIsBetter = (value, target) => {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return { value: null, target, met: null, score: null };
+  const numeric = Number(value);
+  return {
+    value: numeric,
+    target,
+    met: numeric >= target,
+    score: Math.max(0, Math.min(100, Math.round((numeric / Math.max(target, 1)) * 100))),
+  };
+};
+
+const scoreLowerIsBetter = (value, target) => {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return { value: null, target, met: null, score: null };
+  const numeric = Number(value);
+  const score = numeric <= target
+    ? 100
+    : Math.max(0, Math.min(100, Math.round((target / Math.max(numeric, 0.0001)) * 100)));
+  return { value: numeric, target, met: numeric <= target, score };
+};
+
+const buildCompletionKpi = ({ completionRate, onTimeRate, avgCompletionDays, overdueRate }) => {
+  const metrics = {
+    completionRate: scoreHigherIsBetter(completionRate, COMPLETION_KPI_STANDARD.completionRateTarget),
+    onTimeRate: scoreHigherIsBetter(onTimeRate, COMPLETION_KPI_STANDARD.onTimeRateTarget),
+    avgCompletionDays: scoreLowerIsBetter(avgCompletionDays, COMPLETION_KPI_STANDARD.avgCompletionDaysTarget),
+    overdueRate: scoreLowerIsBetter(overdueRate, COMPLETION_KPI_STANDARD.overdueRateMax),
+  };
+  const evaluated = Object.values(metrics).filter((metric) => metric.score !== null);
+  if (!evaluated.length) return { status: 'no_data', score: null, metCount: 0, evaluatedCount: 0, metrics };
+  const score = Math.round(evaluated.reduce((sum, metric) => sum + metric.score, 0) / evaluated.length);
+  const metCount = evaluated.filter((metric) => metric.met).length;
+  const status = metCount === evaluated.length && score >= 95
+    ? 'excellent'
+    : (score >= 75 && metCount >= Math.ceil(evaluated.length / 2) ? 'good' : 'needs_improvement');
+  return { status, score, metCount, evaluatedCount: evaluated.length, metrics };
+};
+
 const completionTaskMonthRange = (monthInput = '') => {
   const requested = /^\d{4}-\d{2}$/.test(String(monthInput || '')) ? String(monthInput) : riyadhDateKey().slice(0, 7);
   const [year, month] = requested.split('-').map(Number);
@@ -3737,22 +3782,39 @@ router.get('/completion-tasks/analytics', requireRoles('head', 'supervisor'), as
       const scopedDue = scopedCompleted.filter((task) => task.dueDate);
       const scopedOnTime = scopedDue.filter((task) => completedOnTime(task) === true);
       const durations = scopedCompleted.map(completionHours).filter((value) => value !== null);
+      const scopedCreatedAndCompleted = scopedCreated.filter(
+        (task) => task.completedAt && new Date(task.completedAt) < endExclusive
+      );
+      const overdue = scopedActive.filter((task) => completionTaskTiming(task) === 'overdue').length;
+      const completionRate = scopedCreated.length ? Math.round((scopedCreatedAndCompleted.length / scopedCreated.length) * 100) : null;
+      const onTimeRate = scopedDue.length ? Math.round((scopedOnTime.length / scopedDue.length) * 100) : null;
+      const avgCompletionHours = durations.length
+        ? Math.round((durations.reduce((sum, value) => sum + value, 0) / durations.length) * 10) / 10
+        : null;
+      const overdueRate = scopedActive.length ? Math.round((overdue / scopedActive.length) * 100) : 0;
       const sample = scopedAll[0] || scopedCreated[0] || scopedCompleted[0];
+      const kpi = buildCompletionKpi({
+        completionRate,
+        onTimeRate,
+        avgCompletionDays: avgCompletionHours === null ? null : Math.round((avgCompletionHours / 24) * 10) / 10,
+        overdueRate,
+      });
 
       return {
         assigneeUserId: sample?.assignedToUserId || null,
         assigneeName: sample?.assignedToName || 'غير مسندة',
         created: scopedCreated.length,
         completed: scopedCompleted.length,
+        completionRate,
         active: scopedActive.length,
-        overdue: scopedActive.filter((task) => completionTaskTiming(task) === 'overdue').length,
+        overdue,
+        overdueRate,
         dueToday: scopedActive.filter((task) => completionTaskTiming(task) === 'today').length,
         onTimeCompleted: scopedOnTime.length,
         completedWithDueDate: scopedDue.length,
-        onTimeRate: scopedDue.length ? Math.round((scopedOnTime.length / scopedDue.length) * 100) : null,
-        avgCompletionHours: durations.length
-          ? Math.round((durations.reduce((sum, value) => sum + value, 0) / durations.length) * 10) / 10
-          : null,
+        onTimeRate,
+        avgCompletionHours,
+        kpi,
       };
     }).sort((a, b) => b.overdue - a.overdue || b.active - a.active || b.completed - a.completed);
 
@@ -3792,22 +3854,37 @@ router.get('/completion-tasks/analytics', requireRoles('head', 'supervisor'), as
       };
     });
 
+    const completionRate = periodCreated.length ? Math.round((createdAndCompletedWithinPeriod.length / periodCreated.length) * 100) : 0;
+    const onTimeRate = completedWithDueDate.length ? Math.round((onTimeCompleted.length / completedWithDueDate.length) * 100) : null;
+    const avgCompletionDays = avgCompletionHours === null ? null : Math.round((avgCompletionHours / 24) * 10) / 10;
+    const overdueRate = timing.active ? Math.round((timing.overdue / timing.active) * 100) : 0;
+    const unitKpi = buildCompletionKpi({
+      completionRate: periodCreated.length ? completionRate : null,
+      onTimeRate,
+      avgCompletionDays,
+      overdueRate,
+    });
+
     res.json({
       month,
       period: { from: start.toISOString(), toExclusive: endExclusive.toISOString() },
+      kpiStandard: COMPLETION_KPI_STANDARD,
+      unitKpi,
       summary: {
         created: periodCreated.length,
         completed: periodCompleted.length,
-        completionRate: periodCreated.length ? Math.round((createdAndCompletedWithinPeriod.length / periodCreated.length) * 100) : 0,
+        completionRate,
         active: timing.active,
         overdue: timing.overdue,
+        overdueRate,
         dueToday: timing.dueToday,
         dueSoon: timing.dueSoon,
         unassigned: timing.unassigned,
         completedWithDueDate: completedWithDueDate.length,
         onTimeCompleted: onTimeCompleted.length,
-        onTimeRate: completedWithDueDate.length ? Math.round((onTimeCompleted.length / completedWithDueDate.length) * 100) : null,
+        onTimeRate,
         avgCompletionHours,
+        avgCompletionDays,
       },
       byAssignee,
       byMissingKey,
