@@ -1,6 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
+import {
+  enforceGeometryLock,
+  geometryWorkflowResetData,
+  runGeometryWorkflow,
+} from '../services/investment-geometry-workflow.service.js';
 
 const router = Router();
 
@@ -80,6 +85,12 @@ const createAreaSchema = z.object({
 });
 
 const updateAreaSchema = createAreaSchema.partial();
+
+const geometryWorkflowSchema = z.object({
+  action: z.enum(['REVIEW', 'APPROVE', 'REQUEST_CHANGE']),
+  note: z.string().trim().max(3000).optional().nullable(),
+  referenceAttachmentId: z.string().trim().optional().nullable(),
+});
 
 const bulkImportSchema = z.object({
   siteId: z.string().min(1, 'الموقع الرئيسي مطلوب'),
@@ -194,6 +205,29 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
+router.patch('/:id/geometry-workflow', async (req, res, next) => {
+  try {
+    const input = geometryWorkflowSchema.parse(req.body);
+    const updated = await runGeometryWorkflow({
+      req,
+      entityType: 'investment_area',
+      entityId: req.params.id,
+      action: input.action,
+      note: input.note,
+      referenceAttachmentId: input.referenceAttachmentId,
+    });
+
+    const area = await prisma.investmentArea.findUnique({
+      where: { id: updated.id },
+      include: { site: { include: { deed: true } } },
+    });
+
+    res.json(area);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/geometry-bulk', async (req, res, next) => {
   try {
     const input = bulkGeometryUpdateSchema.parse(req.body);
@@ -214,6 +248,7 @@ router.post('/geometry-bulk', async (req, res, next) => {
         id: true,
         areaCode: true,
         geometryAccuracy: true,
+        geometryApprovalStatus: true,
       },
     });
 
@@ -222,6 +257,17 @@ router.post('/geometry-bulk', async (req, res, next) => {
       const missing = areaIds.filter((id) => !found.has(id));
       return res.status(400).json({
         message: `بعض المساحات غير موجودة أو مؤرشفة: ${missing.join(', ')}`,
+      });
+    }
+
+    const approvedAreaCodes = existingAreas
+      .filter((area) => area.geometryApprovalStatus === 'APPROVED')
+      .map((area) => area.areaCode);
+
+    if (approvedAreaCodes.length > 0) {
+      return res.status(409).json({
+        message:
+          `لا يمكن استبدال حدود مساحات معتمدة قبل تسجيل طلب تعديل حدود: ${approvedAreaCodes.join(', ')}`,
       });
     }
 
@@ -240,6 +286,9 @@ router.post('/geometry-bulk', async (req, res, next) => {
             latitude: item.latitude,
             longitude: item.longitude,
             geometryAccuracy: item.geometryAccuracy || existing.geometryAccuracy,
+            ...(existing.geometryApprovalStatus === 'DRAFT'
+              ? {}
+              : geometryWorkflowResetData()),
           },
           select: {
             id: true,
@@ -574,6 +623,8 @@ router.patch('/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'المساحة غير موجودة' });
     }
 
+    const geometryChanged = enforceGeometryLock(existing, input);
+
     const targetSiteId = input.siteId || existing.siteId;
     const targetNumber = input.areaNumber ?? existing.areaNumber;
 
@@ -611,7 +662,12 @@ router.patch('/:id', async (req, res, next) => {
 
     const area = await prisma.investmentArea.update({
       where: { id: req.params.id },
-      data: input,
+      data: {
+        ...input,
+        ...(geometryChanged && existing.geometryApprovalStatus !== 'DRAFT'
+          ? geometryWorkflowResetData()
+          : {}),
+      },
       include: { site: { include: { deed: true } } },
     });
 
