@@ -858,6 +858,65 @@ const completionTaskUpdateSchema = z.object({
 });
 
 
+const IMPROVEMENT_GOAL_CATEGORIES = ['unit_metric', 'assignee_metric', 'gap_reduction'];
+const IMPROVEMENT_GOAL_METRICS = ['completionRate', 'onTimeRate', 'avgCompletionDays', 'overdueRate', 'kpiScore', 'gapCreatedCount'];
+const IMPROVEMENT_GOAL_STATUSES = ['draft', 'active', 'at_risk', 'achieved', 'closed', 'cancelled'];
+const IMPROVEMENT_ACTION_STATUSES = ['planned', 'in_progress', 'completed'];
+
+const improvementActionSchema = z.object({
+  id: z.string().trim().max(80).optional(),
+  title: z.string().trim().min(2).max(300),
+  status: z.enum(IMPROVEMENT_ACTION_STATUSES).optional().default('planned'),
+  dueDate: z.string().trim().max(30).optional().nullable(),
+  note: z.string().trim().max(1000).optional().nullable(),
+});
+
+const improvementGoalCreateSchema = z.object({
+  year: z.coerce.number().int().min(2020).max(2100),
+  title: z.string().trim().min(3).max(300),
+  category: z.enum(IMPROVEMENT_GOAL_CATEGORIES),
+  metricKey: z.enum(IMPROVEMENT_GOAL_METRICS),
+  sourceMonth: z.string().regex(/^\d{4}-\d{2}$/).optional().nullable(),
+  sourceSnapshotId: z.string().trim().optional().nullable(),
+  assigneeUserId: z.string().trim().optional().nullable(),
+  assigneeName: z.string().trim().max(200).optional().nullable(),
+  gapKey: z.enum(COMPLETION_TASK_MISSING_KEYS).optional().nullable(),
+  baselineValue: z.coerce.number().finite(),
+  targetValue: z.coerce.number().finite(),
+  targetDirection: z.enum(['gte', 'lte']),
+  ownerUserId: z.string().trim().optional().nullable(),
+  dueDate: z.coerce.date().optional().nullable(),
+  correctiveActions: z.array(improvementActionSchema).max(30).optional().default([]),
+  notes: z.string().trim().max(4000).optional().nullable(),
+  status: z.enum(['draft', 'active']).optional().default('draft'),
+}).superRefine((input, ctx) => {
+  if (input.category === 'assignee_metric' && !nullableText(input.assigneeUserId) && !nullableText(input.assigneeName)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['assigneeUserId'], message: 'المسؤول المستهدف مطلوب لهدف أداء فردي' });
+  }
+  if (input.category === 'gap_reduction' && !input.gapKey) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['gapKey'], message: 'نوع النقص مطلوب لهدف خفض النواقص' });
+  }
+  if (input.category === 'gap_reduction' && input.metricKey !== 'gapCreatedCount') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['metricKey'], message: 'مقياس خفض النواقص غير صحيح' });
+  }
+  if (['avgCompletionDays', 'overdueRate', 'gapCreatedCount'].includes(input.metricKey) && input.targetDirection !== 'lte') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['targetDirection'], message: 'هذا المؤشر يتحسن بالانخفاض' });
+  }
+  if (['completionRate', 'onTimeRate', 'kpiScore'].includes(input.metricKey) && input.targetDirection !== 'gte') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['targetDirection'], message: 'هذا المؤشر يتحسن بالارتفاع' });
+  }
+});
+
+const improvementGoalUpdateSchema = z.object({
+  title: z.string().trim().min(3).max(300).optional(),
+  targetValue: z.coerce.number().finite().optional(),
+  ownerUserId: z.string().trim().optional().nullable(),
+  dueDate: z.coerce.date().optional().nullable(),
+  correctiveActions: z.array(improvementActionSchema).max(30).optional(),
+  notes: z.string().trim().max(4000).optional().nullable(),
+  status: z.enum(IMPROVEMENT_GOAL_STATUSES).optional(),
+});
+
 const personnelAccountSchema = z.object({
   siteId: z.string().min(1),
   name: z.string().trim().min(2),
