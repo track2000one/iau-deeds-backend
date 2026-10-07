@@ -4576,6 +4576,24 @@ router.post('/improvement-goals', requireRoles('head'), async (req, res, next) =
     }
 
     const evaluated = input.status === 'active' ? await evaluateImprovementGoal(created, { notifyChanges: false }) : created;
+
+    if (nullableText(input.decisionReason)) {
+      await recordExecutiveDecision({
+        decisionType: 'create_improvement_goal',
+        title: `إنشاء هدف تحسين: ${evaluated.title}`,
+        rationale: input.decisionReason,
+        goal: evaluated,
+        beforeState: null,
+        afterState: improvementGoalDecisionState(evaluated),
+        actor,
+        actorRole: 'head',
+        entityType: 'improvement_goal',
+        entityId: evaluated.id,
+        metricKey: evaluated.metricKey,
+        sourceSnapshotId: evaluated.sourceSnapshotId,
+      });
+    }
+
     res.status(201).json(evaluated);
   } catch (error) { next(error); }
 });
@@ -4672,6 +4690,49 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
     const evaluated = updated.status === 'active' || updated.status === 'at_risk'
       ? await evaluateImprovementGoal(updated, { notifyChanges: false })
       : updated;
+
+    if (context.role === 'head' && nullableText(input.decisionReason)) {
+      const dueDateChanged = input.dueDate !== undefined
+        && String(current.dueDate ? new Date(current.dueDate).toISOString() : '') !== String(evaluated.dueDate ? new Date(evaluated.dueDate).toISOString() : '');
+      const ownerChanged = input.ownerUserId !== undefined && (current.ownerUserId || null) !== (evaluated.ownerUserId || null);
+      const targetChanged = input.targetValue !== undefined && Number(current.targetValue) !== Number(evaluated.targetValue);
+      const statusChanged = input.status !== undefined && current.status !== evaluated.status;
+
+      let decisionType = 'update_improvement_goal';
+      let decisionTitle = `تعديل هدف تحسين: ${evaluated.title}`;
+      if (statusChanged && current.status === 'draft' && evaluated.status === 'active' && current.parentGoalId) {
+        decisionType = 'activate_follow_up_goal';
+        decisionTitle = `تفعيل خطة متابعة بعد انتكاس: ${evaluated.title}`;
+      } else if (statusChanged && current.status === 'draft' && evaluated.status === 'active') {
+        decisionType = 'activate_improvement_goal';
+        decisionTitle = `تفعيل هدف تحسين: ${evaluated.title}`;
+      } else if (statusChanged && evaluated.status === 'cancelled') {
+        decisionType = 'cancel_improvement_goal';
+        decisionTitle = `إلغاء هدف تحسين: ${evaluated.title}`;
+      } else if (dueDateChanged) {
+        decisionType = 'change_goal_due_date';
+        decisionTitle = `تعديل موعد استحقاق هدف: ${evaluated.title}`;
+      } else if (ownerChanged) {
+        decisionType = 'reassign_goal_owner';
+        decisionTitle = `إعادة إسناد هدف تحسين: ${evaluated.title}`;
+      } else if (targetChanged) {
+        decisionType = 'change_goal_target';
+        decisionTitle = `تعديل مستهدف هدف تحسين: ${evaluated.title}`;
+      }
+
+      await recordExecutiveDecision({
+        decisionType,
+        title: decisionTitle,
+        rationale: input.decisionReason,
+        goal: evaluated,
+        beforeState: improvementGoalDecisionState(current),
+        afterState: improvementGoalDecisionState(evaluated),
+        actor,
+        actorRole: context.role,
+        entityType: 'improvement_goal',
+        entityId: evaluated.id,
+      });
+    }
 
     res.json(evaluated);
   } catch (error) { next(error); }
@@ -4781,6 +4842,21 @@ router.patch('/improvement-goals/:id/evidence-review', requireRoles('head'), asy
         entityId: updated.id,
       });
     }
+
+    await recordExecutiveDecision({
+      decisionType: approved ? 'approve_closure_evidence' : 'return_closure_evidence',
+      title: approved
+        ? `اعتماد إغلاق هدف التحسين: ${updated.title}`
+        : `إعادة إثبات إغلاق هدف التحسين للاستكمال: ${updated.title}`,
+      rationale: nullableText(input.decisionReason) || nullableText(input.note) || (approved ? 'اعتماد الأدلة المؤيدة بعد المراجعة' : 'إعادة الإثبات لاستكمال المتطلبات'),
+      goal: updated,
+      beforeState: improvementGoalDecisionState(current),
+      afterState: improvementGoalDecisionState(updated),
+      actor,
+      actorRole: 'head',
+      entityType: 'improvement_goal',
+      entityId: updated.id,
+    });
 
     res.json(updated);
   } catch (error) { next(error); }
