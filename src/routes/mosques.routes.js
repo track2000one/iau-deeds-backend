@@ -3716,6 +3716,9 @@ router.get('/completion-tasks/analytics', requireRoles('head', 'supervisor'), as
     const timing = summarizeCompletionTaskTiming(activeTasks);
     const completedWithDueDate = periodCompleted.filter((task) => task.dueDate);
     const onTimeCompleted = completedWithDueDate.filter((task) => completedOnTime(task) === true);
+    const createdAndCompletedWithinPeriod = periodCreated.filter(
+      (task) => task.completedAt && new Date(task.completedAt) < endExclusive
+    );
     const completionDurations = periodCompleted.map(completionHours).filter((value) => value !== null);
     const avgCompletionHours = completionDurations.length
       ? Math.round((completionDurations.reduce((sum, value) => sum + value, 0) / completionDurations.length) * 10) / 10
@@ -3795,7 +3798,7 @@ router.get('/completion-tasks/analytics', requireRoles('head', 'supervisor'), as
       summary: {
         created: periodCreated.length,
         completed: periodCompleted.length,
-        completionRate: periodCreated.length ? Math.round((periodCompleted.length / periodCreated.length) * 100) : (periodCompleted.length ? 100 : 0),
+        completionRate: periodCreated.length ? Math.round((createdAndCompletedWithinPeriod.length / periodCreated.length) * 100) : 0,
         active: timing.active,
         overdue: timing.overdue,
         dueToday: timing.dueToday,
