@@ -15,6 +15,7 @@ const attachmentSchema = z.object({
     'leased_building_in',
     'investment_site',
     'investment_area',
+    'investment_opportunity',
   ]),
   entityId: z.string().min(1),
   attachmentType: z.enum([
