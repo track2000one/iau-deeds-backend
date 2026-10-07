@@ -858,6 +858,65 @@ const completionTaskUpdateSchema = z.object({
 });
 
 
+const IMPROVEMENT_GOAL_CATEGORIES = ['unit_metric', 'assignee_metric', 'gap_reduction'];
+const IMPROVEMENT_GOAL_METRICS = ['completionRate', 'onTimeRate', 'avgCompletionDays', 'overdueRate', 'kpiScore', 'gapCreatedCount'];
+const IMPROVEMENT_GOAL_STATUSES = ['draft', 'active', 'at_risk', 'achieved', 'closed', 'cancelled'];
+const IMPROVEMENT_ACTION_STATUSES = ['planned', 'in_progress', 'completed'];
+
+const improvementActionSchema = z.object({
+  id: z.string().trim().max(80).optional(),
+  title: z.string().trim().min(2).max(300),
+  status: z.enum(IMPROVEMENT_ACTION_STATUSES).optional().default('planned'),
+  dueDate: z.string().trim().max(30).optional().nullable(),
+  note: z.string().trim().max(1000).optional().nullable(),
+});
+
+const improvementGoalCreateSchema = z.object({
+  year: z.coerce.number().int().min(2020).max(2100),
+  title: z.string().trim().min(3).max(300),
+  category: z.enum(IMPROVEMENT_GOAL_CATEGORIES),
+  metricKey: z.enum(IMPROVEMENT_GOAL_METRICS),
+  sourceMonth: z.string().regex(/^\d{4}-\d{2}$/).optional().nullable(),
+  sourceSnapshotId: z.string().trim().optional().nullable(),
+  assigneeUserId: z.string().trim().optional().nullable(),
+  assigneeName: z.string().trim().max(200).optional().nullable(),
+  gapKey: z.enum(COMPLETION_TASK_MISSING_KEYS).optional().nullable(),
+  baselineValue: z.coerce.number().finite(),
+  targetValue: z.coerce.number().finite(),
+  targetDirection: z.enum(['gte', 'lte']),
+  ownerUserId: z.string().trim().optional().nullable(),
+  dueDate: z.coerce.date().optional().nullable(),
+  correctiveActions: z.array(improvementActionSchema).max(30).optional().default([]),
+  notes: z.string().trim().max(4000).optional().nullable(),
+  status: z.enum(['draft', 'active']).optional().default('draft'),
+}).superRefine((input, ctx) => {
+  if (input.category === 'assignee_metric' && !nullableText(input.assigneeUserId) && !nullableText(input.assigneeName)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['assigneeUserId'], message: 'المسؤول المستهدف مطلوب لهدف أداء فردي' });
+  }
+  if (input.category === 'gap_reduction' && !input.gapKey) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['gapKey'], message: 'نوع النقص مطلوب لهدف خفض النواقص' });
+  }
+  if (input.category === 'gap_reduction' && input.metricKey !== 'gapCreatedCount') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['metricKey'], message: 'مقياس خفض النواقص غير صحيح' });
+  }
+  if (['avgCompletionDays', 'overdueRate', 'gapCreatedCount'].includes(input.metricKey) && input.targetDirection !== 'lte') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['targetDirection'], message: 'هذا المؤشر يتحسن بالانخفاض' });
+  }
+  if (['completionRate', 'onTimeRate', 'kpiScore'].includes(input.metricKey) && input.targetDirection !== 'gte') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['targetDirection'], message: 'هذا المؤشر يتحسن بالارتفاع' });
+  }
+});
+
+const improvementGoalUpdateSchema = z.object({
+  title: z.string().trim().min(3).max(300).optional(),
+  targetValue: z.coerce.number().finite().optional(),
+  ownerUserId: z.string().trim().optional().nullable(),
+  dueDate: z.coerce.date().optional().nullable(),
+  correctiveActions: z.array(improvementActionSchema).max(30).optional(),
+  notes: z.string().trim().max(4000).optional().nullable(),
+  status: z.enum(IMPROVEMENT_GOAL_STATUSES).optional(),
+});
+
 const personnelAccountSchema = z.object({
   siteId: z.string().min(1),
   name: z.string().trim().min(2),
@@ -3656,6 +3715,477 @@ router.get('/completion-task-assignees', requireRoles('head', 'supervisor'), asy
   } catch (error) { next(error); }
 });
 
+
+const assertImprovementGoalOwner = async (userId) => {
+  if (!userId) return null;
+  const assignees = await completionTaskAssigneeDirectory();
+  const owner = assignees.find((item) => item.id === userId);
+  if (!owner) {
+    const error = new Error('المستخدم المحدد غير متاح لإسناد هدف التحسين');
+    error.statusCode = 400;
+    throw error;
+  }
+  return owner;
+};
+
+const normalizeImprovementActions = (actions = []) => actions.map((action) => ({
+  id: nullableText(action.id) || crypto.randomUUID(),
+  title: String(action.title || '').trim(),
+  status: IMPROVEMENT_ACTION_STATUSES.includes(action.status) ? action.status : 'planned',
+  dueDate: nullableText(action.dueDate),
+  note: nullableText(action.note),
+}));
+
+const improvementActionProgress = (actions = []) => {
+  if (!Array.isArray(actions) || !actions.length) return 0;
+  const completed = actions.filter((action) => action?.status === 'completed').length;
+  return Math.round((completed / actions.length) * 100);
+};
+
+const improvementMetricValue = (goal, snapshot) => {
+  const analytics = snapshot?.payload;
+  if (!analytics) return null;
+
+  if (goal.category === 'unit_metric') {
+    if (goal.metricKey === 'kpiScore') return analytics.unitKpi?.score ?? null;
+    if (goal.metricKey === 'completionRate') return analytics.summary?.created ? analytics.summary?.completionRate ?? null : null;
+    if (goal.metricKey === 'onTimeRate') return analytics.summary?.onTimeRate ?? null;
+    if (goal.metricKey === 'avgCompletionDays') return analytics.summary?.avgCompletionDays ?? null;
+    if (goal.metricKey === 'overdueRate') return analytics.summary?.overdueRate ?? null;
+    return null;
+  }
+
+  if (goal.category === 'assignee_metric') {
+    const row = (analytics.byAssignee || []).find((item) => (
+      (goal.assigneeUserId && item.assigneeUserId === goal.assigneeUserId)
+      || (!goal.assigneeUserId && goal.assigneeName && item.assigneeName === goal.assigneeName)
+    ));
+    if (!row) return null;
+    if (goal.metricKey === 'kpiScore') return row.kpi?.score ?? null;
+    if (goal.metricKey === 'completionRate') return row.completionRate ?? null;
+    if (goal.metricKey === 'onTimeRate') return row.onTimeRate ?? null;
+    if (goal.metricKey === 'avgCompletionDays') return row.avgCompletionHours == null ? null : Math.round((row.avgCompletionHours / 24) * 10) / 10;
+    if (goal.metricKey === 'overdueRate') return row.overdueRate ?? null;
+    return null;
+  }
+
+  if (goal.category === 'gap_reduction') {
+    const row = (analytics.byMissingKey || []).find((item) => item.missingKey === goal.gapKey);
+    return row?.created ?? 0;
+  }
+
+  return null;
+};
+
+const improvementGoalProgress = (goal, currentValue) => {
+  if (currentValue === null || currentValue === undefined || !Number.isFinite(Number(currentValue))) return 0;
+  const baseline = Number(goal.baselineValue);
+  const target = Number(goal.targetValue);
+  const current = Number(currentValue);
+
+  if (goal.targetDirection === 'gte') {
+    if (current >= target) return 100;
+    if (target <= baseline) return current >= target ? 100 : 0;
+    return Math.max(0, Math.min(100, Math.round(((current - baseline) / (target - baseline)) * 100)));
+  }
+
+  if (current <= target) return 100;
+  if (target >= baseline) return current <= target ? 100 : 0;
+  return Math.max(0, Math.min(100, Math.round(((baseline - current) / (baseline - target)) * 100)));
+};
+
+const improvementGoalMet = (goal, currentValue) => {
+  if (currentValue === null || currentValue === undefined || !Number.isFinite(Number(currentValue))) return false;
+  return goal.targetDirection === 'gte'
+    ? Number(currentValue) >= Number(goal.targetValue)
+    : Number(currentValue) <= Number(goal.targetValue);
+};
+
+const latestOfficialSnapshotForGoal = async (goal) => {
+  const rows = await prisma.mosqueCompletionKpiSnapshot.findMany({
+    where: {
+      status: { in: ['approved', 'archived'] },
+      month: { startsWith: `${goal.year}-` },
+    },
+    orderBy: { month: 'desc' },
+  });
+  const sourceMonth = nullableText(goal.sourceMonth);
+  return rows.find((row) => !sourceMonth || row.month >= sourceMonth) || null;
+};
+
+const evaluateImprovementGoal = async (goal, { notifyChanges = true } = {}) => {
+  if (!['active', 'at_risk'].includes(goal.status)) return goal;
+  const snapshot = await latestOfficialSnapshotForGoal(goal);
+  if (!snapshot) return goal;
+
+  const currentValue = improvementMetricValue(goal, snapshot);
+  if (currentValue === null || currentValue === undefined || !Number.isFinite(Number(currentValue))) {
+    return prisma.mosqueImprovementGoal.update({
+      where: { id: goal.id },
+      data: {
+        currentValue: null,
+        currentMonth: snapshot.month,
+        measurementNote: `لا تتوفر عينة كافية للقياس من نتيجة KPI الرسمية لشهر ${snapshot.month}`,
+        lastEvaluatedAt: new Date(),
+      },
+    });
+  }
+
+  const progressPercent = improvementGoalProgress(goal, currentValue);
+  const met = improvementGoalMet(goal, currentValue);
+  const dueDays = goal.dueDate
+    ? calendarDayNumber(riyadhDateKey(goal.dueDate)) - calendarDayNumber(riyadhDateKey())
+    : null;
+
+  let status = goal.status;
+  if (met) status = 'achieved';
+  else if (dueDays !== null && (dueDays < 0 || (dueDays <= 30 && progressPercent < 75))) status = 'at_risk';
+  else status = 'active';
+
+  const actions = Array.isArray(goal.correctiveActions) ? goal.correctiveActions : [];
+  const updated = await prisma.mosqueImprovementGoal.update({
+    where: { id: goal.id },
+    data: {
+      currentValue: Number(currentValue),
+      currentMonth: snapshot.month,
+      progressPercent,
+      actionProgressPercent: improvementActionProgress(actions),
+      status,
+      measurementNote: `تم القياس من نتيجة KPI الرسمية لشهر ${snapshot.month}`,
+      lastEvaluatedAt: new Date(),
+      ...(status === 'achieved' && goal.status !== 'achieved' ? { achievedAt: new Date() } : {}),
+    },
+  });
+
+  if (notifyChanges && status !== goal.status) {
+    if (status === 'at_risk') {
+      if (updated.ownerUserId) {
+        await notify({
+          userId: updated.ownerUserId,
+          title: 'هدف تحسين معرض للتعثر',
+          message: `${updated.goalNumber} — ${updated.title}: التقدم ${updated.progressPercent}%`,
+          entityType: 'improvement_goal_at_risk',
+          entityId: updated.id,
+        });
+      }
+      await notify({
+        roleTarget: 'head',
+        title: 'هدف تحسين معرض للتعثر',
+        message: `${updated.goalNumber} — ${updated.title}: التقدم ${updated.progressPercent}%`,
+        entityType: 'improvement_goal_at_risk_head',
+        entityId: updated.id,
+      });
+    } else if (status === 'achieved') {
+      await notify({
+        roleTarget: 'head',
+        title: 'تحقق هدف تحسين',
+        message: `${updated.goalNumber} — ${updated.title}: تم بلوغ القيمة المستهدفة`,
+        entityType: 'improvement_goal_achieved',
+        entityId: updated.id,
+      });
+    }
+  }
+
+  return updated;
+};
+
+const syncImprovementGoals = async (year = null) => {
+  const goals = await prisma.mosqueImprovementGoal.findMany({
+    where: {
+      status: { in: ['active', 'at_risk'] },
+      ...(year ? { year } : {}),
+    },
+  });
+  for (const goal of goals) await evaluateImprovementGoal(goal);
+};
+
+router.get('/improvement-goal-assignees', requireRoles('head', 'supervisor'), async (_req, res, next) => {
+  try {
+    res.json(await completionTaskAssigneeDirectory());
+  } catch (error) { next(error); }
+});
+
+router.get('/improvement-goals', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const year = req.query.year ? Number(req.query.year) : null;
+    const status = nullableText(req.query.status);
+    if (year && (!Number.isInteger(year) || year < 2020 || year > 2100)) {
+      return res.status(400).json({ message: 'السنة غير صحيحة' });
+    }
+
+    await syncImprovementGoals(year);
+    const items = await prisma.mosqueImprovementGoal.findMany({
+      where: {
+        ...(year ? { year } : {}),
+        ...(status ? { status } : {}),
+      },
+      orderBy: [{ year: 'desc' }, { status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
+    });
+    res.json(items);
+  } catch (error) { next(error); }
+});
+
+router.get('/improvement-goal-suggestions', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const year = Number(req.query.year || riyadhDateKey().slice(0, 4));
+    if (!Number.isInteger(year) || year < 2020 || year > 2100) {
+      return res.status(400).json({ message: 'السنة غير صحيحة' });
+    }
+
+    const snapshots = await prisma.mosqueCompletionKpiSnapshot.findMany({
+      where: {
+        status: { in: ['approved', 'archived'] },
+        month: { startsWith: `${year}-` },
+      },
+      orderBy: { month: 'desc' },
+    });
+    const latest = snapshots[0];
+    if (!latest) return res.json({ year, sourceSnapshot: null, suggestions: [] });
+
+    const existing = await prisma.mosqueImprovementGoal.findMany({
+      where: {
+        year,
+        status: { notIn: ['closed', 'cancelled'] },
+      },
+    });
+    const exists = (suggestion) => existing.some((goal) => (
+      goal.category === suggestion.category
+      && goal.metricKey === suggestion.metricKey
+      && (goal.assigneeUserId || '') === (suggestion.assigneeUserId || '')
+      && (goal.assigneeName || '') === (suggestion.assigneeName || '')
+      && (goal.gapKey || '') === (suggestion.gapKey || '')
+    ));
+
+    const analytics = latest.payload || {};
+    const standard = analytics.kpiStandard || COMPLETION_KPI_STANDARD;
+    const suggestions = [];
+    const pushUnit = (metricKey, title, baselineValue, targetValue, targetDirection) => {
+      if (baselineValue === null || baselineValue === undefined) return;
+      const suggestion = {
+        category: 'unit_metric',
+        metricKey,
+        title,
+        baselineValue: Number(baselineValue),
+        targetValue: Number(targetValue),
+        targetDirection,
+        sourceMonth: latest.month,
+        sourceSnapshotId: latest.id,
+      };
+      suggestions.push({ ...suggestion, alreadyExists: exists(suggestion) });
+    };
+
+    if (analytics.summary?.created && Number(analytics.summary.completionRate) < Number(standard.completionRateTarget || 90)) {
+      pushUnit('completionRate', 'رفع نسبة إنجاز مهام استكمال البيانات', analytics.summary.completionRate, standard.completionRateTarget || 90, 'gte');
+    }
+    if (analytics.summary?.onTimeRate != null && Number(analytics.summary.onTimeRate) < Number(standard.onTimeRateTarget || 90)) {
+      pushUnit('onTimeRate', 'رفع نسبة الالتزام بمواعيد مهام الاستكمال', analytics.summary.onTimeRate, standard.onTimeRateTarget || 90, 'gte');
+    }
+    if (analytics.summary?.avgCompletionDays != null && Number(analytics.summary.avgCompletionDays) > Number(standard.avgCompletionDaysTarget || 5)) {
+      pushUnit('avgCompletionDays', 'خفض متوسط مدة إنجاز مهام الاستكمال', analytics.summary.avgCompletionDays, standard.avgCompletionDaysTarget || 5, 'lte');
+    }
+    if (analytics.summary?.overdueRate != null && Number(analytics.summary.overdueRate) > Number(standard.overdueRateMax || 10)) {
+      pushUnit('overdueRate', 'خفض نسبة مهام الاستكمال المتأخرة', analytics.summary.overdueRate, standard.overdueRateMax || 10, 'lte');
+    }
+
+    const weakAssignee = [...(analytics.byAssignee || [])]
+      .filter((row) => row.assigneeName !== 'غير مسندة' && row.kpi?.score != null && row.kpi.score < 75)
+      .sort((a, b) => a.kpi.score - b.kpi.score)[0];
+    if (weakAssignee) {
+      const suggestion = {
+        category: 'assignee_metric',
+        metricKey: 'kpiScore',
+        title: `رفع مؤشر أداء المسؤول: ${weakAssignee.assigneeName}`,
+        assigneeUserId: weakAssignee.assigneeUserId || null,
+        assigneeName: weakAssignee.assigneeName,
+        baselineValue: Number(weakAssignee.kpi.score),
+        targetValue: 80,
+        targetDirection: 'gte',
+        sourceMonth: latest.month,
+        sourceSnapshotId: latest.id,
+      };
+      suggestions.push({ ...suggestion, alreadyExists: exists(suggestion) });
+    }
+
+    const topGap = [...(analytics.byMissingKey || [])]
+      .filter((row) => Number(row.created) > 0)
+      .sort((a, b) => Number(b.created) - Number(a.created))[0];
+    if (topGap) {
+      const targetValue = Math.max(0, Math.floor(Number(topGap.created) * 0.5));
+      const suggestion = {
+        category: 'gap_reduction',
+        metricKey: 'gapCreatedCount',
+        title: `خفض تكرار نقص: ${topGap.missingKey}`,
+        gapKey: topGap.missingKey,
+        baselineValue: Number(topGap.created),
+        targetValue,
+        targetDirection: 'lte',
+        sourceMonth: latest.month,
+        sourceSnapshotId: latest.id,
+      };
+      suggestions.push({ ...suggestion, alreadyExists: exists(suggestion) });
+    }
+
+    res.json({
+      year,
+      sourceSnapshot: {
+        id: latest.id,
+        month: latest.month,
+        kpiScore: latest.kpiScore,
+        kpiStatus: latest.kpiStatus,
+      },
+      suggestions,
+    });
+  } catch (error) { next(error); }
+});
+
+router.post('/improvement-goals/evaluate', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const year = req.body?.year ? Number(req.body.year) : null;
+    await syncImprovementGoals(year);
+    const items = await prisma.mosqueImprovementGoal.findMany({
+      where: year ? { year } : {},
+      orderBy: [{ year: 'desc' }, { status: 'asc' }, { dueDate: 'asc' }],
+    });
+    res.json(items);
+  } catch (error) { next(error); }
+});
+
+router.post('/improvement-goals', requireRoles('head'), async (req, res, next) => {
+  try {
+    const input = improvementGoalCreateSchema.parse(req.body);
+    const owner = await assertImprovementGoalOwner(input.ownerUserId);
+    const actor = await completionSnapshotActor(req);
+    const actions = normalizeImprovementActions(input.correctiveActions);
+
+    const created = await prisma.mosqueImprovementGoal.create({
+      data: {
+        goalNumber: trackingNumber('IMP'),
+        year: input.year,
+        title: input.title,
+        category: input.category,
+        metricKey: input.metricKey,
+        sourceMonth: nullableText(input.sourceMonth),
+        sourceSnapshotId: nullableText(input.sourceSnapshotId),
+        assigneeUserId: nullableText(input.assigneeUserId),
+        assigneeName: nullableText(input.assigneeName),
+        gapKey: nullableText(input.gapKey),
+        baselineValue: input.baselineValue,
+        targetValue: input.targetValue,
+        targetDirection: input.targetDirection,
+        currentValue: input.baselineValue,
+        currentMonth: nullableText(input.sourceMonth),
+        progressPercent: 0,
+        actionProgressPercent: improvementActionProgress(actions),
+        status: input.status,
+        ownerUserId: owner?.id || null,
+        ownerName: owner?.username || null,
+        dueDate: input.dueDate || null,
+        correctiveActions: actions,
+        notes: nullableText(input.notes),
+        measurementNote: input.sourceMonth ? `قيمة خط الأساس من نتيجة KPI الرسمية لشهر ${input.sourceMonth}` : 'قيمة خط الأساس مسجلة عند إنشاء الهدف',
+        createdBy: actor.id,
+        createdByName: actor.name,
+        updatedBy: actor.id,
+        updatedByName: actor.name,
+      },
+    });
+
+    if (owner && input.status === 'active') {
+      await notify({
+        userId: owner.id,
+        title: 'تم إسناد هدف تحسين إليك',
+        message: `${created.goalNumber} — ${created.title}`,
+        entityType: 'improvement_goal',
+        entityId: created.id,
+      });
+    }
+
+    const evaluated = input.status === 'active' ? await evaluateImprovementGoal(created, { notifyChanges: false }) : created;
+    res.status(201).json(evaluated);
+  } catch (error) { next(error); }
+});
+
+router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const context = req.mosqueRole || await getModuleRole(req);
+    const input = improvementGoalUpdateSchema.parse(req.body);
+    const current = await prisma.mosqueImprovementGoal.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'هدف التحسين غير موجود' });
+
+    if (context.role === 'supervisor') {
+      if (current.ownerUserId !== req.authUser.id) {
+        return res.status(403).json({ message: 'يمكن للمشرف تحديث أهداف التحسين المسندة إليه فقط' });
+      }
+      const structuralFields = ['title', 'targetValue', 'ownerUserId', 'dueDate', 'status'];
+      if (structuralFields.some((field) => input[field] !== undefined)) {
+        return res.status(403).json({ message: 'تعديل المستهدف أو الحالة أو المسؤول متاح لرئيس الوحدة فقط' });
+      }
+    }
+
+    const allowedTransitions = {
+      draft: ['active', 'cancelled'],
+      active: ['cancelled'],
+      at_risk: ['cancelled'],
+      achieved: ['closed'],
+      closed: [],
+      cancelled: [],
+    };
+    if (input.status && input.status !== current.status && !(allowedTransitions[current.status] || []).includes(input.status)) {
+      return res.status(400).json({ message: `لا يمكن تغيير حالة الهدف من ${current.status} إلى ${input.status}` });
+    }
+
+    const owner = input.ownerUserId === undefined ? undefined : await assertImprovementGoalOwner(input.ownerUserId);
+    const actor = await completionSnapshotActor(req);
+    const actions = input.correctiveActions === undefined
+      ? undefined
+      : normalizeImprovementActions(input.correctiveActions);
+
+    const data = {
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.targetValue !== undefined ? { targetValue: input.targetValue } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: input.dueDate || null } : {}),
+      ...(input.notes !== undefined ? { notes: nullableText(input.notes) } : {}),
+      ...(actions !== undefined ? {
+        correctiveActions: actions,
+        actionProgressPercent: improvementActionProgress(actions),
+      } : {}),
+      ...(owner !== undefined ? {
+        ownerUserId: owner?.id || null,
+        ownerName: owner?.username || null,
+      } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.status === 'closed' ? { closedAt: new Date() } : {}),
+      updatedBy: actor.id,
+      updatedByName: actor.name,
+    };
+
+    const updated = await prisma.mosqueImprovementGoal.update({ where: { id: current.id }, data });
+
+    if (owner && owner.id !== current.ownerUserId) {
+      await notify({
+        userId: owner.id,
+        title: 'تم إسناد هدف تحسين إليك',
+        message: `${updated.goalNumber} — ${updated.title}`,
+        entityType: 'improvement_goal',
+        entityId: updated.id,
+      });
+    } else if (input.status === 'active' && current.status === 'draft' && updated.ownerUserId) {
+      await notify({
+        userId: updated.ownerUserId,
+        title: 'بدأ تنفيذ هدف التحسين',
+        message: `${updated.goalNumber} — ${updated.title}`,
+        entityType: 'improvement_goal',
+        entityId: updated.id,
+      });
+    }
+
+    const evaluated = updated.status === 'active' || updated.status === 'at_risk'
+      ? await evaluateImprovementGoal(updated, { notifyChanges: false })
+      : updated;
+
+    res.json(evaluated);
+  } catch (error) { next(error); }
+});
 
 const COMPLETION_KPI_STANDARD = Object.freeze({
   code: 'IAU-MOSQUES-KPI-V1',
