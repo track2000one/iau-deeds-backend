@@ -4195,10 +4195,14 @@ router.get('/improvement-goals', requireRoles('head', 'supervisor'), async (req,
     }
 
     await syncImprovementGoals(year);
+    await syncImprovementGoalSustainability(year);
     const items = await prisma.mosqueImprovementGoal.findMany({
       where: {
         ...(year ? { year } : {}),
         ...(status ? { status } : {}),
+      },
+      include: {
+        sustainabilityChecks: { orderBy: { month: 'asc' } },
       },
       orderBy: [{ year: 'desc' }, { status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
     });
@@ -4323,9 +4327,34 @@ router.post('/improvement-goals/evaluate', requireRoles('head', 'supervisor'), a
   try {
     const year = req.body?.year ? Number(req.body.year) : null;
     await syncImprovementGoals(year);
+    await syncImprovementGoalSustainability(year);
     const items = await prisma.mosqueImprovementGoal.findMany({
       where: year ? { year } : {},
+      include: {
+        sustainabilityChecks: { orderBy: { month: 'asc' } },
+      },
       orderBy: [{ year: 'desc' }, { status: 'asc' }, { dueDate: 'asc' }],
+    });
+    res.json(items);
+  } catch (error) { next(error); }
+});
+
+router.post('/improvement-goals/sustainability/evaluate', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const year = req.body?.year ? Number(req.body.year) : null;
+    if (year && (!Number.isInteger(year) || year < 2020 || year > 2100)) {
+      return res.status(400).json({ message: 'السنة غير صحيحة' });
+    }
+    await syncImprovementGoalSustainability(year);
+    const items = await prisma.mosqueImprovementGoal.findMany({
+      where: {
+        status: 'closed',
+        ...(year ? { year } : {}),
+      },
+      include: {
+        sustainabilityChecks: { orderBy: { month: 'asc' } },
+      },
+      orderBy: [{ closedAt: 'desc' }, { createdAt: 'desc' }],
     });
     res.json(items);
   } catch (error) { next(error); }
