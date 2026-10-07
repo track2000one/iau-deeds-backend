@@ -365,7 +365,7 @@ const notifyCompletionTaskOnce = async ({ task, userId = null, roleTarget = null
   return true;
 };
 
-const syncCompletionTaskAlerts = async () => {
+export const syncCompletionTaskAlerts = async () => {
   try {
     const tasks = await prisma.mosqueCompletionTask.findMany({
       where: {
@@ -1164,8 +1164,10 @@ router.get('/dashboard', async (req, res, next) => {
           sites, newRequests: 0, reviewRequests: 0, approvedRequests: 0, lateRequests: 0,
           openTickets: 0, pendingLeaves: 0, jobs: 0, managedSites: 0, assignedRequests: 0,
           urgentRequests: 0, newTickets: 0, myRequests: 0, myLeaves: 0,
+          completionTasksActive: 0, completionTasksOverdue: 0, completionTasksDueToday: 0,
+          completionTasksDueSoon: 0, completionTasksUnassigned: 0,
         },
-        recentRequests: [], recentTickets: [], linkedSite: null, managedSiteIds: [],
+        recentRequests: [], recentTickets: [], recentCompletionTasks: [], linkedSite: null, managedSiteIds: [],
       });
     }
 
