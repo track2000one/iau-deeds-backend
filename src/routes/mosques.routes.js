@@ -4146,6 +4146,13 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
       });
     }
 
+    if (current.status === 'achieved') {
+      const frozenFields = ['title', 'targetValue', 'ownerUserId', 'dueDate', 'status'];
+      if (frozenFields.some((field) => input[field] !== undefined)) {
+        return res.status(409).json({ message: 'بعد تحقق الهدف رقميًا تثبت بيانات الهدف والمستهدف، ويسمح فقط باستكمال الإجراءات والملاحظات وإثبات الإغلاق' });
+      }
+    }
+
     if (context.role === 'supervisor') {
       if (current.ownerUserId !== req.authUser.id) {
         return res.status(403).json({ message: 'يمكن للمشرف تحديث أهداف التحسين المسندة إليه فقط' });
