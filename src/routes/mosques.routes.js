@@ -3830,6 +3830,63 @@ const improvementGoalMet = (goal, currentValue) => {
     : Number(currentValue) <= Number(goal.targetValue);
 };
 
+const improvementGoalDecisionState = (goal) => goal ? ({
+  id: goal.id,
+  goalNumber: goal.goalNumber,
+  title: goal.title,
+  category: goal.category,
+  metricKey: goal.metricKey,
+  status: goal.status,
+  ownerUserId: goal.ownerUserId || null,
+  ownerName: goal.ownerName || null,
+  dueDate: goal.dueDate ? new Date(goal.dueDate).toISOString() : null,
+  baselineValue: goal.baselineValue,
+  targetValue: goal.targetValue,
+  currentValue: goal.currentValue ?? null,
+  currentMonth: goal.currentMonth || null,
+  progressPercent: goal.progressPercent ?? 0,
+  actionProgressPercent: goal.actionProgressPercent ?? 0,
+  evidenceStatus: goal.evidenceStatus || null,
+  sustainabilityStatus: goal.sustainabilityStatus || null,
+  sustainabilityValue: goal.sustainabilityValue ?? null,
+  sustainabilityMonth: goal.sustainabilityMonth || null,
+  parentGoalId: goal.parentGoalId || null,
+  followUpGoalId: goal.followUpGoalId || null,
+}) : null;
+
+const recordExecutiveDecision = async ({
+  decisionType,
+  title,
+  rationale,
+  goal = null,
+  beforeState = null,
+  afterState = null,
+  actor,
+  actorRole = 'head',
+  entityType = 'improvement_goal',
+  entityId = null,
+  metricKey = null,
+  sourceSnapshotId = null,
+}) => prisma.mosqueExecutiveDecision.create({
+  data: {
+    decisionNumber: trackingNumber('DEC'),
+    decisionType,
+    title,
+    rationale: nullableText(rationale) || 'قرار تنفيذي موثق بالنظام',
+    entityType: nullableText(entityType),
+    entityId: nullableText(entityId) || goal?.id || null,
+    goalId: goal?.id || null,
+    metricKey: nullableText(metricKey) || goal?.metricKey || null,
+    sourceSnapshotId: nullableText(sourceSnapshotId) || goal?.sourceSnapshotId || null,
+    beforeState: beforeState || undefined,
+    afterState: afterState || undefined,
+    actorUserId: actor?.id || null,
+    actorName: actor?.name || null,
+    actorRole: nullableText(actorRole),
+    decidedAt: new Date(),
+  },
+});
+
 const latestOfficialSnapshotForGoal = async (goal) => {
   const rows = await prisma.mosqueCompletionKpiSnapshot.findMany({
     where: {
