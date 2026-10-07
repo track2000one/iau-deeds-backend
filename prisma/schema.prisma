@@ -54,6 +54,13 @@ enum GeometryAccuracy {
   OFFICIAL
 }
 
+enum GeometryApprovalStatus {
+  DRAFT
+  REVIEWED
+  APPROVED
+  CHANGE_REQUESTED
+}
+
 enum AppUserRole {
   admin
   employee
@@ -156,6 +163,15 @@ model InvestmentSite {
   longitude        Decimal?          @db.Decimal(10, 7)
   geoJson          Json?
   geometryAccuracy GeometryAccuracy  @default(APPROXIMATE)
+  geometryApprovalStatus       GeometryApprovalStatus @default(DRAFT)
+  geometryReviewedById         String?
+  geometryReviewedByName       String?
+  geometryReviewedAt           DateTime?
+  geometryApprovedById         String?
+  geometryApprovedByName       String?
+  geometryApprovedAt           DateTime?
+  geometryReferenceAttachmentId String?
+  geometryWorkflowNote         String?
 
   region      String?
   city        String?
@@ -208,6 +224,16 @@ model InvestmentArea {
   geoJson             Json?
 
   geometryAccuracy    GeometryAccuracy     @default(APPROXIMATE)
+    geometryApprovalStatus       GeometryApprovalStatus @default(DRAFT)
+    geometryReviewedById         String?
+    geometryReviewedByName       String?
+    geometryReviewedAt           DateTime?
+    geometryApprovedById         String?
+    geometryApprovedByName       String?
+    geometryApprovedAt           DateTime?
+    geometryReferenceAttachmentId String?
+    geometryWorkflowNote         String?
+
   occupancyStatus     InvestmentAreaStatus @default(AVAILABLE)
   investmentReadiness InvestmentReadiness  @default(NOT_ASSESSED)
 
