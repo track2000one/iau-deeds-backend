@@ -325,6 +325,17 @@ const siteSchema = z.object({
   area: z.coerce.number().nonnegative().optional().nullable(),
   capacity: z.coerce.number().int().nonnegative().optional().nullable(),
   quranTargetCount: z.coerce.number().int().min(0).max(1000000).optional().nullable(),
+  hasWomenPrayerArea: z.boolean().optional().default(false),
+  womenPrayerArea: z.object({
+    capacity: z.coerce.number().int().nonnegative().optional().nullable(),
+    floor: z.string().trim().max(120).optional().nullable(),
+    locationDescription: z.string().trim().max(500).optional().nullable(),
+    separateEntrance: z.boolean().optional().nullable(),
+    hasAblution: z.boolean().optional().nullable(),
+    hasRestrooms: z.boolean().optional().nullable(),
+    status: z.enum(['active', 'maintenance', 'temporarily_closed']).optional().default('active'),
+    notes: z.string().trim().max(3000).optional().nullable(),
+  }).optional().nullable(),
   latitude: z.coerce.number().min(-90).max(90).optional().nullable(),
   longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
   mapUrl: z.string().trim().optional().nullable(),
@@ -372,6 +383,28 @@ const buildingSchema = z.object({
   approvedAlternative: z.string().trim().optional().nullable(),
   notes: z.string().trim().optional().nullable(),
 });
+
+const normalizeWomenPrayerArea = (input) => {
+  if (!['mosque', 'jami'].includes(input.siteType)) {
+    input.hasWomenPrayerArea = false;
+    input.womenPrayerArea = null;
+    return;
+  }
+  if (!input.hasWomenPrayerArea) {
+    input.womenPrayerArea = null;
+    return;
+  }
+  input.womenPrayerArea = {
+    capacity: input.womenPrayerArea?.capacity ?? null,
+    floor: nullableText(input.womenPrayerArea?.floor),
+    locationDescription: nullableText(input.womenPrayerArea?.locationDescription),
+    separateEntrance: input.womenPrayerArea?.separateEntrance ?? null,
+    hasAblution: input.womenPrayerArea?.hasAblution ?? null,
+    hasRestrooms: input.womenPrayerArea?.hasRestrooms ?? null,
+    status: input.womenPrayerArea?.status || 'active',
+    notes: nullableText(input.womenPrayerArea?.notes),
+  };
+};
 
 const assertMosqueBuildingLink = async (input) => {
   if (input.spatialRelation !== 'inside_building') {
@@ -433,6 +466,7 @@ const fieldVisitSchema = z.object({
   tourId: z.string().optional().nullable(),
   siteId: z.string().min(1),
   visitType: z.enum(['initial', 'follow_up', 'urgent', 'closure_verification']).default('initial'),
+  visitScope: z.enum(['whole_site', 'men_section', 'women_section', 'both_sections']).default('whole_site'),
   visitDate: z.coerce.date(),
   departureAt: z.coerce.date().optional().nullable(),
   representativeName: z.string().trim().max(300).optional().nullable(),
@@ -480,6 +514,18 @@ const validateFieldVisitTreatmentEvidence = (input) => {
     }
   }
 };
+
+const WOMEN_PRAYER_AREA_CHECKLIST = [
+  ['مصلى النساء — النظافة', 'نظافة مصلى النساء والسجاد والأرضيات'],
+  ['مصلى النساء — المرافق', 'نظافة وجاهزية مرافق الوضوء ودورات المياه الخاصة بالنساء'],
+  ['مصلى النساء — التكييف', 'كفاءة التكييف والتهوية في مصلى النساء'],
+  ['مصلى النساء — الإنارة', 'سلامة الإنارة والمفاتيح والمقابس في مصلى النساء'],
+  ['مصلى النساء — السلامة', 'سلامة مدخل وممرات مصلى النساء ووضوح مخارج الطوارئ'],
+  ['مصلى النساء — الخصوصية', 'سلامة الحواجز والستائر وتحقيق الخصوصية المناسبة'],
+  ['مصلى النساء — التجهيزات', 'توفر المصاحف والحوامل والرفوف وكفايتها في مصلى النساء'],
+  ['مصلى النساء — الإتاحة', 'فتح مصلى النساء وجاهزيته وإتاحته أثناء أوقات الصلاة'],
+  ['مصلى النساء — المظهر العام', 'تنظيم مصلى النساء ونظافته وجاهزيته العامة للصلاة'],
+].map(([category, title]) => ({ category, title, details: { section: 'women' } }));
 
 const FIELD_VISIT_CHECKLIST = [
   ['النظافة', 'نظافة السجاد والأرضيات'],
@@ -1052,6 +1098,7 @@ router.post('/sites' , requireRoles('head', 'supervisor'), async (req, res, next
   try {
     const context = req.mosqueRole || await getModuleRole(req);
     const input = siteSchema.parse(req.body);
+    normalizeWomenPrayerArea(input);
     await assertMosqueBuildingLink(input);
     const site = await prisma.mosqueSite.create({
       data: {
@@ -1071,6 +1118,7 @@ router.put('/sites/:id', requireRoles('head', 'supervisor'), async (req, res, ne
     if (!current) return res.status(404).json({ message: 'الموقع غير موجود' });
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, current.id, context);
     const input = siteSchema.parse(req.body);
+    normalizeWomenPrayerArea(input);
     await assertMosqueBuildingLink(input);
     const site = await prisma.mosqueSite.update({
       where: { id: req.params.id },
@@ -1099,7 +1147,17 @@ router.delete('/sites/:id', requireRoles('head'), async (req, res, next) => {
 // Field tours and visits. Every visit is linked to the existing MosqueSite
 // record so the platform keeps one authoritative mosque/prayer-room registry.
 // -----------------------------------------------------------------------------
-const newFieldChecklist = () => FIELD_VISIT_CHECKLIST.map((item) => ({
+const shouldIncludeWomenSection = (site, visitScope = 'whole_site') => {
+  if (!site) return false;
+  if (site.siteType === 'prayer_room') return site.prayerRoomGender === 'women';
+  if (!site.hasWomenPrayerArea) return false;
+  return ['whole_site', 'women_section', 'both_sections'].includes(visitScope);
+};
+
+const newFieldChecklist = ({ site = null, visitScope = 'whole_site' } = {}) => [
+  ...FIELD_VISIT_CHECKLIST,
+  ...(shouldIncludeWomenSection(site, visitScope) ? WOMEN_PRAYER_AREA_CHECKLIST : []),
+].map((item) => ({
   ...item,
   status: 'not_checked',
   priority: 'normal',
@@ -1111,7 +1169,7 @@ const newFieldChecklist = () => FIELD_VISIT_CHECKLIST.map((item) => ({
 const fieldVisitInclude = {
   site: {
     select: {
-      id: true, name: true, siteType: true, prayerRoomGender: true, city: true,
+      id: true, name: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true, womenPrayerArea: true, city: true,
       district: true, campusLocation: true, status: true, publicToken: true,
     },
   },
@@ -1203,8 +1261,18 @@ const fieldVisitAccessState = (req, visit) => {
   };
 };
 
-router.get('/field-visits/checklist-template', requireRoles('head', 'supervisor'), (_req, res) => {
-  res.json(newFieldChecklist());
+router.get('/field-visits/checklist-template', requireRoles('head', 'supervisor'), async (req, res, next) => {
+  try {
+    const siteId = nullableText(req.query.siteId);
+    const visitScope = nullableText(req.query.visitScope) || 'whole_site';
+    const site = siteId
+      ? await prisma.mosqueSite.findUnique({
+          where: { id: siteId },
+          select: { id: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true },
+        })
+      : null;
+    res.json(newFieldChecklist({ site, visitScope }));
+  } catch (error) { next(error); }
 });
 
 router.get('/field-tours', requireRoles('head', 'supervisor'), async (req, res, next) => {
@@ -1242,8 +1310,12 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
       }
     }
 
-    const sites = await prisma.mosqueSite.findMany({ where: { id: { in: siteIds } }, select: { id: true } });
+    const sites = await prisma.mosqueSite.findMany({
+      where: { id: { in: siteIds } },
+      select: { id: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true },
+    });
     if (sites.length !== siteIds.length) return res.status(400).json({ message: 'يتضمن نطاق الجولة مسجدًا أو مصلى غير موجود' });
+    const siteMap = new Map(sites.map((site) => [site.id, site]));
 
     const conflict = await findActiveFieldVisitConflict(siteIds);
     if (conflict) {
@@ -1268,17 +1340,22 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
       });
 
       for (const siteId of siteIds) {
+        const site = siteMap.get(siteId);
+        const visitScope = site?.siteType === 'prayer_room'
+          ? (site.prayerRoomGender === 'women' ? 'women_section' : 'men_section')
+          : 'whole_site';
         await tx.mosqueFieldVisit.create({
           data: {
             visitNumber: trackingNumber('MVS'),
             tourId: tour.id,
             siteId,
             visitType: 'initial',
+            visitScope,
             visitDate: input.scheduledDate,
             teamMembers: input.teamMembers,
             workflowStatus: 'planned',
             createdBy: req.authUser.id,
-            items: { create: newFieldChecklist().map(fieldVisitItemData) },
+            items: { create: newFieldChecklist({ site, visitScope }).map(fieldVisitItemData) },
           },
         });
       }
@@ -1484,7 +1561,10 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
     const input = fieldVisitSchema.parse(req.body);
     validateFieldVisitTreatmentEvidence(input);
     if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, input.siteId, context);
-    const site = await prisma.mosqueSite.findUnique({ where: { id: input.siteId }, select: { id: true } });
+    const site = await prisma.mosqueSite.findUnique({
+      where: { id: input.siteId },
+      select: { id: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true },
+    });
     if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
     const conflict = await findActiveFieldVisitConflict([input.siteId]);
     if (conflict) {
@@ -1493,13 +1573,14 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
         conflict: { visitId: conflict.id, visitNumber: conflict.visitNumber, siteId: conflict.siteId, siteName: conflict.site.name, workflowStatus: conflict.workflowStatus },
       });
     }
-    const items = input.items.length ? input.items : newFieldChecklist();
+    const items = input.items.length ? input.items : newFieldChecklist({ site, visitScope: input.visitScope });
     const record = await prisma.mosqueFieldVisit.create({
       data: {
         visitNumber: trackingNumber('MVS'),
         tourId: input.tourId || null,
         siteId: input.siteId,
         visitType: input.visitType,
+        visitScope: input.visitScope,
         visitDate: input.visitDate,
         departureAt: input.departureAt || null,
         representativeName: input.representativeName || null,
@@ -1553,6 +1634,7 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
           tourId: input.tourId || null,
           siteId: input.siteId,
           visitType: input.visitType,
+          visitScope: input.visitScope,
           visitDate: input.visitDate,
           departureAt: input.departureAt || null,
           representativeName: input.representativeName || null,
