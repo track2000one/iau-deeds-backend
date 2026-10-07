@@ -4169,6 +4169,14 @@ router.patch('/improvement-goals/:id', requireRoles('head', 'supervisor'), async
         entityType: 'improvement_goal',
         entityId: updated.id,
       });
+    } else if (input.status === 'active' && current.status === 'draft' && updated.ownerUserId) {
+      await notify({
+        userId: updated.ownerUserId,
+        title: 'بدأ تنفيذ هدف التحسين',
+        message: `${updated.goalNumber} — ${updated.title}`,
+        entityType: 'improvement_goal',
+        entityId: updated.id,
+      });
     }
 
     const evaluated = updated.status === 'active' || updated.status === 'at_risk'
