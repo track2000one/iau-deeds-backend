@@ -6,6 +6,7 @@ import { applyAccountingStage6Baseline } from './services/accountingStage6Baseli
 import { ensureOrganizationStorage } from './services/organization.service.js';
 import { ensureOfficialMosqueSites } from './services/mosqueSites.service.js';
 import { archiveOrphanedMosqueLeaves } from './services/mosqueLeaveLifecycle.service.js';
+import { syncCompletionTaskAlerts } from './routes/mosques.routes.js';
 import { backfillEvidenceAuditMirror } from './services/accountingEvidenceAudit.service.js';
 import { prisma } from './prisma.js';
 
@@ -16,6 +17,11 @@ const startServer = async () => {
   await ensureOrganizationStorage();
   await ensureOfficialMosqueSites();
   await archiveOrphanedMosqueLeaves();
+  await syncCompletionTaskAlerts();
+  const completionTaskAlertTimer = setInterval(() => {
+    void syncCompletionTaskAlerts();
+  }, 60 * 60 * 1000);
+  completionTaskAlertTimer.unref?.();
 
   // The reviewed Stage 6 workbook is the requested accounting baseline. In
   // production we fail closed: if Google Sheets cannot be read or the verified
