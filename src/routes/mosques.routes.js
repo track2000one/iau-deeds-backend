@@ -1672,6 +1672,12 @@ router.get('/field-tours', requireRoles('head', 'supervisor'), async (req, res, 
   } catch (error) { next(error); }
 });
 
+router.get('/field-visit-assignees', requireRoles('head', 'supervisor'), async (_req, res, next) => {
+  try {
+    res.json(await completionTaskAssigneeDirectory());
+  } catch (error) { next(error); }
+});
+
 router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
     const context = req.mosqueRole || await getModuleRole(req);
@@ -1687,12 +1693,52 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
 
     const sites = await prisma.mosqueSite.findMany({
       where: { id: { in: siteIds } },
-      select: { id: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true },
+      select: { id: true, name: true, siteType: true, prayerRoomGender: true, hasWomenPrayerArea: true, womenPrayerArea: true },
     });
     if (sites.length !== siteIds.length) return res.status(400).json({ message: 'يتضمن نطاق الجولة مسجدًا أو مصلى غير موجود' });
     const siteMap = new Map(sites.map((site) => [site.id, site]));
 
-    const conflict = await findActiveFieldVisitConflict(siteIds);
+    const assigneeDirectory = await completionTaskAssigneeDirectory();
+    const assigneeById = new Map(assigneeDirectory.map((user) => [user.id, user]));
+    const assignmentBySite = new Map((input.visitAssignments || []).map((item) => [item.siteId, item]));
+
+    const plannedVisits = [];
+    for (const siteId of siteIds) {
+      const site = siteMap.get(siteId);
+      const assignment = assignmentBySite.get(siteId);
+      if (!assignment) {
+        return res.status(400).json({ message: `حدد منفذ الزيارة للموقع ${site?.name || siteId}` });
+      }
+      const primaryAssignee = assigneeById.get(assignment.primaryAssigneeUserId);
+      if (!primaryAssignee) {
+        return res.status(400).json({ message: `منفذ الزيارة الرئيسي المحدد للموقع ${site?.name || siteId} غير متاح` });
+      }
+
+      if (site?.siteType === 'prayer_room') {
+        const visitScope = site.prayerRoomGender === 'women' ? 'women_section' : 'men_section';
+        plannedVisits.push({ site, siteId, visitScope, assignee: primaryAssignee });
+        continue;
+      }
+
+      const womenPresent = ['mosque', 'jami'].includes(site?.siteType) && womenPrayerPresenceStatus(site) === 'present';
+      if (womenPresent) {
+        const womenAssignee = assignment.womenAssigneeUserId ? assigneeById.get(assignment.womenAssigneeUserId) : null;
+        if (!womenAssignee) {
+          return res.status(400).json({ message: `الموقع ${site.name} يحتوي على مصلى نساء؛ يجب تحديد مستخدم مستقل لزيارة مصلى النساء` });
+        }
+        if (womenAssignee.id === primaryAssignee.id) {
+          return res.status(400).json({ message: `يجب أن يكون منفذ زيارة مصلى النساء في ${site.name} مستخدمًا مختلفًا عن منفذ القسم الرئيسي` });
+        }
+        plannedVisits.push(
+          { site, siteId, visitScope: 'men_section', assignee: primaryAssignee },
+          { site, siteId, visitScope: 'women_section', assignee: womenAssignee },
+        );
+      } else {
+        plannedVisits.push({ site, siteId, visitScope: 'whole_site', assignee: primaryAssignee });
+      }
+    }
+
+    const conflict = await findActiveFieldVisitConflict(plannedVisits.map((visit) => ({ siteId: visit.siteId, visitScope: visit.visitScope })));
     if (conflict) {
       return res.status(409).json({
         message: activeFieldVisitMessage(conflict),
@@ -1714,23 +1760,21 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
         },
       });
 
-      for (const siteId of siteIds) {
-        const site = siteMap.get(siteId);
-        const visitScope = site?.siteType === 'prayer_room'
-          ? (site.prayerRoomGender === 'women' ? 'women_section' : 'men_section')
-          : 'whole_site';
+      for (const planned of plannedVisits) {
         await tx.mosqueFieldVisit.create({
           data: {
             visitNumber: trackingNumber('MVS'),
             tourId: tour.id,
-            siteId,
+            siteId: planned.siteId,
             visitType: 'initial',
-            visitScope,
+            visitScope: planned.visitScope,
             visitDate: input.scheduledDate,
-            teamMembers: input.teamMembers,
+            teamMembers: [planned.assignee.username],
+            assignedToUserId: planned.assignee.id,
+            assignedToName: planned.assignee.username,
             workflowStatus: 'planned',
             createdBy: req.authUser.id,
-            items: { create: newFieldChecklist({ site, visitScope }).map(fieldVisitItemData) },
+            items: { create: newFieldChecklist({ site: planned.site, visitScope: planned.visitScope }).map(fieldVisitItemData) },
           },
         });
       }
@@ -1740,11 +1784,24 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
         include: {
           visits: {
             include: { site: { select: { id: true, name: true, siteType: true, prayerRoomGender: true, campusLocation: true } }, _count: { select: { items: true } } },
-            orderBy: { visitDate: 'asc' },
+            orderBy: [{ siteId: 'asc' }, { visitScope: 'asc' }],
           },
         },
       });
     });
+
+    await Promise.all((created?.visits || []).map((visit) => {
+      if (!visit.assignedToUserId || visit.assignedToUserId === req.authUser.id) return Promise.resolve();
+      const scopeLabel = visit.visitScope === 'women_section' ? 'مصلى النساء' : visit.visitScope === 'men_section' ? 'القسم الرئيسي' : 'الموقع';
+      return notify({
+        userId: visit.assignedToUserId,
+        siteId: visit.siteId,
+        title: 'تم إسناد زيارة ميدانية إليك',
+        message: `${created.tourNumber} — ${visit.site?.name || 'الموقع'} — ${scopeLabel} — ${visit.visitNumber}`,
+        entityType: 'field_visit_assignment',
+        entityId: visit.id,
+      });
+    }));
 
     res.status(201).json({ ...created, ...fieldTourAccessState(req, created) });
   } catch (error) { next(error); }
