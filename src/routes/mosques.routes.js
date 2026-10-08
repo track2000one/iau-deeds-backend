@@ -1999,7 +1999,7 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
     });
     if (!site) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
     validateWomenVisitScope(site, input.visitScope);
-    const conflict = await findActiveFieldVisitConflict([input.siteId]);
+    const conflict = await findActiveFieldVisitConflict([{ siteId: input.siteId, visitScope: input.visitScope }]);
     if (conflict) {
       return res.status(409).json({
         message: activeFieldVisitMessage(conflict),
@@ -2007,6 +2007,9 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
       });
     }
     const items = input.items.length ? input.items : newFieldChecklist({ site, visitScope: input.visitScope });
+    const requestedAssigneeId = nullableText(input.assignedToUserId) || req.authUser.id;
+    const assignee = (await completionTaskAssigneeDirectory()).find((item) => item.id === requestedAssigneeId);
+    if (!assignee) return res.status(400).json({ message: 'المستخدم المحدد غير متاح لإسناد الزيارة الميدانية' });
     const record = await prisma.mosqueFieldVisit.create({
       data: {
         visitNumber: trackingNumber('MVS'),
@@ -2024,6 +2027,8 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
         generalNotes: input.generalNotes || null,
         recommendations: input.recommendations || null,
         attachments: input.attachments,
+        assignedToUserId: assignee.id,
+        assignedToName: assignee.username,
         createdBy: req.authUser.id,
         items: { create: items.map(fieldVisitItemData) },
       },
@@ -2038,15 +2043,17 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
     const context = req.mosqueRole || await getModuleRole(req);
     const current = await prisma.mosqueFieldVisit.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'الزيارة الميدانية غير موجودة' });
-    if (context.role === 'supervisor') {
+    if (context.role === 'supervisor' && current.assignedToUserId !== req.authUser.id) {
       await assertSupervisorSiteAccess(req, current.siteId, context);
       if (req.body.siteId && req.body.siteId !== current.siteId) await assertSupervisorSiteAccess(req, req.body.siteId, context);
     }
     const isSystemAdmin = req.authUser?.role === 'admin';
     const isUnitHead = req.mosqueRole?.role === 'head';
-    const isOwner = current.createdBy === req.authUser?.id;
+    const isAssignee = current.assignedToUserId === req.authUser?.id;
+    const isLegacyOwner = !current.assignedToUserId && current.createdBy === req.authUser?.id;
+    const isOwner = isAssignee || isLegacyOwner;
     if (!isSystemAdmin && !isUnitHead && !isOwner) {
-      return res.status(403).json({ message: 'هذه الزيارة تتبع جولة أنشأها مستخدم آخر؛ يمكنك عرضها فقط ولا تملك صلاحية تعديلها.' });
+      return res.status(403).json({ message: 'هذه الزيارة مسندة إلى مستخدم آخر؛ يمكنك عرض ما تسمح به صلاحياتك فقط ولا تملك صلاحية تعديلها.' });
     }
     const input = fieldVisitSchema.parse(req.body);
     validateFieldVisitTreatmentEvidence(input);
@@ -2057,13 +2064,21 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
     if (!targetSite) return res.status(404).json({ message: 'المسجد أو المصلى غير موجود' });
     validateWomenVisitScope(targetSite, input.visitScope);
     if (ACTIVE_FIELD_VISIT_STATUSES.includes(input.workflowStatus)) {
-      const conflict = await findActiveFieldVisitConflict([input.siteId], current.id);
+      const conflict = await findActiveFieldVisitConflict([{ siteId: input.siteId, visitScope: input.visitScope }], current.id);
       if (conflict) {
         return res.status(409).json({
           message: activeFieldVisitMessage(conflict),
           conflict: { visitId: conflict.id, visitNumber: conflict.visitNumber, siteId: conflict.siteId, siteName: conflict.site.name, workflowStatus: conflict.workflowStatus },
         });
       }
+    }
+    let assigneeId = current.assignedToUserId || req.authUser.id;
+    let assigneeName = current.assignedToName || req.authUser?.username || null;
+    if (isUnitHead && input.assignedToUserId && input.assignedToUserId !== current.assignedToUserId) {
+      const nextAssignee = (await completionTaskAssigneeDirectory()).find((item) => item.id === input.assignedToUserId);
+      if (!nextAssignee) return res.status(400).json({ message: 'المستخدم المحدد غير متاح لإسناد الزيارة الميدانية' });
+      assigneeId = nextAssignee.id;
+      assigneeName = nextAssignee.username;
     }
     const record = await prisma.$transaction(async (tx) => {
       await tx.mosqueFieldVisitItem.deleteMany({ where: { visitId: current.id } });
@@ -2084,6 +2099,8 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
           generalNotes: input.generalNotes || null,
           recommendations: input.recommendations || null,
           attachments: input.attachments,
+          assignedToUserId: assigneeId,
+          assignedToName: assigneeName,
           items: { create: input.items.map(fieldVisitItemData) },
         },
         include: fieldVisitInclude,
@@ -2115,13 +2132,17 @@ router.delete('/field-visits/:id', requireRoles('head', 'supervisor'), async (re
       },
     });
     if (!current) return res.status(404).json({ message: 'الزيارة الميدانية غير موجودة' });
-    if (context.role === 'supervisor') await assertSupervisorSiteAccess(req, current.siteId, context);
+    if (context.role === 'supervisor' && current.assignedToUserId !== req.authUser.id) {
+      await assertSupervisorSiteAccess(req, current.siteId, context);
+    }
 
     const isSystemAdmin = req.authUser?.role === 'admin';
     const isUnitHead = req.mosqueRole?.role === 'head';
-    const isOwner = current.createdBy === req.authUser?.id;
+    const isAssignee = current.assignedToUserId === req.authUser?.id;
+    const isLegacyOwner = !current.assignedToUserId && current.createdBy === req.authUser?.id;
+    const isOwner = isAssignee || isLegacyOwner;
     if (!isSystemAdmin && !isUnitHead && !isOwner) {
-      return res.status(403).json({ message: 'لا يمكن حذف الزيارة إلا بواسطة المستخدم الذي أنشأها أو مسؤول المنصة' });
+      return res.status(403).json({ message: 'لا يمكن حذف الزيارة إلا بواسطة المستخدم المسندة إليه أو مسؤول المنصة' });
     }
     await prisma.$transaction(async (tx) => {
       await tx.mosqueFieldVisitItem.deleteMany({ where: { visitId: current.id } });
