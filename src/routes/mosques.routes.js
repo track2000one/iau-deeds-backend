@@ -634,8 +634,10 @@ const fieldTourSchema = z.object({
   siteIds: z.array(z.string().min(1)).min(1),
   visitAssignments: z.array(z.object({
     siteId: z.string().min(1),
-    primaryAssigneeUserId: z.string().min(1),
+    primaryAssigneeUserId: z.string().min(1).optional().nullable(),
     womenAssigneeUserId: z.string().min(1).optional().nullable(),
+    includePrimary: z.boolean().optional(),
+    includeWomen: z.boolean().optional(),
   })).optional().default([]),
 });
 
@@ -1702,19 +1704,39 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
     const assigneeById = new Map(assigneeDirectory.map((user) => [user.id, user]));
     const assignmentBySite = new Map((input.visitAssignments || []).map((item) => [item.siteId, item]));
 
+    const recentVisits = await prisma.mosqueFieldVisit.findMany({
+      where: { siteId: { in: siteIds } },
+      select: {
+        id: true,
+        siteId: true,
+        visitScope: true,
+        assignedToUserId: true,
+        assignedToName: true,
+        visitDate: true,
+        createdAt: true,
+        tour: { select: { status: true } },
+      },
+      orderBy: [{ visitDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    const latestPrimaryVisitBySite = new Map();
+    for (const visit of recentVisits) {
+      if (visit.tour?.status === 'cancelled' || visit.visitScope === 'women_section') continue;
+      if (!latestPrimaryVisitBySite.has(visit.siteId)) latestPrimaryVisitBySite.set(visit.siteId, visit);
+    }
+
     const plannedVisits = [];
     for (const siteId of siteIds) {
       const site = siteMap.get(siteId);
       const assignment = assignmentBySite.get(siteId);
       if (!assignment) {
-        return res.status(400).json({ message: `حدد منفذ الزيارة للموقع ${site?.name || siteId}` });
-      }
-      const primaryAssignee = assigneeById.get(assignment.primaryAssigneeUserId);
-      if (!primaryAssignee) {
-        return res.status(400).json({ message: `منفذ الزيارة الرئيسي المحدد للموقع ${site?.name || siteId} غير متاح` });
+        return res.status(400).json({ message: `حدد نطاق الزيارة ومنفذها للموقع ${site?.name || siteId}` });
       }
 
       if (site?.siteType === 'prayer_room') {
+        const primaryAssignee = assignment.primaryAssigneeUserId ? assigneeById.get(assignment.primaryAssigneeUserId) : null;
+        if (!primaryAssignee) {
+          return res.status(400).json({ message: `منفذ الزيارة المحدد للموقع ${site?.name || siteId} غير متاح` });
+        }
         const visitScope = site.prayerRoomGender === 'women' ? 'women_section' : 'men_section';
         plannedVisits.push({ site, siteId, visitScope, assignee: primaryAssignee });
         continue;
@@ -1722,20 +1744,51 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
 
       const womenPresent = ['mosque', 'jami'].includes(site?.siteType) && womenPrayerPresenceStatus(site) === 'present';
       if (womenPresent) {
-        const womenAssignee = assignment.womenAssigneeUserId ? assigneeById.get(assignment.womenAssigneeUserId) : null;
-        if (!womenAssignee) {
+        const includePrimary = assignment.includePrimary !== false;
+        const includeWomen = assignment.includeWomen !== false;
+        if (!includePrimary && !includeWomen) {
+          return res.status(400).json({ message: `حدد القسم الرئيسي أو مصلى النساء لإنشاء زيارة في ${site.name}` });
+        }
+
+        const primaryAssignee = includePrimary && assignment.primaryAssigneeUserId
+          ? assigneeById.get(assignment.primaryAssigneeUserId)
+          : null;
+        const womenAssignee = includeWomen && assignment.womenAssigneeUserId
+          ? assigneeById.get(assignment.womenAssigneeUserId)
+          : null;
+
+        if (includePrimary && !primaryAssignee) {
+          return res.status(400).json({ message: `منفذ زيارة القسم الرئيسي المحدد للموقع ${site.name} غير متاح` });
+        }
+        if (includeWomen && !womenAssignee) {
           return res.status(400).json({ message: `الموقع ${site.name} يحتوي على مصلى نساء؛ يجب تحديد مستخدم مستقل لزيارة مصلى النساء` });
         }
-        if (womenAssignee.id === primaryAssignee.id) {
+        if (includePrimary && includeWomen && womenAssignee.id === primaryAssignee.id) {
           return res.status(400).json({ message: `يجب أن يكون منفذ زيارة مصلى النساء في ${site.name} مستخدمًا مختلفًا عن منفذ القسم الرئيسي` });
         }
-        plannedVisits.push(
-          { site, siteId, visitScope: 'men_section', assignee: primaryAssignee },
-          { site, siteId, visitScope: 'women_section', assignee: womenAssignee },
-        );
+
+        if (!includePrimary && includeWomen) {
+          const previousPrimaryVisit = latestPrimaryVisitBySite.get(siteId);
+          if (previousPrimaryVisit?.assignedToUserId && previousPrimaryVisit.assignedToUserId === womenAssignee.id) {
+            return res.status(400).json({
+              message: `زيارة مصلى النساء في ${site.name} يجب أن تسند إلى مستخدم مختلف عن منفذ آخر زيارة للقسم الرئيسي (${previousPrimaryVisit.assignedToName || 'المستخدم السابق'})`,
+            });
+          }
+        }
+
+        if (includePrimary) plannedVisits.push({ site, siteId, visitScope: 'men_section', assignee: primaryAssignee });
+        if (includeWomen) plannedVisits.push({ site, siteId, visitScope: 'women_section', assignee: womenAssignee });
       } else {
+        const primaryAssignee = assignment.primaryAssigneeUserId ? assigneeById.get(assignment.primaryAssigneeUserId) : null;
+        if (!primaryAssignee) {
+          return res.status(400).json({ message: `منفذ الزيارة الرئيسي المحدد للموقع ${site?.name || siteId} غير متاح` });
+        }
         plannedVisits.push({ site, siteId, visitScope: 'whole_site', assignee: primaryAssignee });
       }
+    }
+
+    if (!plannedVisits.length) {
+      return res.status(400).json({ message: 'لم يتم تحديد أي نطاق فعلي لإنشاء زيارة ميدانية' });
     }
 
     const conflict = await findActiveFieldVisitConflict(plannedVisits.map((visit) => ({ siteId: visit.siteId, visitScope: visit.visitScope })));
