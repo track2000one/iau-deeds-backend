@@ -1549,6 +1549,18 @@ const fieldVisitScopesOverlap = (left, right) => {
   if (broad.has(left) || broad.has(right)) return true;
   return left === right;
 };
+const legacyWholeSiteConflictScope = (record) => {
+  if ((record.visitScope || 'whole_site') !== 'whole_site') return record.visitScope || 'whole_site';
+  const isMosque = ['mosque', 'jami'].includes(record.site?.siteType);
+  const womenPresent = isMosque && womenPrayerPresenceStatus(record.site) === 'present';
+  if (!womenPresent) return 'whole_site';
+
+  const includesWomenChecklist = (record.items || []).some((item) => (
+    item.details?.section === 'women'
+    || String(item.category || '').startsWith('مصلى النساء')
+  ));
+  return includesWomenChecklist ? 'both_sections' : 'men_section';
+};
 const findActiveFieldVisitConflict = async (requests, ignoreVisitId = null) => {
   const specs = requests.map((item) => typeof item === 'string'
     ? { siteId: item, visitScope: 'whole_site' }
@@ -1566,17 +1578,43 @@ const findActiveFieldVisitConflict = async (requests, ignoreVisitId = null) => {
       siteId: true,
       visitScope: true,
       workflowStatus: true,
-      site: { select: { id: true, name: true } },
+      site: {
+        select: {
+          id: true,
+          name: true,
+          siteType: true,
+          hasWomenPrayerArea: true,
+          womenPrayerArea: true,
+        },
+      },
+      items: { select: { category: true, details: true } },
       tour: { select: { id: true, tourNumber: true, title: true, status: true } },
     },
     orderBy: [{ visitDate: 'desc' }, { createdAt: 'desc' }],
   });
-  return records.find((record) => (
-    record.tour?.status !== 'cancelled'
-    && specs.some((spec) => spec.siteId === record.siteId && fieldVisitScopesOverlap(spec.visitScope, record.visitScope || 'whole_site'))
-  )) || null;
+
+  for (const record of records) {
+    if (record.tour?.status === 'cancelled') continue;
+    const effectiveVisitScope = legacyWholeSiteConflictScope(record);
+    const conflict = specs.some((spec) => (
+      spec.siteId === record.siteId
+      && fieldVisitScopesOverlap(spec.visitScope, effectiveVisitScope)
+    ));
+    if (conflict) return { ...record, effectiveVisitScope };
+  }
+  return null;
 };
-const activeFieldVisitMessage = (record) => `يوجد إجراء ميداني قائم للموقع ${record.site.name} برقم ${record.visitNumber} (${record.visitScope === 'women_section' ? 'مصلى النساء' : record.visitScope === 'men_section' ? 'القسم الرئيسي' : 'الموقع بالكامل'}) وحالته الحالية ${record.workflowStatus === 'planned' ? 'مجدولة' : record.workflowStatus === 'in_progress' ? 'جارية' : 'تحتاج متابعة'}. افتح الزيارة القائمة بدل إنشاء زيارة متداخلة.`;
+const activeFieldVisitMessage = (record) => {
+  const scope = record.effectiveVisitScope || record.visitScope || 'whole_site';
+  const scopeLabel = scope === 'women_section'
+    ? 'مصلى النساء'
+    : scope === 'men_section'
+      ? 'القسم الرئيسي'
+      : scope === 'both_sections'
+        ? 'القسم الرئيسي ومصلى النساء'
+        : 'الموقع بالكامل';
+  return `يوجد إجراء ميداني قائم للموقع ${record.site.name} برقم ${record.visitNumber} (${scopeLabel}) وحالته الحالية ${record.workflowStatus === 'planned' ? 'مجدولة' : record.workflowStatus === 'in_progress' ? 'جارية' : 'تحتاج متابعة'}. افتح الزيارة القائمة بدل إنشاء زيارة متداخلة.`;
+};
 
 const hasNonEmptyJsonList = (value) => Array.isArray(value) && value.length > 0;
 const fieldVisitHasExecutionData = (visit) => Boolean(
