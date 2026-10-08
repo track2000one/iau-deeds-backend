@@ -1810,7 +1810,7 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
 router.patch('/field-tours/:id', requireRoles('head', 'supervisor'), async (req, res, next) => {
   try {
     const context = req.mosqueRole || await getModuleRole(req);
-    const current = await prisma.mosqueFieldTour.findUnique({ where: { id: req.params.id }, include: { visits: { select: { siteId: true } } } });
+    const current = await prisma.mosqueFieldTour.findUnique({ where: { id: req.params.id }, include: { visits: { select: { siteId: true, workflowStatus: true } } } });
     if (!current) return res.status(404).json({ message: 'الجولة الميدانية غير موجودة' });
     if (context.role === 'supervisor') {
       const managed = new Set(await getManagedSiteIds(req, context) || []);
@@ -1820,6 +1820,9 @@ router.patch('/field-tours/:id', requireRoles('head', 'supervisor'), async (req,
       status: z.enum(['scheduled', 'in_progress', 'completed', 'postponed', 'cancelled']),
       notes: z.string().trim().max(5000).optional().nullable(),
     }).parse(req.body);
+    if (input.status === 'completed' && current.visits.some((visit) => !['completed', 'closed'].includes(visit.workflowStatus))) {
+      return res.status(409).json({ message: 'لا يمكن إكمال الجولة قبل اكتمال جميع الزيارات التابعة لها، بما فيها زيارة مصلى النساء عند وجودها.' });
+    }
     const isSystemAdmin = req.authUser?.role === 'admin';
     const isUnitHead = req.mosqueRole?.role === 'head';
     const isOwner = current.createdBy === req.authUser?.id;
@@ -2106,6 +2109,21 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
         include: fieldVisitInclude,
       });
     });
+    if (record.tourId) {
+      const siblingVisits = await prisma.mosqueFieldVisit.findMany({
+        where: { tourId: record.tourId },
+        select: { workflowStatus: true },
+      });
+      const nextTourStatus = siblingVisits.length && siblingVisits.every((visit) => ['completed', 'closed'].includes(visit.workflowStatus))
+        ? 'completed'
+        : siblingVisits.some((visit) => visit.workflowStatus !== 'planned')
+          ? 'in_progress'
+          : 'scheduled';
+      await prisma.mosqueFieldTour.updateMany({
+        where: { id: record.tourId, status: { notIn: ['cancelled', 'postponed'] } },
+        data: { status: nextTourStatus },
+      });
+    }
     res.json(record);
   } catch (error) { next(error); }
 });
