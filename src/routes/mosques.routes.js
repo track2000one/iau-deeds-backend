@@ -632,6 +632,11 @@ const fieldTourSchema = z.object({
   status: z.enum(['scheduled', 'in_progress', 'completed', 'postponed', 'cancelled']).optional().default('scheduled'),
   notes: z.string().trim().max(5000).optional().nullable(),
   siteIds: z.array(z.string().min(1)).min(1),
+  visitAssignments: z.array(z.object({
+    siteId: z.string().min(1),
+    primaryAssigneeUserId: z.string().min(1),
+    womenAssigneeUserId: z.string().min(1).optional().nullable(),
+  })).optional().default([]),
 });
 
 const fieldVisitSchema = z.object({
@@ -649,6 +654,7 @@ const fieldVisitSchema = z.object({
   generalNotes: z.string().trim().max(10000).optional().nullable(),
   recommendations: z.string().trim().max(10000).optional().nullable(),
   attachments: z.array(fieldVisitImageSchema).max(100).optional().default([]),
+  assignedToUserId: z.string().trim().optional().nullable(),
   items: z.array(fieldVisitItemSchema).default([]),
 });
 
