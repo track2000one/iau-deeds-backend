@@ -1529,11 +1529,29 @@ const fieldVisitInclude = {
 
 const fieldSiteScope = async (req, context) => {
   const managedSiteIds = await getManagedSiteIds(req, context);
-  return managedSiteIds === null ? {} : { siteId: { in: managedSiteIds } };
+  if (managedSiteIds === null) return {};
+  if (context.role === 'supervisor') {
+    return {
+      OR: [
+        { assignedToUserId: req.authUser.id },
+        { assignedToUserId: null, siteId: { in: managedSiteIds } },
+      ],
+    };
+  }
+  return { siteId: { in: managedSiteIds } };
 };
 
 const ACTIVE_FIELD_VISIT_STATUSES = ['planned', 'in_progress', 'follow_up'];
-const findActiveFieldVisitConflict = async (siteIds, ignoreVisitId = null) => {
+const fieldVisitScopesOverlap = (left, right) => {
+  const broad = new Set(['whole_site', 'both_sections']);
+  if (broad.has(left) || broad.has(right)) return true;
+  return left === right;
+};
+const findActiveFieldVisitConflict = async (requests, ignoreVisitId = null) => {
+  const specs = requests.map((item) => typeof item === 'string'
+    ? { siteId: item, visitScope: 'whole_site' }
+    : item);
+  const siteIds = [...new Set(specs.map((item) => item.siteId))];
   const records = await prisma.mosqueFieldVisit.findMany({
     where: {
       siteId: { in: siteIds },
@@ -1544,15 +1562,19 @@ const findActiveFieldVisitConflict = async (siteIds, ignoreVisitId = null) => {
       id: true,
       visitNumber: true,
       siteId: true,
+      visitScope: true,
       workflowStatus: true,
       site: { select: { id: true, name: true } },
       tour: { select: { id: true, tourNumber: true, title: true, status: true } },
     },
     orderBy: [{ visitDate: 'desc' }, { createdAt: 'desc' }],
   });
-  return records.find((record) => record.tour?.status !== 'cancelled') || null;
+  return records.find((record) => (
+    record.tour?.status !== 'cancelled'
+    && specs.some((spec) => spec.siteId === record.siteId && fieldVisitScopesOverlap(spec.visitScope, record.visitScope || 'whole_site'))
+  )) || null;
 };
-const activeFieldVisitMessage = (record) => `يوجد إجراء ميداني قائم للموقع ${record.site.name} برقم ${record.visitNumber} وحالته الحالية ${record.workflowStatus === 'planned' ? 'مجدولة' : record.workflowStatus === 'in_progress' ? 'جارية' : 'تحتاج متابعة'}. افتح الزيارة القائمة بدل إنشاء زيارة مكررة.`;
+const activeFieldVisitMessage = (record) => `يوجد إجراء ميداني قائم للموقع ${record.site.name} برقم ${record.visitNumber} (${record.visitScope === 'women_section' ? 'مصلى النساء' : record.visitScope === 'men_section' ? 'القسم الرئيسي' : 'الموقع بالكامل'}) وحالته الحالية ${record.workflowStatus === 'planned' ? 'مجدولة' : record.workflowStatus === 'in_progress' ? 'جارية' : 'تحتاج متابعة'}. افتح الزيارة القائمة بدل إنشاء زيارة متداخلة.`;
 
 const hasNonEmptyJsonList = (value) => Array.isArray(value) && value.length > 0;
 const fieldVisitHasExecutionData = (visit) => Boolean(
@@ -1597,7 +1619,9 @@ const fieldTourAccessState = (req, tour) => {
 const fieldVisitAccessState = (req, visit) => {
   const isSystemAdmin = req.authUser?.role === 'admin';
   const isUnitHead = req.mosqueRole?.role === 'head';
-  const isOwner = Boolean(visit?.createdBy && visit.createdBy === req.authUser?.id);
+  const isAssignee = Boolean(visit?.assignedToUserId && visit.assignedToUserId === req.authUser?.id);
+  const isLegacyOwner = Boolean(!visit?.assignedToUserId && visit?.createdBy && visit.createdBy === req.authUser?.id);
+  const isOwner = isAssignee || isLegacyOwner;
   const hasStarted = fieldVisitHasExecutionData(visit);
   const mosquePermission = req.authUser?.permissions?.find((item) => item.module === 'mosques');
   const canEditByPermission = isSystemAdmin || Boolean(mosquePermission?.canEdit);
@@ -1605,6 +1629,7 @@ const fieldVisitAccessState = (req, visit) => {
   const canManageRecord = isSystemAdmin || isUnitHead || isOwner;
   return {
     isOwner,
+    isAssignee,
     hasStarted,
     canEdit: Boolean(canEditByPermission && canManageRecord),
     canDelete: Boolean(canDeleteByPermission && canManageRecord),
