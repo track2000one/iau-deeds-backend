@@ -2046,9 +2046,13 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
     const context = req.mosqueRole || await getModuleRole(req);
     const current = await prisma.mosqueFieldVisit.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'الزيارة الميدانية غير موجودة' });
-    if (context.role === 'supervisor' && current.assignedToUserId !== req.authUser.id) {
-      await assertSupervisorSiteAccess(req, current.siteId, context);
-      if (req.body.siteId && req.body.siteId !== current.siteId) await assertSupervisorSiteAccess(req, req.body.siteId, context);
+    if (context.role === 'supervisor') {
+      if (current.assignedToUserId !== req.authUser.id) {
+        await assertSupervisorSiteAccess(req, current.siteId, context);
+      }
+      if (req.body.siteId && req.body.siteId !== current.siteId) {
+        await assertSupervisorSiteAccess(req, req.body.siteId, context);
+      }
     }
     const isSystemAdmin = req.authUser?.role === 'admin';
     const isUnitHead = req.mosqueRole?.role === 'head';
