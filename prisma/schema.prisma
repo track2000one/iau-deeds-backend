@@ -978,6 +978,8 @@ model MosqueFieldVisit {
   generalNotes       String?
   recommendations    String?
   attachments        Json?
+  assignedToUserId   String?
+  assignedToName     String?
   createdBy          String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
@@ -991,6 +993,7 @@ model MosqueFieldVisit {
   @@index([visitDate])
   @@index([priority])
   @@index([workflowStatus])
+  @@index([assignedToUserId])
 }
 
 model MosqueFieldVisitItem {
