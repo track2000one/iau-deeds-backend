@@ -488,6 +488,7 @@ const siteSchema = z.object({
 const buildingSchema = z.object({
   buildingNumber: z.string().trim().min(1).max(100),
   name: z.string().trim().optional().nullable(),
+  deedId: z.string().trim().optional().nullable(),
   campusLocation: z.string().trim().optional().nullable(),
   region: z.string().trim().max(200).optional().nullable(),
   city: z.string().trim().optional().nullable(),
@@ -515,6 +516,37 @@ const buildingSchema = z.object({
   approvedAlternative: z.string().trim().optional().nullable(),
   notes: z.string().trim().max(5000).optional().nullable(),
 });
+
+const assertBuildingDeed = async (deedId) => {
+  if (!deedId) {
+    const error = new Error('رقم الصك إلزامي لكل مبنى في السجل المركزي');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const deed = await prisma.deed.findUnique({
+    where: { id: deedId },
+    select: {
+      id: true,
+      deedNumber: true,
+      propertyDescription: true,
+      plotNumber: true,
+      planNumber: true,
+      area: true,
+      region: true,
+      city: true,
+      district: true,
+    },
+  });
+
+  if (!deed) {
+    const error = new Error('الصك المحدد غير موجود في سجل الصكوك');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return deed;
+};
 
 const womenPrayerPresenceStatus = (site) => {
   if (!site || !['mosque', 'jami'].includes(site.siteType)) return 'not_applicable';
@@ -1363,12 +1395,49 @@ router.get('/dashboard', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.get('/building-deeds', async (req, res, next) => {
+  try {
+    const context = await getModuleRole(req);
+    if (!['head', 'supervisor'].includes(context.role)) return res.json([]);
+
+    const deeds = await prisma.deed.findMany({
+      select: {
+        id: true,
+        deedNumber: true,
+        propertyDescription: true,
+        plotNumber: true,
+        planNumber: true,
+        area: true,
+        region: true,
+        city: true,
+        district: true,
+      },
+      orderBy: [{ city: 'asc' }, { deedNumber: 'asc' }],
+    });
+
+    res.json(deeds);
+  } catch (error) { next(error); }
+});
+
 router.get('/buildings', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
     if (!['head', 'supervisor'].includes(context.role)) return res.json([]);
     const rows = await prisma.mosqueBuilding.findMany({
       include: {
+        deed: {
+          select: {
+            id: true,
+            deedNumber: true,
+            propertyDescription: true,
+            plotNumber: true,
+            planNumber: true,
+            area: true,
+            region: true,
+            city: true,
+            district: true,
+          },
+        },
         sites: { select: { id: true, name: true, siteType: true, prayerRoomGender: true, status: true }, orderBy: { name: 'asc' } },
         _count: { select: { sites: true, siteInspections: true } },
       },
@@ -1381,6 +1450,8 @@ router.get('/buildings', async (req, res, next) => {
 router.post('/buildings', requireRoles('head'), async (req, res, next) => {
   try {
     const input = buildingSchema.parse(req.body);
+    await assertBuildingDeed(input.deedId);
+
     const building = await prisma.mosqueBuilding.create({
       data: {
         ...input,
@@ -1388,6 +1459,21 @@ router.post('/buildings', requireRoles('head'), async (req, res, next) => {
         coverageStatus: input.coverageStatus || 'unassessed',
         creationFeasibility: input.creationFeasibility || 'under_study',
         createdBy: req.authUser.id,
+      },
+      include: {
+        deed: {
+          select: {
+            id: true,
+            deedNumber: true,
+            propertyDescription: true,
+            plotNumber: true,
+            planNumber: true,
+            area: true,
+            region: true,
+            city: true,
+            district: true,
+          },
+        },
       },
     });
     res.status(201).json(building);
@@ -1397,9 +1483,34 @@ router.post('/buildings', requireRoles('head'), async (req, res, next) => {
 router.put('/buildings/:id', requireRoles('head'), async (req, res, next) => {
   try {
     const input = buildingSchema.parse(req.body);
-    const current = await prisma.mosqueBuilding.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    const current = await prisma.mosqueBuilding.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, deedId: true },
+    });
     if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
-    const building = await prisma.mosqueBuilding.update({ where: { id: req.params.id }, data: input });
+
+    const deedId = input.deedId || current.deedId;
+    await assertBuildingDeed(deedId);
+
+    const building = await prisma.mosqueBuilding.update({
+      where: { id: req.params.id },
+      data: { ...input, deedId },
+      include: {
+        deed: {
+          select: {
+            id: true,
+            deedNumber: true,
+            propertyDescription: true,
+            plotNumber: true,
+            planNumber: true,
+            area: true,
+            region: true,
+            city: true,
+            district: true,
+          },
+        },
+      },
+    });
     res.json(building);
   } catch (error) { next(error); }
 });
