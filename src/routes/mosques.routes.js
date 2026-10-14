@@ -495,7 +495,7 @@ const buildingSchema = z.object({
   buildingType: z.string().trim().max(100).optional().nullable(),
   primaryUse: z.string().trim().max(200).optional().nullable(),
   ownershipType: z.string().trim().max(100).optional().nullable(),
-  operationalStatus: z.enum(['active', 'maintenance', 'under_construction', 'temporarily_closed', 'out_of_service']).optional().default('active'),
+  operationalStatus: z.enum(['active', 'maintenance', 'under_construction', 'temporarily_closed', 'out_of_service']).optional(),
   constructionYear: z.coerce.number().int().min(1800).max(2200).optional().nullable(),
   floorsCount: z.coerce.number().int().nonnegative().max(300).optional().nullable(),
   basementFloorsCount: z.coerce.number().int().nonnegative().max(50).optional().nullable(),
@@ -509,8 +509,8 @@ const buildingSchema = z.object({
   latitude: z.coerce.number().min(-90).max(90).optional().nullable(),
   longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
   expectedUsers: z.coerce.number().int().nonnegative().optional().nullable(),
-  coverageStatus: z.enum(['unassessed', 'covered', 'needs_prayer_room', 'under_feasibility_study', 'not_feasible_alternative', 'under_implementation']).default('unassessed'),
-  creationFeasibility: z.enum(['available', 'unavailable', 'under_study']).default('under_study'),
+  coverageStatus: z.enum(['unassessed', 'covered', 'needs_prayer_room', 'under_feasibility_study', 'not_feasible_alternative', 'under_implementation']).optional(),
+  creationFeasibility: z.enum(['available', 'unavailable', 'under_study']).optional(),
   unavailableReason: z.string().trim().optional().nullable(),
   approvedAlternative: z.string().trim().optional().nullable(),
   notes: z.string().trim().max(5000).optional().nullable(),
@@ -1381,7 +1381,15 @@ router.get('/buildings', async (req, res, next) => {
 router.post('/buildings', requireRoles('head'), async (req, res, next) => {
   try {
     const input = buildingSchema.parse(req.body);
-    const building = await prisma.mosqueBuilding.create({ data: { ...input, createdBy: req.authUser.id } });
+    const building = await prisma.mosqueBuilding.create({
+      data: {
+        ...input,
+        operationalStatus: input.operationalStatus || 'active',
+        coverageStatus: input.coverageStatus || 'unassessed',
+        creationFeasibility: input.creationFeasibility || 'under_study',
+        createdBy: req.authUser.id,
+      },
+    });
     res.status(201).json(building);
   } catch (error) { next(error); }
 });
