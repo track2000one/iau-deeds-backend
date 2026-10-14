@@ -28,6 +28,8 @@ const inspectionSchema = z.object({
   title: z.string().trim().min(2, 'عنوان المعاينة مطلوب').max(300),
   siteType: z.string().trim().min(1, 'نوع الموقع مطلوب').max(100),
   siteName: z.string().trim().min(1, 'اسم الموقع مطلوب').max(300),
+  deedId: z.string().trim().optional().nullable(),
+  buildingId: z.string().trim().optional().nullable(),
   visitDate: z.string().trim().min(1, 'تاريخ الزيارة مطلوب'),
   visitDateType: z.enum(['gregorian', 'hijri']).optional().default('gregorian'),
   visitPurpose: nullableText,
@@ -143,6 +145,113 @@ const createAttachmentData = (attachment, inspectionId, createdBy) => ({
   createdBy: createdBy || null,
 });
 
+const inspectionInclude = {
+  deed: {
+    select: {
+      id: true,
+      deedNumber: true,
+      propertyDescription: true,
+      plotNumber: true,
+      planNumber: true,
+      area: true,
+      region: true,
+      city: true,
+      district: true,
+      coordinates: true,
+    },
+  },
+  building: {
+    select: {
+      id: true,
+      buildingNumber: true,
+      name: true,
+      campusLocation: true,
+      region: true,
+      city: true,
+      district: true,
+      buildingType: true,
+      primaryUse: true,
+      operationalStatus: true,
+      floorsCount: true,
+      builtUpArea: true,
+      latitude: true,
+      longitude: true,
+    },
+  },
+  items: { orderBy: { createdAt: 'asc' } },
+};
+
+const validateInspectionReferences = async (input) => {
+  if (input.deedId) {
+    const deed = await prisma.deed.findUnique({
+      where: { id: input.deedId },
+      select: { id: true },
+    });
+    if (!deed) {
+      const error = new Error('الصك المرتبط بالمعاينة غير موجود');
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+
+  if (input.buildingId) {
+    const building = await prisma.mosqueBuilding.findUnique({
+      where: { id: input.buildingId },
+      select: { id: true },
+    });
+    if (!building) {
+      const error = new Error('المبنى المرتبط بالمعاينة غير موجود في السجل المركزي');
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+};
+
+router.get('/references', async (_req, res, next) => {
+  try {
+    const [deeds, buildings] = await Promise.all([
+      prisma.deed.findMany({
+        select: {
+          id: true,
+          deedNumber: true,
+          propertyDescription: true,
+          plotNumber: true,
+          planNumber: true,
+          area: true,
+          region: true,
+          city: true,
+          district: true,
+          coordinates: true,
+        },
+        orderBy: [{ city: 'asc' }, { deedNumber: 'asc' }],
+      }),
+      prisma.mosqueBuilding.findMany({
+        select: {
+          id: true,
+          buildingNumber: true,
+          name: true,
+          campusLocation: true,
+          region: true,
+          city: true,
+          district: true,
+          buildingType: true,
+          primaryUse: true,
+          operationalStatus: true,
+          floorsCount: true,
+          builtUpArea: true,
+          latitude: true,
+          longitude: true,
+        },
+        orderBy: [{ campusLocation: 'asc' }, { buildingNumber: 'asc' }],
+      }),
+    ]);
+
+    res.json({ deeds, buildings });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/', async (req, res, next) => {
   try {
     const search = String(req.query.search || '').trim();
@@ -167,7 +276,7 @@ router.get('/', async (req, res, next) => {
 
     const records = await prisma.siteInspection.findMany({
       where,
-      include: { items: { orderBy: { createdAt: 'asc' } } },
+      include: inspectionInclude,
       orderBy: [{ visitDate: 'desc' }, { createdAt: 'desc' }],
     });
 
@@ -181,7 +290,7 @@ router.get('/:id', async (req, res, next) => {
   try {
     const record = await prisma.siteInspection.findUnique({
       where: { id: req.params.id },
-      include: { items: { orderBy: { createdAt: 'asc' } } },
+      include: inspectionInclude,
     });
 
     if (!record) {
@@ -198,6 +307,7 @@ router.get('/:id', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const input = inspectionSchema.parse(req.body);
+    await validateInspectionReferences(input);
     const inspectionNumber = await nextInspectionNumber();
     const visitDate = toDate(input.visitDate, 'تاريخ الزيارة', input.visitDateType);
     const followUpDate = toDate(input.followUpDate, 'تاريخ المتابعة', input.followUpDateType);
@@ -210,6 +320,8 @@ router.post('/', async (req, res, next) => {
           title: input.title,
           siteType: input.siteType,
           siteName: input.siteName,
+          deedId: input.deedId || null,
+          buildingId: input.buildingId || null,
           visitDate,
           visitDateType: input.visitDateType,
           visitPurpose: input.visitPurpose || null,
@@ -244,7 +356,7 @@ router.post('/', async (req, res, next) => {
             })),
           },
         },
-        include: { items: true },
+        include: inspectionInclude,
       });
 
       if (input.attachments.length) {
@@ -290,6 +402,7 @@ router.put('/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'المعاينة الميدانية غير موجودة' });
     }
 
+    await validateInspectionReferences(input);
     const visitDate = toDate(input.visitDate, 'تاريخ الزيارة', input.visitDateType);
     const followUpDate = toDate(input.followUpDate, 'تاريخ المتابعة', input.followUpDateType);
     const createdBy = req.authUser?.username || req.authUser?.email || null;
@@ -312,6 +425,8 @@ router.put('/:id', async (req, res, next) => {
           title: input.title,
           siteType: input.siteType,
           siteName: input.siteName,
+          deedId: input.deedId || null,
+          buildingId: input.buildingId || null,
           visitDate,
           visitDateType: input.visitDateType,
           visitPurpose: input.visitPurpose || null,
