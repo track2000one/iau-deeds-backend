@@ -163,6 +163,7 @@ model Deed {
   investmentSites     InvestmentSite[]
   investmentSiteDeeds InvestmentSiteDeed[]
   siteInspections     SiteInspection[]
+  buildings           MosqueBuilding[]
 }
 
 model InvestmentSite {
@@ -871,6 +872,7 @@ model MosqueBuilding {
   id                  String   @id @default(cuid())
   buildingNumber      String   @unique
   name                String?
+  deedId              String?
   campusLocation      String?
   region              String?
   city                String?
@@ -901,9 +903,11 @@ model MosqueBuilding {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
+  deed            Deed?            @relation(fields: [deedId], references: [id], onDelete: Restrict)
   sites           MosqueSite[]
   siteInspections SiteInspection[]
 
+  @@index([deedId])
   @@index([region])
   @@index([city])
   @@index([buildingType])
