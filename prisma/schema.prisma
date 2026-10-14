@@ -162,6 +162,7 @@ model Deed {
 
   investmentSites     InvestmentSite[]
   investmentSiteDeeds InvestmentSiteDeed[]
+  siteInspections     SiteInspection[]
 }
 
 model InvestmentSite {
@@ -769,6 +770,8 @@ model SiteInspection {
   title               String
   siteType            String
   siteName            String
+  deedId              String?
+  buildingId          String?
   visitDate           DateTime
   visitDateType       String?   @default("gregorian")
   visitPurpose        String?
@@ -797,8 +800,12 @@ model SiteInspection {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  items SiteInspectionItem[]
+  deed     Deed?           @relation(fields: [deedId], references: [id], onDelete: SetNull)
+  building MosqueBuilding? @relation(fields: [buildingId], references: [id], onDelete: SetNull)
+  items    SiteInspectionItem[]
 
+  @@index([deedId])
+  @@index([buildingId])
   @@index([visitDate])
   @@index([siteType])
   @@index([city])
@@ -865,8 +872,23 @@ model MosqueBuilding {
   buildingNumber      String   @unique
   name                String?
   campusLocation      String?
+  region              String?
   city                String?
   district            String?
+  buildingType        String?
+  primaryUse          String?
+  ownershipType       String?
+  operationalStatus   String   @default("active")
+  constructionYear    Int?
+  floorsCount         Int?
+  basementFloorsCount Int?
+  landArea            Float?
+  builtUpArea         Float?
+  roomsCount          Int?
+  entrancesCount      Int?
+  elevatorsCount      Int?
+  parkingSpaces       Int?
+  hasAccessibility    Boolean?
   latitude            Float?
   longitude           Float?
   expectedUsers       Int?
@@ -879,8 +901,13 @@ model MosqueBuilding {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  sites MosqueSite[]
+  sites           MosqueSite[]
+  siteInspections SiteInspection[]
 
+  @@index([region])
+  @@index([city])
+  @@index([buildingType])
+  @@index([operationalStatus])
   @@index([coverageStatus])
   @@index([creationFeasibility])
 }
