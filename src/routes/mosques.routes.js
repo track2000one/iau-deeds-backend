@@ -489,8 +489,23 @@ const buildingSchema = z.object({
   buildingNumber: z.string().trim().min(1).max(100),
   name: z.string().trim().optional().nullable(),
   campusLocation: z.string().trim().optional().nullable(),
+  region: z.string().trim().max(200).optional().nullable(),
   city: z.string().trim().optional().nullable(),
   district: z.string().trim().optional().nullable(),
+  buildingType: z.string().trim().max(100).optional().nullable(),
+  primaryUse: z.string().trim().max(200).optional().nullable(),
+  ownershipType: z.string().trim().max(100).optional().nullable(),
+  operationalStatus: z.enum(['active', 'maintenance', 'under_construction', 'temporarily_closed', 'out_of_service']).optional().default('active'),
+  constructionYear: z.coerce.number().int().min(1800).max(2200).optional().nullable(),
+  floorsCount: z.coerce.number().int().nonnegative().max(300).optional().nullable(),
+  basementFloorsCount: z.coerce.number().int().nonnegative().max(50).optional().nullable(),
+  landArea: z.coerce.number().nonnegative().optional().nullable(),
+  builtUpArea: z.coerce.number().nonnegative().optional().nullable(),
+  roomsCount: z.coerce.number().int().nonnegative().optional().nullable(),
+  entrancesCount: z.coerce.number().int().nonnegative().optional().nullable(),
+  elevatorsCount: z.coerce.number().int().nonnegative().optional().nullable(),
+  parkingSpaces: z.coerce.number().int().nonnegative().optional().nullable(),
+  hasAccessibility: z.boolean().optional().nullable(),
   latitude: z.coerce.number().min(-90).max(90).optional().nullable(),
   longitude: z.coerce.number().min(-180).max(180).optional().nullable(),
   expectedUsers: z.coerce.number().int().nonnegative().optional().nullable(),
@@ -498,7 +513,7 @@ const buildingSchema = z.object({
   creationFeasibility: z.enum(['available', 'unavailable', 'under_study']).default('under_study'),
   unavailableReason: z.string().trim().optional().nullable(),
   approvedAlternative: z.string().trim().optional().nullable(),
-  notes: z.string().trim().optional().nullable(),
+  notes: z.string().trim().max(5000).optional().nullable(),
 });
 
 const womenPrayerPresenceStatus = (site) => {
@@ -1355,7 +1370,7 @@ router.get('/buildings', async (req, res, next) => {
     const rows = await prisma.mosqueBuilding.findMany({
       include: {
         sites: { select: { id: true, name: true, siteType: true, prayerRoomGender: true, status: true }, orderBy: { name: 'asc' } },
-        _count: { select: { sites: true } },
+        _count: { select: { sites: true, siteInspections: true } },
       },
       orderBy: [{ buildingNumber: 'asc' }, { name: 'asc' }],
     });
@@ -1383,9 +1398,18 @@ router.put('/buildings/:id', requireRoles('head'), async (req, res, next) => {
 
 router.delete('/buildings/:id', requireRoles('head'), async (req, res, next) => {
   try {
-    const current = await prisma.mosqueBuilding.findUnique({ where: { id: req.params.id }, include: { _count: { select: { sites: true } } } });
+    const current = await prisma.mosqueBuilding.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { sites: true, siteInspections: true } } },
+    });
     if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
-    if (current._count.sites > 0) return res.status(409).json({ message: 'لا يمكن حذف المبنى قبل فك ارتباط المساجد والمصليات التابعة له' });
+    if (current._count.sites > 0 || current._count.siteInspections > 0) {
+      return res.status(409).json({
+        message: current._count.siteInspections > 0
+          ? 'لا يمكن حذف المبنى لوجود معاينات ميدانية مرتبطة به'
+          : 'لا يمكن حذف المبنى قبل فك ارتباط المساجد والمصليات التابعة له',
+      });
+    }
     await prisma.mosqueBuilding.delete({ where: { id: req.params.id } });
     res.status(204).end();
   } catch (error) { next(error); }
