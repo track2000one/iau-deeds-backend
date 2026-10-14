@@ -1450,7 +1450,8 @@ router.get('/buildings', async (req, res, next) => {
 router.post('/buildings', requireRoles('head'), async (req, res, next) => {
   try {
     const input = buildingSchema.parse(req.body);
-    await assertBuildingDeed(input.deedId);
+    const pendingImport = input.buildingNumber.startsWith('IMP-');
+    if (!pendingImport) await assertBuildingDeed(input.deedId);
 
     const building = await prisma.mosqueBuilding.create({
       data: {
@@ -1485,12 +1486,14 @@ router.put('/buildings/:id', requireRoles('head'), async (req, res, next) => {
     const input = buildingSchema.parse(req.body);
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
-      select: { id: true, deedId: true },
+      select: { id: true, deedId: true, buildingNumber: true },
     });
     if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
 
     const deedId = input.deedId || current.deedId;
-    await assertBuildingDeed(deedId);
+    const effectiveBuildingNumber = input.buildingNumber || current.buildingNumber;
+    const pendingImport = effectiveBuildingNumber.startsWith('IMP-');
+    if (!pendingImport) await assertBuildingDeed(deedId);
 
     const building = await prisma.mosqueBuilding.update({
       where: { id: req.params.id },
