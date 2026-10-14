@@ -460,7 +460,7 @@ router.put('/:id', async (req, res, next) => {
             })),
           },
         },
-        include: { items: true },
+        include: inspectionInclude,
       });
 
       if (input.attachments.length) {
