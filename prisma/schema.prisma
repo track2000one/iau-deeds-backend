@@ -1653,6 +1653,7 @@ model TransactionFollowUp {
   alerts                TransactionFollowUpAlert[]
   directives            TransactionFollowUpDirective[]
   extensionRequests       TransactionFollowUpExtensionRequest[]
+  externalWaits           TransactionFollowUpExternalWait[]
 
   @@index([transactionNumber])
   @@index([transactionDate])
@@ -1727,6 +1728,38 @@ model TransactionFollowUpDirectiveReview {
   @@index([decision])
   @@index([reviewedById])
   @@index([reviewedAt])
+}
+
+model TransactionFollowUpExternalWait {
+  id                      String   @id @default(cuid())
+  transactionId           String
+  externalEntity          String
+  outboundReferenceNumber String?
+  sentAt                  DateTime
+  nextFollowUpDate        DateTime
+  notes                   String?
+  status                  String   @default("active")
+  followUpCount           Int      @default(0)
+  lastFollowUpAt          DateTime?
+  lastFollowUpNote        String?
+  responseReceivedAt      DateTime?
+  responseReferenceNumber String?
+  responseNote            String?
+  createdById             String?
+  createdByName           String?
+  closedById              String?
+  closedByName            String?
+  closedAt                DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  transaction             TransactionFollowUp @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([status])
+  @@index([nextFollowUpDate])
+  @@index([externalEntity])
+  @@index([createdAt])
 }
 
 model TransactionFollowUpExtensionRequest {
