@@ -1061,7 +1061,7 @@ const alertCopy = (record, indicator, escalated = false) => {
 };
 
 export const syncTransactionFollowUpAlerts = async () => {
-  const [rows, directives, improvementPlans, preventiveActions, risks] = await Promise.all([
+  const [rows, directives, improvementPlans, preventiveActions, risks, riskAcceptances] = await Promise.all([
     prisma.transactionFollowUp.findMany({
       where: { status: { in: OPEN_STATUSES } },
       select: {
@@ -1134,6 +1134,24 @@ export const syncTransactionFollowUpAlerts = async () => {
         status: true,
       },
     }),
+    prisma.transactionFollowUpRiskAcceptanceRequest.findMany({
+      where: { status: { in: ['pending', 'approved'] } },
+      include: {
+        risk: {
+          select: {
+            id: true,
+            riskNumber: true,
+            title: true,
+            status: true,
+            ownerUserId: true,
+            residualProbability: true,
+            residualImpact: true,
+            residualScore: true,
+            residualLevel: true,
+          },
+        },
+      },
+    }),
   ]);
 
   const supervisorIds = await getFollowUpSupervisorIds();
@@ -1177,6 +1195,121 @@ export const syncTransactionFollowUpAlerts = async () => {
 
   const todayKey = saudiDayKey();
   const todayNumber = dayNumberFromKey(todayKey);
+
+  for (const acceptance of riskAcceptances) {
+    const risk = acceptance.risk;
+    if (!risk) continue;
+
+    if (acceptance.status === 'pending') {
+      const ageDays = Math.max(
+        0,
+        todayNumber - dayNumberFromKey(saudiDayKey(new Date(acceptance.createdAt)))
+      );
+      if (ageDays >= 2) {
+        for (const supervisorId of supervisorIds) {
+          if (supervisorId === acceptance.requestedById) continue;
+          await createFollowUpAlert({
+            alertKey: `risk:${risk.id}:acceptance_pending_overdue:${todayKey}:${supervisorId}`,
+            transactionId: null,
+            userId: supervisorId,
+            kind: 'risk_acceptance_pending_overdue',
+            severity: ageDays >= 5 ? 'danger' : 'warning',
+            title: 'طلب قبول خطر بانتظار الاعتماد',
+            message: `${risk.riskNumber} — طلب قبول الخطر معلق منذ ${ageDays} يوم.`,
+          });
+          alerts += 1;
+        }
+      }
+      continue;
+    }
+
+    const untilKey = saudiDayKey(new Date(acceptance.requestedUntil));
+    const untilNumber = dayNumberFromKey(untilKey);
+    const daysUntilExpiry = untilNumber - todayNumber;
+
+    if (daysUntilExpiry < 0) {
+      const expiredAt = new Date();
+      await prisma.$transaction(async (tx) => {
+        const currentAcceptance = await tx.transactionFollowUpRiskAcceptanceRequest.findUnique({
+          where: { id: acceptance.id },
+        });
+        if (!currentAcceptance || currentAcceptance.status !== 'approved') return;
+
+        await tx.transactionFollowUpRiskAcceptanceRequest.update({
+          where: { id: acceptance.id },
+          data: { status: 'expired', expiredAt },
+        });
+
+        if (risk.status === 'accepted') {
+          await tx.transactionFollowUpRiskRegister.update({
+            where: { id: risk.id },
+            data: {
+              status: 'monitoring',
+              reviewDate: expiredAt,
+              updatedById: null,
+              updatedByName: 'النظام',
+            },
+          });
+          await tx.transactionFollowUpRiskRegisterEvent.create({
+            data: {
+              riskId: risk.id,
+              action: 'acceptance_expired',
+              fromStatus: 'accepted',
+              toStatus: 'monitoring',
+              residualProbability: risk.residualProbability,
+              residualImpact: risk.residualImpact,
+              residualScore: risk.residualScore,
+              residualLevel: risk.residualLevel,
+              note: 'انتهت مدة قبول الخطر تلقائيًا وأعيد إلى المراقبة لإعادة التقييم.',
+              changedById: null,
+              changedByName: 'النظام',
+            },
+          });
+        }
+      });
+
+      const recipients = new Set([
+        acceptance.requestedById,
+        risk.ownerUserId,
+        ...supervisorIds,
+      ].filter(Boolean));
+      for (const userId of recipients) {
+        await createFollowUpAlert({
+          alertKey: `risk:${risk.id}:acceptance_expired:${acceptance.id}:${userId}`,
+          transactionId: null,
+          userId,
+          kind: 'risk_acceptance_expired',
+          severity: risk.residualScore > 9 ? 'danger' : 'warning',
+          title: 'انتهت مدة قبول خطر',
+          message: `${risk.riskNumber} — انتهت مدة قبول الخطر وأعيد إلى المراقبة لإعادة التقييم.`,
+        });
+        alerts += 1;
+      }
+      continue;
+    }
+
+    if ([7, 3, 1, 0].includes(daysUntilExpiry)) {
+      const recipients = new Set([
+        acceptance.requestedById,
+        risk.ownerUserId,
+        ...supervisorIds,
+      ].filter(Boolean));
+      for (const userId of recipients) {
+        await createFollowUpAlert({
+          alertKey: `risk:${risk.id}:acceptance_expiring:${todayKey}:${userId}`,
+          transactionId: null,
+          userId,
+          kind: 'risk_acceptance_expiring',
+          severity: daysUntilExpiry <= 1 ? 'danger' : 'warning',
+          title: daysUntilExpiry === 0 ? 'ينتهي قبول خطر اليوم' : 'قبول خطر يقترب من الانتهاء',
+          message: daysUntilExpiry === 0
+            ? `${risk.riskNumber} — تنتهي مدة قبول الخطر اليوم ويلزم تقرير الاستمرار أو إعادة المعالجة.`
+            : `${risk.riskNumber} — يتبقى ${daysUntilExpiry} يوم على انتهاء مدة قبول الخطر.`,
+        });
+        alerts += 1;
+      }
+    }
+  }
 
   for (const directive of directives) {
     const dueKey = saudiDayKey(new Date(directive.dueDate));
@@ -1391,7 +1524,16 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
-  return { scanned: rows.length + directives.length + improvementPlans.length + preventiveActions.length + risks.length, alerts };
+  return {
+    scanned:
+      rows.length +
+      directives.length +
+      improvementPlans.length +
+      preventiveActions.length +
+      risks.length +
+      riskAcceptances.length,
+    alerts,
+  };
 };
 
 router.get('/assignees', async (_req, res, next) => {
