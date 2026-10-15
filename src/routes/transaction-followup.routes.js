@@ -2011,6 +2011,114 @@ router.patch('/:id/directives/:directiveId/review', async (req, res, next) => {
   }
 });
 
+router.post('/:id/directives/:directiveId/evidence', async (req, res, next) => {
+  try {
+    const input = directiveEvidenceSchema.parse(req.body);
+    const directive = await prisma.transactionFollowUpDirective.findFirst({
+      where: { id: req.params.directiveId, transactionId: req.params.id },
+      include: { transaction: { select: { id: true, transactionNumber: true } } },
+    });
+    if (!directive) return res.status(404).json({ message: 'التوجيه أو القرار غير موجود' });
+
+    const supervisor = isSupervisor(req);
+    if (!supervisor && directive.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'هذا التوجيه غير مسند إلى حسابك' });
+    }
+    if (!supervisor && ['awaiting_approval', 'completed', 'cancelled'].includes(directive.status)) {
+      return res.status(409).json({ message: 'لا يمكن تعديل أدلة التنفيذ أثناء الاعتماد أو بعد إغلاق التوجيه' });
+    }
+
+    const changedBy = actor(req);
+    const attachment = await prisma.attachment.create({
+      data: {
+        entityType: 'transaction_follow_up_directive',
+        entityId: directive.id,
+        attachmentType: 'other',
+        title: input.title,
+        driveUrl: input.driveUrl,
+        driveFileId: input.driveFileId || null,
+        mimeType: input.mimeType || null,
+        notes: input.notes || null,
+        createdBy: changedBy.name,
+      },
+    });
+
+    await prisma.transactionFollowUpEvent.create({
+      data: {
+        transactionId: directive.transactionId,
+        eventType: 'directive_evidence_added',
+        fromAssigneeUserId: directive.assigneeUserId,
+        fromAssigneeName: directive.assigneeName,
+        toAssigneeUserId: directive.assigneeUserId,
+        toAssigneeName: directive.assigneeName,
+        actionText: `إضافة دليل تنفيذ للتوجيه: ${directive.title}`,
+        note: attachment.title,
+        createdById: changedBy.id,
+        createdByName: changedBy.name,
+      },
+    });
+
+    res.status(201).json(attachment);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/:id/directives/:directiveId/evidence/:attachmentId', async (req, res, next) => {
+  try {
+    const directive = await prisma.transactionFollowUpDirective.findFirst({
+      where: { id: req.params.directiveId, transactionId: req.params.id },
+    });
+    if (!directive) return res.status(404).json({ message: 'التوجيه أو القرار غير موجود' });
+
+    const supervisor = isSupervisor(req);
+    if (!supervisor && directive.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'هذا التوجيه غير مسند إلى حسابك' });
+    }
+    if (!supervisor && ['awaiting_approval', 'completed', 'cancelled'].includes(directive.status)) {
+      return res.status(409).json({ message: 'لا يمكن حذف أدلة التنفيذ أثناء الاعتماد أو بعد إغلاق التوجيه' });
+    }
+
+    const attachment = await prisma.attachment.findFirst({
+      where: {
+        id: req.params.attachmentId,
+        entityType: 'transaction_follow_up_directive',
+        entityId: directive.id,
+      },
+    });
+    if (!attachment) return res.status(404).json({ message: 'مرفق دليل التنفيذ غير موجود' });
+
+    if (attachment.driveFileId) {
+      try {
+        await deleteGoogleDriveFile(attachment.driveFileId);
+      } catch (error) {
+        console.warn('Unable to delete directive evidence from Google Drive:', error?.message || error);
+      }
+    }
+
+    await prisma.attachment.delete({ where: { id: attachment.id } });
+    const changedBy = actor(req);
+    await prisma.transactionFollowUpEvent.create({
+      data: {
+        transactionId: directive.transactionId,
+        eventType: 'directive_evidence_removed',
+        fromAssigneeUserId: directive.assigneeUserId,
+        fromAssigneeName: directive.assigneeName,
+        toAssigneeUserId: directive.assigneeUserId,
+        toAssigneeName: directive.assigneeName,
+        actionText: `حذف دليل تنفيذ من التوجيه: ${directive.title}`,
+        note: attachment.title,
+        createdById: changedBy.id,
+        createdByName: changedBy.name,
+      },
+    });
+
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/:id', async (req, res, next) => {
   try {
     const row = await prisma.transactionFollowUp.findUnique({
@@ -2021,9 +2129,31 @@ router.get('/:id', async (req, res, next) => {
       },
     });
     if (!row) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+
+    const directiveIds = (row.directives || []).map((item) => item.id);
+    const evidence = directiveIds.length
+      ? await prisma.attachment.findMany({
+          where: {
+            entityType: 'transaction_follow_up_directive',
+            entityId: { in: directiveIds },
+          },
+          orderBy: { createdAt: 'desc' },
+        })
+      : [];
+
+    const evidenceByDirective = new Map();
+    evidence.forEach((item) => {
+      const items = evidenceByDirective.get(item.entityId) || [];
+      items.push(item);
+      evidenceByDirective.set(item.entityId, items);
+    });
+
     res.json({
       ...serialize(row),
-      directives: (row.directives || []).map(serializeDirective),
+      directives: (row.directives || []).map((directive) => ({
+        ...serializeDirective(directive),
+        evidence: evidenceByDirective.get(directive.id) || [],
+      })),
     });
   } catch (error) {
     next(error);
