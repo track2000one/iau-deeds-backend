@@ -1122,6 +1122,46 @@ router.get('/directives/approval-history', async (req, res, next) => {
   }
 });
 
+router.get('/directives/kpi-targets', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'مستهدفات الأداء متاحة للمستخدم الإشرافي فقط' });
+    }
+    res.json(await getKpiTargets());
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/directives/kpi-targets', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'تعديل مستهدفات الأداء متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = kpiTargetSchema.parse(req.body);
+    const changedBy = actor(req);
+    const saved = await prisma.transactionFollowUpKpiTarget.upsert({
+      where: { scope: 'global' },
+      update: {
+        ...input,
+        updatedById: changedBy.id,
+        updatedByName: changedBy.name,
+      },
+      create: {
+        scope: 'global',
+        ...input,
+        updatedById: changedBy.id,
+        updatedByName: changedBy.name,
+      },
+    });
+
+    res.json(saved);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/directives/kpi', async (req, res, next) => {
   try {
     if (!isSupervisor(req)) {
