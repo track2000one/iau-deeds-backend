@@ -1754,7 +1754,7 @@ model TransactionFollowUpEvent {
 model TransactionFollowUpAlert {
   id            String   @id @default(cuid())
   alertKey      String   @unique
-  transactionId String
+  transactionId String?
   userId        String
   kind          String
   severity      String   @default("warning")
@@ -1764,7 +1764,7 @@ model TransactionFollowUpAlert {
   readAt        DateTime?
   createdAt     DateTime @default(now())
 
-  transaction TransactionFollowUp @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  transaction TransactionFollowUp? @relation(fields: [transactionId], references: [id], onDelete: Cascade)
 
   @@index([transactionId])
   @@index([userId])
@@ -1774,6 +1774,27 @@ model TransactionFollowUpAlert {
   @@index([createdAt])
 }
 
+
+model TransactionFollowUpKpiTarget {
+  id                      String   @id @default(cuid())
+  scope                   String   @unique @default("global")
+  firstPassRateMin        Float    @default(90)
+  onTimeRateMin           Float    @default(95)
+  reworkRateMax           Float    @default(10)
+  avgExecutionHoursMax    Float    @default(72)
+  avgApprovalHoursMax     Float    @default(24)
+  warningTolerancePercent Float    @default(10)
+  alertPeriodDays         Int      @default(30)
+  alertsEnabled           Boolean  @default(true)
+  updatedById             String?
+  updatedByName           String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@index([scope])
+  @@index([alertsEnabled])
+  @@index([updatedAt])
+}
 
 model TransactionFollowUpReportSchedule {
   id               String   @id @default(cuid())
