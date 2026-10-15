@@ -1650,6 +1650,7 @@ model TransactionFollowUp {
 
   events                TransactionFollowUpEvent[]
   alerts                TransactionFollowUpAlert[]
+  directives            TransactionFollowUpDirective[]
 
   @@index([transactionNumber])
   @@index([transactionDate])
@@ -1659,6 +1660,39 @@ model TransactionFollowUp {
   @@index([dueDate])
   @@index([lastActionAt])
   @@index([createdAt])
+}
+
+model TransactionFollowUpDirective {
+  id                    String   @id @default(cuid())
+  transactionId         String
+  directiveType         String   @default("directive")
+  title                 String
+  instruction           String
+  priority              String   @default("normal")
+  status                String   @default("pending")
+  assigneeUserId        String
+  assigneeName          String
+  dueDate               DateTime?
+  issuedById            String?
+  issuedByName          String?
+  issuedAt              DateTime @default(now())
+  startedAt             DateTime?
+  completedAt           DateTime?
+  completionResponse    String?
+  completionNote        String?
+  lastUpdatedById       String?
+  lastUpdatedByName     String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  transaction           TransactionFollowUp @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([assigneeUserId])
+  @@index([status])
+  @@index([priority])
+  @@index([dueDate])
+  @@index([issuedAt])
 }
 
 model TransactionFollowUpEvent {
