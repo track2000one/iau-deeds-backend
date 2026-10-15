@@ -1796,6 +1796,70 @@ model TransactionFollowUpKpiTarget {
   @@index([updatedAt])
 }
 
+model TransactionFollowUpImprovementPlan {
+  id                String   @id @default(cuid())
+  metricKey         String
+  metricLabel       String
+  scopeType         String   @default("global")
+  assigneeUserId    String?
+  assigneeName      String?
+  baselineValue     Float?
+  targetValue       Float
+  direction         String
+  periodDays        Int      @default(30)
+  rootCause         String
+  correctiveAction  String
+  preventiveAction  String?
+  ownerUserId       String?
+  ownerName         String?
+  dueDate           DateTime
+  status            String   @default("open")
+  progressNote      String?
+  resultValue       Float?
+  resultMetTarget   Boolean?
+  startedAt         DateTime?
+  monitoringAt      DateTime?
+  completedAt       DateTime?
+  cancelledAt       DateTime?
+  verifiedAt        DateTime?
+  verifiedById      String?
+  verifiedByName    String?
+  createdById       String?
+  createdByName     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  events            TransactionFollowUpImprovementPlanEvent[]
+
+  @@index([metricKey])
+  @@index([scopeType])
+  @@index([assigneeUserId])
+  @@index([ownerUserId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([createdAt])
+}
+
+model TransactionFollowUpImprovementPlanEvent {
+  id             String   @id @default(cuid())
+  planId         String
+  action         String
+  fromStatus     String?
+  toStatus       String?
+  note           String?
+  resultValue    Float?
+  resultMetTarget Boolean?
+  changedById    String?
+  changedByName  String?
+  createdAt      DateTime @default(now())
+
+  plan           TransactionFollowUpImprovementPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+  @@index([action])
+  @@index([createdAt])
+}
+
 model TransactionFollowUpReportSchedule {
   id               String   @id @default(cuid())
   name             String
