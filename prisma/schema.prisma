@@ -1906,6 +1906,11 @@ model TransactionFollowUpRiskRegister {
   lastOccurrenceAt        DateTime?
   notes                   String?
   closedAt                DateTime?
+  acceptanceExpiresAt     DateTime?
+  acceptanceApprovedAt    DateTime?
+  acceptanceApprovedById  String?
+  acceptanceApprovedByName String?
+  acceptanceReason        String?
   createdById             String?
   createdByName           String?
   updatedById             String?
@@ -1914,6 +1919,7 @@ model TransactionFollowUpRiskRegister {
   updatedAt               DateTime @updatedAt
 
   events                  TransactionFollowUpRiskRegisterEvent[]
+  acceptanceRequests      TransactionFollowUpRiskAcceptanceRequest[]
 
   @@index([category])
   @@index([sourceType])
@@ -1925,7 +1931,37 @@ model TransactionFollowUpRiskRegister {
   @@index([residualLevel])
   @@index([status])
   @@index([reviewDate])
+  @@index([acceptanceExpiresAt])
+  @@index([acceptanceApprovedAt])
   @@index([sourceImprovementPlanId])
+  @@index([createdAt])
+}
+
+model TransactionFollowUpRiskAcceptanceRequest {
+  id                    String   @id @default(cuid())
+  riskId                String
+  justification         String
+  compensatingControls  Json?
+  requestedUntil        DateTime
+  status                String   @default("pending")
+  requestedById         String
+  requestedByName       String
+  reviewedById          String?
+  reviewedByName        String?
+  reviewComment         String?
+  decisionAt            DateTime?
+  cancelledAt           DateTime?
+  expiredAt             DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  risk                  TransactionFollowUpRiskRegister @relation(fields: [riskId], references: [id], onDelete: Cascade)
+
+  @@index([riskId])
+  @@index([status])
+  @@index([requestedUntil])
+  @@index([requestedById])
+  @@index([reviewedById])
   @@index([createdAt])
 }
 
