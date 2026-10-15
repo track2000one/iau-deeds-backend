@@ -206,6 +206,14 @@ const evaluateMetric = (value, target, direction, tolerancePercent) => {
   return { status: 'red', met: false, value, target, direction };
 };
 
+const KPI_METRIC_LABELS = {
+  firstPassRate: 'الإنجاز من أول مرة',
+  onTimeRate: 'الالتزام بالمواعيد',
+  reworkRate: 'معدل إعادة العمل',
+  avgExecutionHours: 'متوسط زمن التنفيذ',
+  avgApprovalHours: 'متوسط زمن الاعتماد',
+};
+
 const evaluateKpiMetrics = (metrics, targets) => ({
   firstPassRate: evaluateMetric(
     metrics.firstPassRate,
@@ -1274,6 +1282,272 @@ router.get('/directives/approval-history', async (req, res, next) => {
       page,
       pageSize,
       totalPages: total ? Math.ceil(total / pageSize) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/directives/improvement-plans', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'خطط تحسين الأداء متاحة للمستخدم الإشرافي فقط' });
+    }
+
+    const status = String(req.query.status || '').trim();
+    const metricKey = String(req.query.metricKey || '').trim();
+    const assigneeUserId = String(req.query.assigneeUserId || '').trim();
+    const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const pageSize = Math.min(50, Math.max(10, Number.parseInt(String(req.query.pageSize || '20'), 10) || 20));
+    const now = new Date();
+
+    const where = {
+      ...(['open', 'in_progress', 'monitoring', 'completed', 'cancelled'].includes(status) ? { status } : {}),
+      ...(Object.keys(KPI_METRIC_LABELS).includes(metricKey) ? { metricKey } : {}),
+      ...(assigneeUserId ? { assigneeUserId } : {}),
+    };
+
+    const [total, items, openCount, overdueCount, monitoringCount, completed30d] = await Promise.all([
+      prisma.transactionFollowUpImprovementPlan.count({ where }),
+      prisma.transactionFollowUpImprovementPlan.findMany({
+        where,
+        include: { events: { orderBy: { createdAt: 'desc' }, take: 10 } },
+        orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.transactionFollowUpImprovementPlan.count({
+        where: { status: { in: ['open', 'in_progress', 'monitoring'] } },
+      }),
+      prisma.transactionFollowUpImprovementPlan.count({
+        where: {
+          status: { in: ['open', 'in_progress', 'monitoring'] },
+          dueDate: { lt: now },
+        },
+      }),
+      prisma.transactionFollowUpImprovementPlan.count({ where: { status: 'monitoring' } }),
+      prisma.transactionFollowUpImprovementPlan.count({
+        where: {
+          status: 'completed',
+          completedAt: { gte: new Date(now.getTime() - 30 * 86400000) },
+        },
+      }),
+    ]);
+
+    res.json({
+      generatedAt: now,
+      summary: {
+        open: openCount,
+        overdue: overdueCount,
+        monitoring: monitoringCount,
+        completed30d,
+      },
+      items: items.map((item) => ({
+        ...item,
+        isOverdue:
+          ['open', 'in_progress', 'monitoring'].includes(item.status) &&
+          new Date(item.dueDate).getTime() < now.getTime(),
+      })),
+      total,
+      page,
+      pageSize,
+      totalPages: total ? Math.ceil(total / pageSize) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/directives/improvement-plans', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'إنشاء خطة تحسين متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = improvementPlanCreateSchema.parse(req.body);
+    if (input.scopeType === 'employee' && !input.assigneeUserId) {
+      return res.status(400).json({ message: 'حدد الموظف المرتبط بخطة التحسين' });
+    }
+
+    const assignee = input.scopeType === 'employee'
+      ? await resolveAssignee(input.assigneeUserId)
+      : null;
+    const owner = input.ownerUserId ? await resolveAssignee(input.ownerUserId) : null;
+    const dueDate = toDate(input.dueDate, 'تاريخ الاستحقاق');
+    const createdBy = actor(req);
+
+    const plan = await prisma.transactionFollowUpImprovementPlan.create({
+      data: {
+        metricKey: input.metricKey,
+        metricLabel: KPI_METRIC_LABELS[input.metricKey],
+        scopeType: input.scopeType,
+        assigneeUserId: assignee?.id || null,
+        assigneeName: assignee?.username || null,
+        baselineValue: input.baselineValue ?? null,
+        targetValue: input.targetValue,
+        direction: input.direction,
+        periodDays: input.periodDays,
+        rootCause: input.rootCause,
+        correctiveAction: input.correctiveAction,
+        preventiveAction: input.preventiveAction || null,
+        ownerUserId: owner?.id || null,
+        ownerName: owner?.username || null,
+        dueDate,
+        createdById: createdBy.id,
+        createdByName: createdBy.name,
+        events: {
+          create: {
+            action: 'created',
+            toStatus: 'open',
+            note: 'إنشاء خطة تحسين مرتبطة بمؤشر أداء',
+            changedById: createdBy.id,
+            changedByName: createdBy.name,
+          },
+        },
+      },
+      include: { events: { orderBy: { createdAt: 'desc' } } },
+    });
+
+    res.status(201).json(plan);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/improvement-plans/:id', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'تحديث خطة التحسين متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = improvementPlanUpdateSchema.parse(req.body);
+    const current = await prisma.transactionFollowUpImprovementPlan.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'خطة التحسين غير موجودة' });
+
+    const owner = input.ownerUserId !== undefined
+      ? (input.ownerUserId ? await resolveAssignee(input.ownerUserId) : null)
+      : undefined;
+    const changedBy = actor(req);
+    const nextStatus = input.status || current.status;
+    const statusChanged = nextStatus !== current.status;
+    const now = new Date();
+
+    const data = {
+      ...(input.rootCause !== undefined ? { rootCause: input.rootCause } : {}),
+      ...(input.correctiveAction !== undefined ? { correctiveAction: input.correctiveAction } : {}),
+      ...(input.preventiveAction !== undefined ? { preventiveAction: input.preventiveAction || null } : {}),
+      ...(input.progressNote !== undefined ? { progressNote: input.progressNote || null } : {}),
+      ...(input.dueDate !== undefined ? { dueDate: toDate(input.dueDate, 'تاريخ الاستحقاق') } : {}),
+      ...(owner !== undefined ? {
+        ownerUserId: owner?.id || null,
+        ownerName: owner?.username || null,
+      } : {}),
+      ...(statusChanged ? {
+        status: nextStatus,
+        startedAt: nextStatus === 'in_progress' && !current.startedAt ? now : current.startedAt,
+        monitoringAt: nextStatus === 'monitoring' ? now : current.monitoringAt,
+        completedAt: nextStatus === 'completed' ? now : nextStatus !== 'completed' ? null : current.completedAt,
+        cancelledAt: nextStatus === 'cancelled' ? now : nextStatus !== 'cancelled' ? null : current.cancelledAt,
+      } : {}),
+    };
+
+    const [updated] = await prisma.$transaction([
+      prisma.transactionFollowUpImprovementPlan.update({
+        where: { id: current.id },
+        data,
+      }),
+      prisma.transactionFollowUpImprovementPlanEvent.create({
+        data: {
+          planId: current.id,
+          action: statusChanged ? 'status_changed' : 'updated',
+          fromStatus: current.status,
+          toStatus: nextStatus,
+          note: input.progressNote || null,
+          changedById: changedBy.id,
+          changedByName: changedBy.name,
+        },
+      }),
+    ]);
+
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/improvement-plans/:id/verify', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'التحقق من أثر خطة التحسين متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const current = await prisma.transactionFollowUpImprovementPlan.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'خطة التحسين غير موجودة' });
+    if (current.status === 'cancelled') {
+      return res.status(409).json({ message: 'لا يمكن التحقق من خطة ملغاة' });
+    }
+
+    const snapshot = await calculateCurrentKpiSnapshot(
+      current.periodDays,
+      current.scopeType === 'employee' ? current.assigneeUserId : null,
+    );
+    const resultValue = snapshot[current.metricKey];
+    if (resultValue == null) {
+      return res.status(409).json({ message: 'لا توجد بيانات كافية للتحقق من أثر الخطة على المؤشر' });
+    }
+
+    const evaluation = evaluateMetric(resultValue, current.targetValue, current.direction, 0);
+    const metTarget = evaluation.met === true;
+    const changedBy = actor(req);
+    const now = new Date();
+    const nextStatus = metTarget ? 'completed' : 'monitoring';
+    const note = metTarget
+      ? 'تحقق أثر خطة التحسين وحقق المؤشر المستهدف'
+      : 'تم القياس وما زال المؤشر بحاجة إلى متابعة';
+
+    const [updated] = await prisma.$transaction([
+      prisma.transactionFollowUpImprovementPlan.update({
+        where: { id: current.id },
+        data: {
+          status: nextStatus,
+          resultValue,
+          resultMetTarget: metTarget,
+          verifiedAt: now,
+          verifiedById: changedBy.id,
+          verifiedByName: changedBy.name,
+          monitoringAt: metTarget ? current.monitoringAt : now,
+          completedAt: metTarget ? now : null,
+          progressNote: note,
+        },
+      }),
+      prisma.transactionFollowUpImprovementPlanEvent.create({
+        data: {
+          planId: current.id,
+          action: 'verified',
+          fromStatus: current.status,
+          toStatus: nextStatus,
+          note,
+          resultValue,
+          resultMetTarget: metTarget,
+          changedById: changedBy.id,
+          changedByName: changedBy.name,
+        },
+      }),
+    ]);
+
+    res.json({
+      ...updated,
+      verification: {
+        value: resultValue,
+        target: current.targetValue,
+        direction: current.direction,
+        metTarget,
+        status: evaluation.status,
+      },
     });
   } catch (error) {
     next(error);
