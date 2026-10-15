@@ -848,6 +848,199 @@ router.get('/directives/approval-center', async (req, res, next) => {
   }
 });
 
+router.get('/directives/approval-history', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'سجل الاعتمادات متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const pageSize = Math.min(50, Math.max(10, Number.parseInt(String(req.query.pageSize || '20'), 10) || 20));
+    const search = String(req.query.search || '').trim();
+    const decision = String(req.query.decision || '').trim();
+    const assigneeUserId = String(req.query.assigneeUserId || '').trim();
+    const reviewerUserId = String(req.query.reviewerUserId || '').trim();
+    const periodDaysRaw = String(req.query.periodDays || '90').trim();
+    const periodDays = periodDaysRaw === 'all'
+      ? null
+      : Math.min(3650, Math.max(1, Number.parseInt(periodDaysRaw, 10) || 90));
+    const periodStart = periodDays
+      ? new Date(Date.now() - periodDays * 86400000)
+      : null;
+
+    const where = {
+      ...(periodStart ? { reviewedAt: { gte: periodStart } } : {}),
+      ...(['approved', 'return_for_completion', 'request_modification'].includes(decision)
+        ? { decision }
+        : {}),
+      ...(reviewerUserId ? { reviewedById: reviewerUserId } : {}),
+      ...(assigneeUserId ? { directive: { assigneeUserId } } : {}),
+      ...(search
+        ? {
+            OR: [
+              { reviewNote: { contains: search, mode: 'insensitive' } },
+              { completionResponse: { contains: search, mode: 'insensitive' } },
+              { reviewedByName: { contains: search, mode: 'insensitive' } },
+              { directive: { title: { contains: search, mode: 'insensitive' } } },
+              { directive: { assigneeName: { contains: search, mode: 'insensitive' } } },
+              { directive: { transaction: { transactionNumber: { contains: search, mode: 'insensitive' } } } },
+              { directive: { transaction: { subject: { contains: search, mode: 'insensitive' } } } },
+            ],
+          }
+        : {}),
+    };
+
+    const [total, rows, allRows] = await Promise.all([
+      prisma.transactionFollowUpDirectiveReview.count({ where }),
+      prisma.transactionFollowUpDirectiveReview.findMany({
+        where,
+        include: {
+          directive: {
+            select: {
+              id: true,
+              directiveType: true,
+              title: true,
+              instruction: true,
+              priority: true,
+              status: true,
+              assigneeUserId: true,
+              assigneeName: true,
+              dueDate: true,
+              issuedByName: true,
+              issuedAt: true,
+              transaction: {
+                select: {
+                  id: true,
+                  transactionNumber: true,
+                  trackingNumber: true,
+                  transactionDate: true,
+                  subject: true,
+                  status: true,
+                  currentAssigneeName: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: { reviewedAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.transactionFollowUpDirectiveReview.findMany({
+        where,
+        select: {
+          id: true,
+          directiveId: true,
+          decision: true,
+          submittedAt: true,
+          reviewedAt: true,
+          reviewedById: true,
+          reviewedByName: true,
+          directive: {
+            select: {
+              assigneeUserId: true,
+              assigneeName: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const summary = {
+      total: allRows.length,
+      approved: 0,
+      returned: 0,
+      modificationRequested: 0,
+      uniqueDirectives: new Set(allRows.map((item) => item.directiveId)).size,
+      averageReviewHours: null,
+    };
+
+    const employeeMap = new Map();
+    const reviewerMap = new Map();
+    let reviewHoursTotal = 0;
+    let reviewHoursCount = 0;
+
+    for (const row of allRows) {
+      if (row.decision === 'approved') summary.approved += 1;
+      if (row.decision === 'return_for_completion') summary.returned += 1;
+      if (row.decision === 'request_modification') summary.modificationRequested += 1;
+
+      if (row.submittedAt) {
+        const hours = Math.max(
+          0,
+          (new Date(row.reviewedAt).getTime() - new Date(row.submittedAt).getTime()) / 3600000,
+        );
+        reviewHoursTotal += hours;
+        reviewHoursCount += 1;
+      }
+
+      const employee = employeeMap.get(row.directive.assigneeUserId) || {
+        userId: row.directive.assigneeUserId,
+        username: row.directive.assigneeName,
+        reviews: 0,
+        approved: 0,
+        returned: 0,
+        modificationRequested: 0,
+      };
+      employee.reviews += 1;
+      if (row.decision === 'approved') employee.approved += 1;
+      if (row.decision === 'return_for_completion') employee.returned += 1;
+      if (row.decision === 'request_modification') employee.modificationRequested += 1;
+      employeeMap.set(employee.userId, employee);
+
+      const reviewerKey = row.reviewedById || row.reviewedByName || 'unknown';
+      const reviewer = reviewerMap.get(reviewerKey) || {
+        userId: row.reviewedById || null,
+        username: row.reviewedByName || 'مستخدم إشرافي',
+        reviews: 0,
+        approved: 0,
+        returned: 0,
+        modificationRequested: 0,
+      };
+      reviewer.reviews += 1;
+      if (row.decision === 'approved') reviewer.approved += 1;
+      if (row.decision === 'return_for_completion') reviewer.returned += 1;
+      if (row.decision === 'request_modification') reviewer.modificationRequested += 1;
+      reviewerMap.set(reviewerKey, reviewer);
+    }
+
+    if (reviewHoursCount) {
+      summary.averageReviewHours = Number((reviewHoursTotal / reviewHoursCount).toFixed(1));
+    }
+
+    const employees = [...employeeMap.values()]
+      .map((item) => ({
+        ...item,
+        reworkCount: item.returned + item.modificationRequested,
+        approvalRate: item.reviews
+          ? Number(((item.approved / item.reviews) * 100).toFixed(1))
+          : null,
+      }))
+      .sort((a, b) =>
+        (b.reworkCount - a.reworkCount) ||
+        (b.reviews - a.reviews)
+      );
+
+    const reviewers = [...reviewerMap.values()]
+      .sort((a, b) => b.reviews - a.reviews);
+
+    res.json({
+      generatedAt: new Date(),
+      periodDays,
+      summary,
+      employees,
+      reviewers,
+      items: rows,
+      total,
+      page,
+      pageSize,
+      totalPages: total ? Math.ceil(total / pageSize) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/alerts', async (req, res, next) => {
   try {
     await syncTransactionFollowUpAlerts();
