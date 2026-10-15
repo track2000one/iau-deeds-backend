@@ -252,22 +252,19 @@ const serialize = (record) => ({ ...record, ...computeIndicator(record) });
 
 const serializeDirective = (directive) => {
   const now = new Date();
-  const overdue =
-    !['completed', 'cancelled'].includes(directive.status) &&
-    directive.dueDate &&
-    new Date(directive.dueDate).getTime() < now.getTime();
-  const dueToday =
-    !['completed', 'cancelled'].includes(directive.status) &&
-    directive.dueDate &&
-    saudiDayKey(new Date(directive.dueDate)) === saudiDayKey(now);
+  const final = ['completed', 'cancelled'].includes(directive.status);
+  const todayKey = saudiDayKey(now);
+  const dueKey = directive.dueDate ? saudiDayKey(new Date(directive.dueDate)) : null;
+  const todayNumber = dayNumberFromKey(todayKey);
+  const dueNumber = dueKey ? dayNumberFromKey(dueKey) : null;
+  const overdue = !final && dueNumber != null && dueNumber < todayNumber;
+  const dueToday = !final && dueKey === todayKey;
 
   return {
     ...directive,
     isOverdue: Boolean(overdue),
     isDueToday: Boolean(dueToday),
-    daysOverdue: overdue
-      ? Math.max(1, Math.floor((now.getTime() - new Date(directive.dueDate).getTime()) / 86400000))
-      : 0,
+    daysOverdue: overdue ? Math.max(1, todayNumber - dueNumber) : 0,
   };
 };
 
