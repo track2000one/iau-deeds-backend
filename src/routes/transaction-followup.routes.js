@@ -5778,7 +5778,9 @@ router.get('/executive-inbox', async (req, res, next) => {
 
 router.get('/dashboard', async (req, res, next) => {
   try {
-    const mine = String(req.query.mine || '').toLowerCase() === 'true';
+    const supervisor = isSupervisor(req);
+    const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
+    const mine = !supervisor || mineRequested;
     const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
     const now = new Date();
 
@@ -6329,7 +6331,9 @@ router.get('/reports/executive', async (req, res, next) => {
 
 router.get('/analytics', async (req, res, next) => {
   try {
-    const mine = String(req.query.mine || '').toLowerCase() === 'true';
+    const supervisor = isSupervisor(req);
+    const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
+    const mine = !supervisor || mineRequested;
     const periodDaysRaw = String(req.query.periodDays || '90');
     const periodDays = periodDaysRaw === 'all'
       ? null
@@ -6567,7 +6571,9 @@ router.get('/', async (req, res, next) => {
     const status = String(req.query.status || '').trim();
     const priority = String(req.query.priority || '').trim();
     const assigneeUserId = String(req.query.assigneeUserId || '').trim();
-    const mine = String(req.query.mine || '').toLowerCase() === 'true';
+    const supervisor = isSupervisor(req);
+    const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
+    const mine = !supervisor || mineRequested;
 
     const where = {
       ...(search
@@ -6585,7 +6591,7 @@ router.get('/', async (req, res, next) => {
       ...(['low', 'normal', 'high', 'urgent'].includes(priority) ? { priority } : {}),
       ...(mine
         ? { currentAssigneeUserId: req.authUser.id }
-        : assigneeUserId
+        : supervisor && assigneeUserId
           ? { currentAssigneeUserId: assigneeUserId }
           : {}),
     };
@@ -7024,6 +7030,7 @@ router.get('/:id', async (req, res, next) => {
       },
     });
     if (!row) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (!canActOnRecord(req, row)) return denyRecordAccess(res);
 
     const directiveIds = (row.directives || []).map((item) => item.id);
     const evidence = directiveIds.length
