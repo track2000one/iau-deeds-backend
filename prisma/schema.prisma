@@ -1649,6 +1649,7 @@ model TransactionFollowUp {
   updatedAt             DateTime @updatedAt
 
   events                TransactionFollowUpEvent[]
+  alerts                TransactionFollowUpAlert[]
 
   @@index([transactionNumber])
   @@index([transactionDate])
@@ -1680,5 +1681,28 @@ model TransactionFollowUpEvent {
 
   @@index([transactionId])
   @@index([eventType])
+  @@index([createdAt])
+}
+
+model TransactionFollowUpAlert {
+  id            String   @id @default(cuid())
+  alertKey      String   @unique
+  transactionId String
+  userId        String
+  kind          String
+  severity      String   @default("warning")
+  title         String
+  message       String
+  isRead        Boolean  @default(false)
+  readAt        DateTime?
+  createdAt     DateTime @default(now())
+
+  transaction TransactionFollowUp @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([userId])
+  @@index([kind])
+  @@index([severity])
+  @@index([isRead])
   @@index([createdAt])
 }
