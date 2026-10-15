@@ -1680,6 +1680,14 @@ model TransactionFollowUpDirective {
   completedAt           DateTime?
   completionResponse    String?
   completionNote        String?
+  completionSubmittedAt DateTime?
+  completionSubmittedById String?
+  completionSubmittedByName String?
+  reviewDecision        String?
+  reviewNote            String?
+  reviewedAt            DateTime?
+  reviewedById          String?
+  reviewedByName        String?
   lastUpdatedById       String?
   lastUpdatedByName     String?
   createdAt             DateTime @default(now())
