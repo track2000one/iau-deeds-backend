@@ -109,6 +109,16 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canDelete';
   }
 
+  // Directive execution evidence belongs to the assignee workflow, so adding or
+  // removing evidence uses edit permission; route-level ownership checks still apply.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    ['POST', 'DELETE'].includes(method) &&
+    /\/directives\/[^/]+\/evidence(?:\/[^/]+)?\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canEdit';
+  }
+
   // Follow-up report archive creation is a reporting/print capability.
   if (
     moduleName === 'transaction_follow_up' &&
