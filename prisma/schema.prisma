@@ -1706,3 +1706,56 @@ model TransactionFollowUpAlert {
   @@index([isRead])
   @@index([createdAt])
 }
+
+
+model TransactionFollowUpReportSchedule {
+  id               String   @id @default(cuid())
+  name             String
+  frequency        String
+  dayOfWeek        Int?
+  dayOfMonth       Int?
+  runHour          Int      @default(8)
+  assigneeUserId   String?
+  assigneeName     String?
+  isActive         Boolean  @default(true)
+  lastRunAt        DateTime?
+  nextRunAt        DateTime?
+  createdById      String?
+  createdByName    String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  archives         TransactionFollowUpReportArchive[]
+
+  @@index([frequency])
+  @@index([isActive])
+  @@index([nextRunAt])
+  @@index([createdAt])
+}
+
+model TransactionFollowUpReportArchive {
+  id               String   @id @default(cuid())
+  reportType       String
+  periodFrom       DateTime
+  periodTo         DateTime
+  assigneeUserId   String?
+  assigneeName     String?
+  scopeMine        Boolean  @default(false)
+  source           String   @default("manual")
+  snapshot         Json
+  summary          Json?
+  scheduleId       String?
+  generatedById    String?
+  generatedByName  String?
+  createdAt        DateTime @default(now())
+
+  schedule         TransactionFollowUpReportSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
+  @@index([reportType])
+  @@index([periodFrom])
+  @@index([periodTo])
+  @@index([assigneeUserId])
+  @@index([source])
+  @@index([scheduleId])
+  @@index([createdAt])
+}
