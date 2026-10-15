@@ -1,6 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
+import {
+  archiveTransactionExecutiveReport,
+  calculateNextTransactionReportRun,
+  syncScheduledTransactionReports,
+} from '../services/transactionReports.service.js';
 
 const router = Router();
 
@@ -52,6 +57,23 @@ const actionSchema = z.object({
   status: statusSchema.optional(),
   requiredAction: nullableText(2000),
   dueDate: nullableText(100),
+});
+
+const reportArchiveSchema = z.object({
+  reportType: z.enum(['weekly', 'monthly', 'custom']).default('custom'),
+  from: z.string().trim().min(1),
+  to: z.string().trim().min(1),
+  assigneeUserId: nullableText(100),
+});
+
+const reportScheduleSchema = z.object({
+  name: z.string().trim().min(2).max(200),
+  frequency: z.enum(['weekly', 'monthly']),
+  dayOfWeek: z.coerce.number().int().min(0).max(6).optional().nullable(),
+  dayOfMonth: z.coerce.number().int().min(1).max(28).optional().nullable(),
+  runHour: z.coerce.number().int().min(0).max(23).default(8),
+  assigneeUserId: nullableText(100),
+  isActive: z.boolean().optional().default(true),
 });
 
 const toDate = (value, fieldName) => {
@@ -478,6 +500,298 @@ router.get('/dashboard', async (req, res, next) => {
     }).length;
 
     res.json({ total, open, waiting, overdue, completed, unassigned, needsAction });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/reports/archives', async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const pageSize = Math.min(50, Math.max(10, Number.parseInt(String(req.query.pageSize || '20'), 10) || 20));
+    const supervisor = isSupervisor(req);
+    const requestedAssignee = String(req.query.assigneeUserId || '').trim();
+    const where = supervisor
+      ? (requestedAssignee ? { assigneeUserId: requestedAssignee } : {})
+      : { assigneeUserId: req.authUser.id };
+
+    const [total, items] = await Promise.all([
+      prisma.transactionFollowUpReportArchive.count({ where }),
+      prisma.transactionFollowUpReportArchive.findMany({
+        where,
+        select: {
+          id: true,
+          reportType: true,
+          periodFrom: true,
+          periodTo: true,
+          assigneeUserId: true,
+          assigneeName: true,
+          scopeMine: true,
+          source: true,
+          summary: true,
+          scheduleId: true,
+          generatedById: true,
+          generatedByName: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ]);
+
+    res.json({
+      items,
+      total,
+      page,
+      pageSize,
+      totalPages: total ? Math.ceil(total / pageSize) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/reports/archives/compare', async (req, res, next) => {
+  try {
+    const leftId = String(req.query.leftId || '').trim();
+    const rightId = String(req.query.rightId || '').trim();
+    if (!leftId || !rightId) {
+      return res.status(400).json({ message: 'حدد تقريرين للمقارنة' });
+    }
+
+    const rows = await prisma.transactionFollowUpReportArchive.findMany({
+      where: { id: { in: [leftId, rightId] } },
+    });
+    if (rows.length !== 2) return res.status(404).json({ message: 'تعذر العثور على أحد التقريرين' });
+
+    const supervisor = isSupervisor(req);
+    if (!supervisor && rows.some((row) => row.assigneeUserId !== req.authUser.id)) {
+      return res.status(403).json({ message: 'لا يمكنك مقارنة تقرير خارج نطاق معاملاتك' });
+    }
+
+    const left = rows.find((row) => row.id === leftId);
+    const right = rows.find((row) => row.id === rightId);
+    const leftSummary = left?.summary || {};
+    const rightSummary = right?.summary || {};
+    const numericKeys = [
+      'totalIncluded',
+      'open',
+      'completed',
+      'waiting',
+      'needsFollowUp',
+      'overdueSnapshot',
+      'onTimeRate',
+      'avgCompletionDays',
+      'avgFirstActionHours',
+    ];
+
+    const delta = {};
+    numericKeys.forEach((key) => {
+      const leftValue = Number(leftSummary?.[key]);
+      const rightValue = Number(rightSummary?.[key]);
+      delta[key] = Number.isFinite(leftValue) && Number.isFinite(rightValue)
+        ? Number((rightValue - leftValue).toFixed(1))
+        : null;
+    });
+
+    res.json({ left, right, delta });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/reports/archives/:id', async (req, res, next) => {
+  try {
+    const row = await prisma.transactionFollowUpReportArchive.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!row) return res.status(404).json({ message: 'التقرير المؤرشف غير موجود' });
+    if (!isSupervisor(req) && row.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'لا يمكنك عرض هذا التقرير' });
+    }
+    res.json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/archives', async (req, res, next) => {
+  try {
+    const input = reportArchiveSchema.parse(req.body);
+    const supervisor = isSupervisor(req);
+    const requestedAssignee = supervisor ? input.assigneeUserId || null : req.authUser.id;
+    const assignee = requestedAssignee ? await resolveAssignee(requestedAssignee) : null;
+    const createdBy = actor(req);
+
+    const from = toDate(input.from, 'بداية فترة التقرير');
+    const to = toDate(input.to, 'نهاية فترة التقرير');
+    if (from.getTime() > to.getTime()) {
+      return res.status(400).json({ message: 'بداية فترة التقرير يجب أن تسبق نهايتها' });
+    }
+
+    const archive = await archiveTransactionExecutiveReport({
+      reportType: input.reportType,
+      from,
+      to,
+      assigneeUserId: assignee?.id || null,
+      assigneeName: assignee?.username || null,
+      scopeMine: !supervisor || Boolean(assignee),
+      source: 'manual',
+      generatedById: createdBy.id,
+      generatedByName: createdBy.name,
+    });
+
+    res.status(201).json(archive);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/reports/archives/:id', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'حذف التقارير المؤرشفة متاح للمستخدم الإشرافي فقط' });
+    }
+    await prisma.transactionFollowUpReportArchive.delete({ where: { id: req.params.id } });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/reports/schedules', async (req, res, next) => {
+  try {
+    const supervisor = isSupervisor(req);
+    const where = supervisor ? {} : { assigneeUserId: req.authUser.id };
+    const rows = await prisma.transactionFollowUpReportSchedule.findMany({
+      where,
+      orderBy: [{ isActive: 'desc' }, { createdAt: 'desc' }],
+    });
+    res.json(rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/schedules', async (req, res, next) => {
+  try {
+    const input = reportScheduleSchema.parse(req.body);
+    const supervisor = isSupervisor(req);
+    const requestedAssignee = supervisor ? input.assigneeUserId || null : req.authUser.id;
+    const assignee = requestedAssignee ? await resolveAssignee(requestedAssignee) : null;
+    const createdBy = actor(req);
+
+    const draft = {
+      frequency: input.frequency,
+      dayOfWeek: input.frequency === 'weekly' ? (input.dayOfWeek ?? 0) : null,
+      dayOfMonth: input.frequency === 'monthly' ? (input.dayOfMonth ?? 1) : null,
+      runHour: input.runHour,
+    };
+
+    const row = await prisma.transactionFollowUpReportSchedule.create({
+      data: {
+        name: input.name,
+        frequency: input.frequency,
+        dayOfWeek: draft.dayOfWeek,
+        dayOfMonth: draft.dayOfMonth,
+        runHour: input.runHour,
+        assigneeUserId: assignee?.id || null,
+        assigneeName: assignee?.username || null,
+        isActive: input.isActive,
+        nextRunAt: input.isActive ? calculateNextTransactionReportRun(draft) : null,
+        createdById: createdBy.id,
+        createdByName: createdBy.name,
+      },
+    });
+    res.status(201).json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/reports/schedules/:id', async (req, res, next) => {
+  try {
+    const input = reportScheduleSchema.partial().parse(req.body);
+    const current = await prisma.transactionFollowUpReportSchedule.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'جدولة التقرير غير موجودة' });
+
+    const supervisor = isSupervisor(req);
+    if (!supervisor && current.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'لا يمكنك تعديل هذه الجدولة' });
+    }
+
+    const nextFrequency = input.frequency || current.frequency;
+    const requestedAssignee = supervisor
+      ? (input.assigneeUserId !== undefined ? input.assigneeUserId || null : current.assigneeUserId)
+      : req.authUser.id;
+    const assignee = requestedAssignee ? await resolveAssignee(requestedAssignee) : null;
+    const isActive = input.isActive ?? current.isActive;
+    const nextSchedule = {
+      frequency: nextFrequency,
+      dayOfWeek: nextFrequency === 'weekly'
+        ? (input.dayOfWeek ?? current.dayOfWeek ?? 0)
+        : null,
+      dayOfMonth: nextFrequency === 'monthly'
+        ? (input.dayOfMonth ?? current.dayOfMonth ?? 1)
+        : null,
+      runHour: input.runHour ?? current.runHour,
+    };
+
+    const row = await prisma.transactionFollowUpReportSchedule.update({
+      where: { id: current.id },
+      data: {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        frequency: nextFrequency,
+        dayOfWeek: nextSchedule.dayOfWeek,
+        dayOfMonth: nextSchedule.dayOfMonth,
+        runHour: nextSchedule.runHour,
+        assigneeUserId: assignee?.id || null,
+        assigneeName: assignee?.username || null,
+        isActive,
+        nextRunAt: isActive ? calculateNextTransactionReportRun(nextSchedule) : null,
+      },
+    });
+    res.json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/schedules/:id/run', async (req, res, next) => {
+  try {
+    const schedule = await prisma.transactionFollowUpReportSchedule.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!schedule) return res.status(404).json({ message: 'جدولة التقرير غير موجودة' });
+    if (!isSupervisor(req) && schedule.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'لا يمكنك تشغيل هذه الجدولة' });
+    }
+
+    await prisma.transactionFollowUpReportSchedule.update({
+      where: { id: schedule.id },
+      data: { nextRunAt: new Date() },
+    });
+    const result = await syncScheduledTransactionReports();
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/reports/schedules/:id', async (req, res, next) => {
+  try {
+    const schedule = await prisma.transactionFollowUpReportSchedule.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!schedule) return res.status(404).json({ message: 'جدولة التقرير غير موجودة' });
+    if (!isSupervisor(req) && schedule.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'لا يمكنك حذف هذه الجدولة' });
+    }
+    await prisma.transactionFollowUpReportSchedule.delete({ where: { id: schedule.id } });
+    res.status(204).end();
   } catch (error) {
     next(error);
   }
