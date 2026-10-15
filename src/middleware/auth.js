@@ -100,6 +100,24 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canView';
   }
 
+  // Follow-up report archive creation is a reporting/print capability.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'POST' &&
+    /\/reports\/archives\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canPrint';
+  }
+
+  // Creating or manually running report schedules is a workflow-edit capability.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'POST' &&
+    /\/reports\/schedules(?:\/[^/]+\/run)?\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canEdit';
+  }
+
   // GIS bulk geometry changes are editing operations even though they use POST
   // to submit a transactional batch payload.
   if (
