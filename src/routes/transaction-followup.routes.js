@@ -2294,7 +2294,10 @@ router.get('/directives/risks', async (req, res, next) => {
       prisma.transactionFollowUpRiskRegister.count({ where: filters }),
       prisma.transactionFollowUpRiskRegister.findMany({
         where: filters,
-        include: { events: { orderBy: { createdAt: 'desc' }, take: 10 } },
+        include: {
+          events: { orderBy: { createdAt: 'desc' }, take: 10 },
+          acceptanceRequests: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
         orderBy: [{ residualScore: 'desc' }, { reviewDate: 'asc' }, { createdAt: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
