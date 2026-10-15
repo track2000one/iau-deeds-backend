@@ -1796,6 +1796,37 @@ model TransactionFollowUpKpiTarget {
   @@index([updatedAt])
 }
 
+model TransactionFollowUpRiskPolicy {
+  id                  String   @id @default(cuid())
+  versionNumber       Int      @unique
+  name                String
+  statement           String
+  appetiteMaxScore    Int      @default(9)
+  categoryAppetite    Json
+  kriThresholds       Json
+  effectiveFrom       DateTime
+  effectiveTo         DateTime?
+  status              String   @default("pending")
+  changeReason        String
+  proposedById        String?
+  proposedByName      String
+  reviewedById        String?
+  reviewedByName      String?
+  reviewComment       String?
+  submittedAt         DateTime @default(now())
+  decisionAt          DateTime?
+  cancelledAt         DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([status])
+  @@index([effectiveFrom])
+  @@index([effectiveTo])
+  @@index([proposedById])
+  @@index([reviewedById])
+  @@index([createdAt])
+}
+
 model TransactionFollowUpPreventiveAction {
   id                String   @id @default(cuid())
   sourceType        String   @default("metric")

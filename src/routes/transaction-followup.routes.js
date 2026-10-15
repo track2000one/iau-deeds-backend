@@ -215,6 +215,60 @@ const riskAcceptanceDecisionSchema = z.object({
   reviewComment: z.string().trim().min(3, 'ملاحظة قرار الاعتماد مطلوبة').max(5000),
 });
 
+const riskPolicyKriThresholdSchema = z.object({
+  direction: z.enum(['max', 'min']),
+  target: z.coerce.number().min(0).max(100000),
+  warning: z.coerce.number().min(0).max(100000),
+  danger: z.coerce.number().min(0).max(100000),
+}).superRefine((value, ctx) => {
+  if (value.direction === 'max' && value.danger < value.warning) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'حد الخطر الأحمر يجب أن يساوي أو يتجاوز حد التنبيه الأصفر' });
+  }
+  if (value.direction === 'min' && value.danger > value.warning) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'في المؤشرات التصاعدية يجب أن يكون حد الخطر الأحمر أقل من أو يساوي حد التنبيه الأصفر' });
+  }
+});
+
+const riskPolicyCategorySchema = z.object({
+  operational: z.coerce.number().int().min(1).max(25),
+  process: z.coerce.number().int().min(1).max(25),
+  workload: z.coerce.number().int().min(1).max(25),
+  compliance: z.coerce.number().int().min(1).max(25),
+  technology: z.coerce.number().int().min(1).max(25),
+  data: z.coerce.number().int().min(1).max(25),
+  financial: z.coerce.number().int().min(1).max(25),
+  reputational: z.coerce.number().int().min(1).max(25),
+  other: z.coerce.number().int().min(1).max(25),
+});
+
+const riskPolicyKriSchema = z.object({
+  outsideAppetiteRate: riskPolicyKriThresholdSchema,
+  criticalRisks: riskPolicyKriThresholdSchema,
+  overdueReviewRate: riskPolicyKriThresholdSchema,
+  recurringRiskRate: riskPolicyKriThresholdSchema,
+  riskReduction: riskPolicyKriThresholdSchema,
+  preventiveFailureRate: riskPolicyKriThresholdSchema,
+  predictedBreaches: riskPolicyKriThresholdSchema,
+  capaOverdue: riskPolicyKriThresholdSchema,
+  pendingRiskAcceptances: riskPolicyKriThresholdSchema,
+  expiringRiskAcceptances: riskPolicyKriThresholdSchema,
+});
+
+const riskPolicyProposalSchema = z.object({
+  name: z.string().trim().min(3, 'اسم سياسة المخاطر مطلوب').max(200),
+  statement: z.string().trim().min(10, 'بيان شهية المخاطر مطلوب').max(3000),
+  appetiteMaxScore: z.coerce.number().int().min(1).max(25),
+  categoryAppetite: riskPolicyCategorySchema,
+  kriThresholds: riskPolicyKriSchema,
+  effectiveFrom: z.string().trim().min(1, 'تاريخ سريان السياسة مطلوب'),
+  changeReason: z.string().trim().min(5, 'مبرر التعديل مطلوب').max(3000),
+});
+
+const riskPolicyDecisionSchema = z.object({
+  decision: z.enum(['approved', 'rejected']),
+  reviewComment: z.string().trim().min(3, 'ملاحظة قرار الاعتماد مطلوبة').max(3000),
+});
+
 const improvementPlanCreateSchema = z.object({
   metricKey: z.enum([
     'firstPassRate',
@@ -285,6 +339,150 @@ const modulePermission = (req) =>
 const isSupervisor = (req) =>
   req.authUser?.role === 'admin' || Boolean(modulePermission(req)?.canDelete);
 
+const RISK_CATEGORY_KEYS = [
+  'operational',
+  'process',
+  'workload',
+  'compliance',
+  'technology',
+  'data',
+  'financial',
+  'reputational',
+  'other',
+];
+
+const DEFAULT_CATEGORY_APPETITE = {
+  operational: 9,
+  process: 9,
+  workload: 9,
+  compliance: 9,
+  technology: 9,
+  data: 9,
+  financial: 9,
+  reputational: 9,
+  other: 9,
+};
+
+const DEFAULT_RISK_KRI_THRESHOLDS = {
+  outsideAppetiteRate: { direction: 'max', target: 10, warning: 10, danger: 25 },
+  criticalRisks: { direction: 'max', target: 0, warning: 1, danger: 3 },
+  overdueReviewRate: { direction: 'max', target: 10, warning: 10, danger: 20 },
+  recurringRiskRate: { direction: 'max', target: 10, warning: 10, danger: 20 },
+  riskReduction: { direction: 'min', target: 30, warning: 30, danger: 15 },
+  preventiveFailureRate: { direction: 'max', target: 15, warning: 15, danger: 30 },
+  predictedBreaches: { direction: 'max', target: 0, warning: 1, danger: 2 },
+  capaOverdue: { direction: 'max', target: 0, warning: 1, danger: 3 },
+  pendingRiskAcceptances: { direction: 'max', target: 0, warning: 1, danger: 4 },
+  expiringRiskAcceptances: { direction: 'max', target: 0, warning: 1, danger: 3 },
+};
+
+const DEFAULT_RISK_POLICY = {
+  id: null,
+  versionNumber: 0,
+  name: 'السياسة الافتراضية لشهية المخاطر',
+  statement: 'الحد العام المقبول للخطر المتبقي هو 9 من 25؛ وما فوق الحد المعتمد للفئة يتطلب معالجة أو قبولًا إشرافيًا موثقًا.',
+  appetiteMaxScore: 9,
+  categoryAppetite: DEFAULT_CATEGORY_APPETITE,
+  kriThresholds: DEFAULT_RISK_KRI_THRESHOLDS,
+  effectiveFrom: null,
+  effectiveTo: null,
+  status: 'default',
+  changeReason: 'الإعداد الافتراضي للنظام قبل اعتماد أول إصدار رسمي.',
+  proposedById: null,
+  proposedByName: 'النظام',
+  reviewedById: null,
+  reviewedByName: null,
+  reviewComment: null,
+  submittedAt: null,
+  decisionAt: null,
+  createdAt: null,
+  updatedAt: null,
+};
+
+const normalizeRiskPolicy = (policy) => {
+  if (!policy) return {
+    ...DEFAULT_RISK_POLICY,
+    categoryAppetite: { ...DEFAULT_CATEGORY_APPETITE },
+    kriThresholds: Object.fromEntries(
+      Object.entries(DEFAULT_RISK_KRI_THRESHOLDS).map(([key, value]) => [key, { ...value }])
+    ),
+  };
+
+  const storedCategories =
+    policy.categoryAppetite && typeof policy.categoryAppetite === 'object' && !Array.isArray(policy.categoryAppetite)
+      ? policy.categoryAppetite
+      : {};
+  const storedKri =
+    policy.kriThresholds && typeof policy.kriThresholds === 'object' && !Array.isArray(policy.kriThresholds)
+      ? policy.kriThresholds
+      : {};
+
+  return {
+    ...policy,
+    categoryAppetite: {
+      ...DEFAULT_CATEGORY_APPETITE,
+      ...storedCategories,
+    },
+    kriThresholds: Object.fromEntries(
+      Object.entries(DEFAULT_RISK_KRI_THRESHOLDS).map(([key, fallback]) => [
+        key,
+        {
+          ...fallback,
+          ...(storedKri[key] && typeof storedKri[key] === 'object' ? storedKri[key] : {}),
+        },
+      ])
+    ),
+  };
+};
+
+const getEffectiveRiskPolicy = async (referenceDate = new Date()) => {
+  const policy = await prisma.transactionFollowUpRiskPolicy.findFirst({
+    where: {
+      status: 'approved',
+      effectiveFrom: { lte: referenceDate },
+      OR: [
+        { effectiveTo: null },
+        { effectiveTo: { gt: referenceDate } },
+      ],
+    },
+    orderBy: [
+      { effectiveFrom: 'desc' },
+      { versionNumber: 'desc' },
+    ],
+  });
+  return normalizeRiskPolicy(policy);
+};
+
+const getRiskAppetiteLimit = (policy, category) => {
+  const normalized = normalizeRiskPolicy(policy);
+  const categoryLimit = Number(normalized.categoryAppetite?.[category]);
+  return Number.isFinite(categoryLimit) && categoryLimit >= 1 && categoryLimit <= 25
+    ? categoryLimit
+    : normalized.appetiteMaxScore;
+};
+
+const getRiskKriThreshold = (policy, key) => {
+  const normalized = normalizeRiskPolicy(policy);
+  return normalized.kriThresholds?.[key] || DEFAULT_RISK_KRI_THRESHOLDS[key];
+};
+
+const evaluateRiskKriStatus = (value, threshold) => {
+  if (value == null || Number.isNaN(Number(value))) return 'neutral';
+  if (threshold.direction === 'min') {
+    if (value <= threshold.danger) return 'red';
+    if (value <= threshold.warning) return 'yellow';
+    return 'green';
+  }
+  if (value >= threshold.danger) return 'red';
+  if (value >= threshold.warning) return 'yellow';
+  return 'green';
+};
+
+const riskKriTargetLabel = (threshold, unit = '') => {
+  const operator = threshold.direction === 'min' ? '≥' : '≤';
+  return `${operator} ${threshold.target}${unit === '%' ? '%' : ''}`;
+};
+
 const DEFAULT_KPI_TARGETS = {
   scope: 'global',
   firstPassRateMin: 90,
@@ -351,7 +549,7 @@ const nextRiskNumber = async () => {
   return `${prefix}${String(last + 1).padStart(4, '0')}`;
 };
 
-const serializeRisk = (risk) => {
+const serializeRisk = (risk, policy = DEFAULT_RISK_POLICY) => {
   const now = new Date();
   const active = !['closed'].includes(risk.status);
   const reviewOverdue = Boolean(
@@ -368,9 +566,12 @@ const serializeRisk = (risk) => {
     new Date(risk.acceptanceExpiresAt).getTime() > now.getTime() &&
     new Date(risk.acceptanceExpiresAt).getTime() <= now.getTime() + 7 * 86400000
   );
+  const appetiteLimit = getRiskAppetiteLimit(policy, risk.category);
   return {
     ...risk,
     latestAcceptance,
+    appetiteLimit,
+    outsideAppetite: Number(risk.residualScore) > appetiteLimit,
     isReviewOverdue: reviewOverdue,
     acceptanceExpiresSoon,
   };
@@ -1327,7 +1528,7 @@ export const syncTransactionFollowUpAlerts = async () => {
           transactionId: null,
           userId,
           kind: 'risk_acceptance_expired',
-          severity: risk.residualScore > 9 ? 'danger' : 'warning',
+          severity: risk.residualScore > appetiteLimit ? 'danger' : 'warning',
           title: 'انتهت مدة قبول خطر',
           message: `${risk.riskNumber} — انتهت مدة قبول الخطر وأعيد إلى المراقبة لإعادة التقييم.`,
         });
@@ -2442,6 +2643,254 @@ router.get('/directives/improvement-plans/effectiveness', async (req, res, next)
   }
 });
 
+router.get('/directives/risk-policy', async (req, res, next) => {
+  try {
+    const now = new Date();
+    const supervisor = isSupervisor(req);
+    const current = await getEffectiveRiskPolicy(now);
+    const [pending, history] = await Promise.all([
+      supervisor
+        ? prisma.transactionFollowUpRiskPolicy.findMany({
+            where: { status: 'pending' },
+            orderBy: [{ versionNumber: 'desc' }],
+            take: 10,
+          })
+        : Promise.resolve([]),
+      prisma.transactionFollowUpRiskPolicy.findMany({
+        where: { status: { in: ['approved', 'rejected', 'cancelled'] } },
+        orderBy: [{ versionNumber: 'desc' }],
+        take: 25,
+      }),
+    ]);
+
+    res.json({
+      generatedAt: now,
+      supervisor,
+      current,
+      pending: pending.map(normalizeRiskPolicy),
+      history: history.map(normalizeRiskPolicy),
+      defaults: normalizeRiskPolicy(null),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/directives/risk-policy/proposals', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'اقتراح تعديل سياسة المخاطر متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = riskPolicyProposalSchema.parse(req.body);
+    const effectiveFrom = toDate(input.effectiveFrom, 'تاريخ سريان السياسة');
+    const todayNumber = dayNumberFromKey(saudiDayKey());
+    const effectiveNumber = dayNumberFromKey(saudiDayKey(effectiveFrom));
+    if (effectiveNumber < todayNumber) {
+      return res.status(400).json({ message: 'تاريخ سريان السياسة لا يمكن أن يكون في الماضي' });
+    }
+
+    const existingPending = await prisma.transactionFollowUpRiskPolicy.findFirst({
+      where: { status: 'pending' },
+      orderBy: { versionNumber: 'desc' },
+    });
+    if (existingPending) {
+      return res.status(409).json({
+        message: `يوجد مقترح سياسة معلق بالفعل (الإصدار ${existingPending.versionNumber})؛ يجب البت فيه أولًا`,
+      });
+    }
+
+    const sameEffectiveDate = await prisma.transactionFollowUpRiskPolicy.findFirst({
+      where: {
+        status: 'approved',
+        effectiveFrom,
+      },
+    });
+    if (sameEffectiveDate) {
+      return res.status(409).json({ message: 'يوجد إصدار معتمد يبدأ في التاريخ نفسه؛ اختر تاريخ سريان مختلفًا' });
+    }
+
+    const latest = await prisma.transactionFollowUpRiskPolicy.findFirst({
+      orderBy: { versionNumber: 'desc' },
+      select: { versionNumber: true },
+    });
+    const proposedBy = actor(req);
+    const proposal = await prisma.transactionFollowUpRiskPolicy.create({
+      data: {
+        versionNumber: (latest?.versionNumber || 0) + 1,
+        name: input.name,
+        statement: input.statement,
+        appetiteMaxScore: input.appetiteMaxScore,
+        categoryAppetite: input.categoryAppetite,
+        kriThresholds: input.kriThresholds,
+        effectiveFrom,
+        status: 'pending',
+        changeReason: input.changeReason,
+        proposedById: proposedBy.id,
+        proposedByName: proposedBy.name,
+      },
+    });
+
+    const supervisorIds = await getFollowUpSupervisorIds();
+    for (const userId of supervisorIds) {
+      if (userId === proposedBy.id) continue;
+      await createFollowUpAlert({
+        alertKey: `risk-policy:${proposal.id}:pending:${userId}`,
+        transactionId: null,
+        userId,
+        kind: 'risk_policy_pending',
+        severity: 'warning',
+        title: 'مقترح تعديل سياسة المخاطر',
+        message: `الإصدار ${proposal.versionNumber} من «${proposal.name}» بانتظار المراجعة والاعتماد.`,
+      });
+    }
+
+    res.status(201).json(normalizeRiskPolicy(proposal));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/risk-policy/proposals/:id/decision', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'اعتماد سياسة المخاطر متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = riskPolicyDecisionSchema.parse(req.body);
+    const proposal = await prisma.transactionFollowUpRiskPolicy.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!proposal) return res.status(404).json({ message: 'مقترح سياسة المخاطر غير موجود' });
+    if (proposal.status !== 'pending') {
+      return res.status(409).json({ message: 'تم البت في مقترح سياسة المخاطر مسبقًا' });
+    }
+
+    const reviewer = actor(req);
+    if (proposal.proposedById === reviewer.id) {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      const hasOtherApprover = supervisorIds.some((id) => id !== reviewer.id);
+      if (hasOtherApprover || req.authUser?.role !== 'admin') {
+        return res.status(409).json({
+          message: 'لا يمكن لمقدم مقترح السياسة اعتماد مقترحه؛ يلزم اعتماد مشرف آخر',
+        });
+      }
+    }
+
+    const approved = input.decision === 'approved';
+    const now = new Date();
+
+    if (approved) {
+      const sameEffective = await prisma.transactionFollowUpRiskPolicy.findFirst({
+        where: {
+          id: { not: proposal.id },
+          status: 'approved',
+          effectiveFrom: proposal.effectiveFrom,
+        },
+      });
+      if (sameEffective) {
+        return res.status(409).json({ message: 'يوجد إصدار معتمد يبدأ في تاريخ السريان نفسه' });
+      }
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      let effectiveTo = proposal.effectiveTo;
+      if (approved) {
+        const nextApproved = await tx.transactionFollowUpRiskPolicy.findFirst({
+          where: {
+            id: { not: proposal.id },
+            status: 'approved',
+            effectiveFrom: { gt: proposal.effectiveFrom },
+          },
+          orderBy: { effectiveFrom: 'asc' },
+        });
+        effectiveTo = nextApproved?.effectiveFrom || null;
+
+        await tx.transactionFollowUpRiskPolicy.updateMany({
+          where: {
+            id: { not: proposal.id },
+            status: 'approved',
+            effectiveFrom: { lt: proposal.effectiveFrom },
+            OR: [
+              { effectiveTo: null },
+              { effectiveTo: { gt: proposal.effectiveFrom } },
+            ],
+          },
+          data: { effectiveTo: proposal.effectiveFrom },
+        });
+      }
+
+      return tx.transactionFollowUpRiskPolicy.update({
+        where: { id: proposal.id },
+        data: {
+          status: input.decision,
+          effectiveTo: approved ? effectiveTo : proposal.effectiveTo,
+          reviewedById: reviewer.id,
+          reviewedByName: reviewer.name,
+          reviewComment: input.reviewComment,
+          decisionAt: now,
+        },
+      });
+    });
+
+    const recipients = new Set([
+      proposal.proposedById,
+      ...(await getFollowUpSupervisorIds()),
+    ].filter(Boolean));
+    for (const userId of recipients) {
+      if (userId === reviewer.id) continue;
+      await createFollowUpAlert({
+        alertKey: `risk-policy:${proposal.id}:${input.decision}:${userId}`,
+        transactionId: null,
+        userId,
+        kind: approved ? 'risk_policy_approved' : 'risk_policy_rejected',
+        severity: approved ? 'info' : 'warning',
+        title: approved ? 'تم اعتماد سياسة المخاطر' : 'تم رفض مقترح سياسة المخاطر',
+        message: approved
+          ? `اعتمد الإصدار ${proposal.versionNumber} ويسري من ${saudiDayKey(new Date(proposal.effectiveFrom))}.`
+          : `رُفض الإصدار ${proposal.versionNumber}: ${input.reviewComment}`,
+      });
+    }
+
+    res.json(normalizeRiskPolicy(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/risk-policy/proposals/:id/cancel', async (req, res, next) => {
+  try {
+    const proposal = await prisma.transactionFollowUpRiskPolicy.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!proposal) return res.status(404).json({ message: 'مقترح سياسة المخاطر غير موجود' });
+    if (proposal.status !== 'pending') {
+      return res.status(409).json({ message: 'لا يمكن إلغاء مقترح تم البت فيه' });
+    }
+
+    const supervisor = isSupervisor(req);
+    if (!supervisor && proposal.proposedById !== req.authUser?.id) {
+      return res.status(403).json({ message: 'لا يمكنك إلغاء هذا المقترح' });
+    }
+
+    const changedBy = actor(req);
+    const updated = await prisma.transactionFollowUpRiskPolicy.update({
+      where: { id: proposal.id },
+      data: {
+        status: 'cancelled',
+        cancelledAt: new Date(),
+        reviewedById: changedBy.id,
+        reviewedByName: changedBy.name,
+        reviewComment: 'أُلغي المقترح قبل اتخاذ قرار الاعتماد.',
+      },
+    });
+
+    res.json(normalizeRiskPolicy(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/directives/risks', async (req, res, next) => {
   try {
     const status = String(req.query.status || '').trim();
@@ -2480,6 +2929,7 @@ router.get('/directives/risks', async (req, res, next) => {
       overdueReview,
       riskRows,
       categories,
+      riskPolicy,
     ] = await Promise.all([
       prisma.transactionFollowUpRiskRegister.count({ where: filters }),
       prisma.transactionFollowUpRiskRegister.findMany({
@@ -2515,6 +2965,7 @@ router.get('/directives/risks', async (req, res, next) => {
         _count: { _all: true },
         orderBy: { _count: { category: 'desc' } },
       }),
+      getEffectiveRiskPolicy(now),
     ]);
 
     const averageResidualScore = riskRows.length
@@ -2550,7 +3001,15 @@ router.get('/directives/risks', async (req, res, next) => {
       levels,
       matrix,
       categories: categories.map((row) => ({ category: row.category, count: row._count._all })),
-      items: items.map(serializeRisk),
+      policy: {
+        id: riskPolicy.id,
+        versionNumber: riskPolicy.versionNumber,
+        name: riskPolicy.name,
+        appetiteMaxScore: riskPolicy.appetiteMaxScore,
+        categoryAppetite: riskPolicy.categoryAppetite,
+        effectiveFrom: riskPolicy.effectiveFrom,
+      },
+      items: items.map((item) => serializeRisk(item, riskPolicy)),
       total,
       page,
       pageSize,
@@ -2709,6 +3168,8 @@ router.post('/directives/risks/:id/acceptance-requests', async (req, res, next) 
 
     const requestedUntil = toDate(input.requestedUntil, 'تاريخ انتهاء قبول الخطر');
     const now = new Date();
+    const riskPolicy = await getEffectiveRiskPolicy(now);
+    const appetiteLimit = getRiskAppetiteLimit(riskPolicy, risk.category);
     const maxUntil = new Date(now.getTime() + 365 * 86400000);
     if (requestedUntil.getTime() <= now.getTime()) {
       return res.status(400).json({ message: 'تاريخ انتهاء القبول يجب أن يكون في المستقبل' });
@@ -2716,9 +3177,9 @@ router.post('/directives/risks/:id/acceptance-requests', async (req, res, next) 
     if (requestedUntil.getTime() > maxUntil.getTime()) {
       return res.status(400).json({ message: 'مدة قبول الخطر لا يمكن أن تتجاوز سنة واحدة' });
     }
-    if (risk.residualScore > 9 && !(input.compensatingControls || []).length) {
+    if (risk.residualScore > appetiteLimit && !(input.compensatingControls || []).length) {
       return res.status(400).json({
-        message: 'الخطر خارج شهية المخاطر؛ يلزم تحديد ضابط تعويضي واحد على الأقل قبل طلب القبول',
+        message: `الخطر خارج شهية المخاطر المعتمدة لفئته (الحد ${appetiteLimit}/25)؛ يلزم تحديد ضابط تعويضي واحد على الأقل قبل طلب القبول`,
       });
     }
 
@@ -3000,7 +3461,8 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
     }
 
     const now = new Date();
-    const appetiteMaxScore = 9;
+    const riskPolicy = await getEffectiveRiskPolicy(now);
+    const appetiteMaxScore = riskPolicy.appetiteMaxScore;
     const trendStart = new Date(now.getFullYear(), now.getMonth() - 5, 1);
     const preventiveStart = new Date(now.getTime() - 90 * 86400000);
 
@@ -3089,7 +3551,9 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
     const high = activeRisks.filter((risk) => risk.residualLevel === 'high').length;
     const medium = activeRisks.filter((risk) => risk.residualLevel === 'medium').length;
     const low = activeRisks.filter((risk) => risk.residualLevel === 'low').length;
-    const outsideAppetite = activeRisks.filter((risk) => risk.residualScore > appetiteMaxScore).length;
+    const outsideAppetite = activeRisks.filter(
+      (risk) => risk.residualScore > getRiskAppetiteLimit(riskPolicy, risk.category)
+    ).length;
     const overdueReview = activeRisks.filter(
       (risk) => risk.reviewDate && new Date(risk.reviewDate).getTime() < now.getTime()
     ).length;
@@ -3154,112 +3618,111 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
         new Date(item.expiredAt).getTime() >= now.getTime() - 30 * 86400000
     ).length;
     const acceptedOutsideAppetite = activeRisks.filter(
-      (risk) => risk.status === 'accepted' && risk.residualScore > appetiteMaxScore
+      (risk) =>
+        risk.status === 'accepted' &&
+        risk.residualScore > getRiskAppetiteLimit(riskPolicy, risk.category)
     ).length;
 
+    const outsideAppetiteStatus = evaluateRiskKriStatus(
+      outsideAppetiteRate,
+      getRiskKriThreshold(riskPolicy, 'outsideAppetiteRate'),
+    );
+    const criticalRiskStatus = evaluateRiskKriStatus(
+      critical,
+      getRiskKriThreshold(riskPolicy, 'criticalRisks'),
+    );
     const riskAppetiteStatus =
-      critical > 0 || outsideAppetiteRate >= 25
+      outsideAppetiteStatus === 'red' || criticalRiskStatus === 'red'
         ? 'breached'
-        : outsideAppetiteRate >= 10
+        : outsideAppetiteStatus === 'yellow' || criticalRiskStatus === 'yellow'
           ? 'watch'
           : 'within';
 
-    const kriStatusMax = (value, warning, danger) =>
-      value >= danger ? 'red' : value >= warning ? 'yellow' : 'green';
-    const kriStatusMin = (value, warning, danger) =>
-      value == null ? 'neutral' : value <= danger ? 'red' : value <= warning ? 'yellow' : 'green';
+    const kriDefinition = (key, label, value, unit, description) => {
+      const threshold = getRiskKriThreshold(riskPolicy, key);
+      return {
+        key,
+        label,
+        value,
+        unit,
+        status: evaluateRiskKriStatus(value, threshold),
+        target: riskKriTargetLabel(threshold, unit),
+        threshold,
+        description,
+      };
+    };
 
     const kri = [
-      {
-        key: 'outsideAppetiteRate',
-        label: 'المخاطر خارج شهية المخاطر',
-        value: outsideAppetiteRate,
-        unit: '%',
-        status: kriStatusMax(outsideAppetiteRate, 10, 25),
-        target: '≤ 10%',
-        description: 'نسبة المخاطر النشطة التي تجاوز خطرها المتبقي الدرجة 9 من 25.',
-      },
-      {
-        key: 'criticalRisks',
-        label: 'المخاطر الحرجة',
-        value: critical,
-        unit: 'خطر',
-        status: kriStatusMax(critical, 1, 3),
-        target: '0',
-        description: 'عدد المخاطر النشطة المصنفة حرجة بعد تطبيق الضوابط.',
-      },
-      {
-        key: 'overdueReviewRate',
-        label: 'تأخر مراجعة المخاطر',
-        value: overdueReviewRate,
-        unit: '%',
-        status: kriStatusMax(overdueReviewRate, 10, 20),
-        target: '< 10%',
-        description: 'نسبة المخاطر النشطة التي تجاوزت تاريخ المراجعة المحدد.',
-      },
-      {
-        key: 'recurringRiskRate',
-        label: 'تكرار المخاطر',
-        value: recurringRiskRate,
-        unit: '%',
-        status: kriStatusMax(recurringRiskRate, 10, 20),
-        target: '< 10%',
-        description: 'نسبة المخاطر النشطة التي تم تسجيل تكرار لها مرة واحدة على الأقل.',
-      },
-      {
-        key: 'riskReduction',
-        label: 'فعالية خفض المخاطر',
-        value: avgRiskReductionPercent,
-        unit: '%',
-        status: kriStatusMin(avgRiskReductionPercent, 30, 15),
-        target: '≥ 30%',
-        description: 'متوسط الانخفاض من الخطر الكامن إلى الخطر المتبقي.',
-      },
-      {
-        key: 'preventiveFailureRate',
-        label: 'فشل التدخلات الوقائية',
-        value: preventiveFailureRate,
-        unit: '%',
-        status: kriStatusMax(preventiveFailureRate, 15, 30),
-        target: '< 15%',
-        description: 'نسبة التدخلات الوقائية غير الفعالة من التدخلات التي تم التحقق من أثرها خلال آخر 90 يومًا.',
-      },
-      {
-        key: 'predictedBreaches',
-        label: 'تجاوزات KPI المتوقعة',
-        value: earlyWarning.summary.predictedMetricBreaches,
-        unit: 'مؤشر',
-        status: kriStatusMax(earlyWarning.summary.predictedMetricBreaches, 1, 2),
-        target: '0',
-        description: 'عدد مؤشرات الأداء المتوقع انتقالها إلى المستوى الأحمر إذا استمر الاتجاه الحالي.',
-      },
-      {
-        key: 'capaOverdue',
-        label: 'خطط CAPA المتأخرة',
-        value: capaOverdue,
-        unit: 'خطة',
-        status: kriStatusMax(capaOverdue, 1, 3),
-        target: '0',
-        description: 'عدد خطط التحسين المفتوحة التي تجاوزت تاريخ الاستحقاق.',
-      },
-      {
-        key: 'pendingRiskAcceptances',
-        label: 'طلبات قبول مخاطر معلقة',
-        value: acceptancePending,
-        unit: 'طلب',
-        status: kriStatusMax(acceptancePending, 1, 4),
-        target: '0',
-        description: 'طلبات قبول المخاطر التي ما زالت بانتظار قرار إداري.',
-      },
-      {
-        key: 'expiringRiskAcceptances',
-        label: 'قبول مخاطر يقترب من الانتهاء',
-        value: acceptanceExpiringSoon,
-        unit: 'خطر',
-        status: kriStatusMax(acceptanceExpiringSoon, 1, 3),
-        target: '0',
-        description: 'المخاطر المقبولة التي تنتهي مدة قبولها خلال سبعة أيام.',
-      },
+      kriDefinition(
+        'outsideAppetiteRate',
+        'المخاطر خارج شهية المخاطر',
+        outsideAppetiteRate,
+        '%',
+        'نسبة المخاطر النشطة التي تجاوز خطرها المتبقي حد شهية المخاطر المعتمد للفئة.',
+      ),
+      kriDefinition(
+        'criticalRisks',
+        'المخاطر الحرجة',
+        critical,
+        'خطر',
+        'عدد المخاطر النشطة المصنفة حرجة بعد تطبيق الضوابط.',
+      ),
+      kriDefinition(
+        'overdueReviewRate',
+        'تأخر مراجعة المخاطر',
+        overdueReviewRate,
+        '%',
+        'نسبة المخاطر النشطة التي تجاوزت تاريخ المراجعة المحدد.',
+      ),
+      kriDefinition(
+        'recurringRiskRate',
+        'تكرار المخاطر',
+        recurringRiskRate,
+        '%',
+        'نسبة المخاطر النشطة التي تم تسجيل تكرار لها مرة واحدة على الأقل.',
+      ),
+      kriDefinition(
+        'riskReduction',
+        'فعالية خفض المخاطر',
+        avgRiskReductionPercent,
+        '%',
+        'متوسط الانخفاض من الخطر الكامن إلى الخطر المتبقي.',
+      ),
+      kriDefinition(
+        'preventiveFailureRate',
+        'فشل التدخلات الوقائية',
+        preventiveFailureRate,
+        '%',
+        'نسبة التدخلات الوقائية غير الفعالة من التدخلات التي تم التحقق من أثرها خلال آخر 90 يومًا.',
+      ),
+      kriDefinition(
+        'predictedBreaches',
+        'تجاوزات KPI المتوقعة',
+        earlyWarning.summary.predictedMetricBreaches,
+        'مؤشر',
+        'عدد مؤشرات الأداء المتوقع انتقالها إلى المستوى الأحمر إذا استمر الاتجاه الحالي.',
+      ),
+      kriDefinition(
+        'capaOverdue',
+        'خطط CAPA المتأخرة',
+        capaOverdue,
+        'خطة',
+        'عدد خطط التحسين المفتوحة التي تجاوزت تاريخ الاستحقاق.',
+      ),
+      kriDefinition(
+        'pendingRiskAcceptances',
+        'طلبات قبول مخاطر معلقة',
+        acceptancePending,
+        'طلب',
+        'طلبات قبول المخاطر التي ما زالت بانتظار قرار إداري.',
+      ),
+      kriDefinition(
+        'expiringRiskAcceptances',
+        'قبول مخاطر يقترب من الانتهاء',
+        acceptanceExpiringSoon,
+        'خطر',
+        'المخاطر المقبولة التي تنتهي مدة قبولها خلال سبعة أيام.',
+      ),
     ];
 
     const ownerMap = new Map();
@@ -3284,7 +3747,7 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
       const owner = ownerMap.get(ownerKey);
       owner.active += 1;
       owner.totalResidualScore += risk.residualScore;
-      if (risk.residualScore > appetiteMaxScore) owner.outsideAppetite += 1;
+      if (risk.residualScore > getRiskAppetiteLimit(riskPolicy, risk.category)) owner.outsideAppetite += 1;
       if (risk.reviewDate && new Date(risk.reviewDate).getTime() < now.getTime()) owner.overdueReview += 1;
       if (risk.inherentScore > 0) {
         owner.totalReduction += ((risk.inherentScore - risk.residualScore) / risk.inherentScore) * 100;
@@ -3299,7 +3762,7 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
       };
       category.active += 1;
       category.totalResidualScore += risk.residualScore;
-      if (risk.residualScore > appetiteMaxScore) category.outsideAppetite += 1;
+      if (risk.residualScore > getRiskAppetiteLimit(riskPolicy, risk.category)) category.outsideAppetite += 1;
       categoryMap.set(risk.category, category);
 
       statusMap.set(risk.status, (statusMap.get(risk.status) || 0) + 1);
@@ -3373,18 +3836,25 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
         risk.reviewDate && new Date(risk.reviewDate).getTime() < now.getTime()
       ),
       treatmentStrategy: risk.treatmentStrategy,
+      appetiteLimit: getRiskAppetiteLimit(riskPolicy, risk.category),
+      outsideAppetite: risk.residualScore > getRiskAppetiteLimit(riskPolicy, risk.category),
     }));
 
     res.json({
       generatedAt: now,
       appetite: {
+        policyId: riskPolicy.id,
+        versionNumber: riskPolicy.versionNumber,
+        policyName: riskPolicy.name,
+        effectiveFrom: riskPolicy.effectiveFrom,
         maxResidualScore: appetiteMaxScore,
-        level: 'medium',
+        categoryLimits: riskPolicy.categoryAppetite,
+        level: riskMatrixLevelFromScore(appetiteMaxScore),
         status: riskAppetiteStatus,
         withinCount: Math.max(0, activeRisks.length - outsideAppetite),
         outsideCount: outsideAppetite,
         outsideRate: outsideAppetiteRate,
-        statement: 'الحد المقبول للخطر المتبقي هو 9 من 25؛ وما فوق ذلك يتطلب معالجة أو قبولًا إشرافيًا موثقًا.',
+        statement: riskPolicy.statement,
       },
       summary: {
         active: activeRisks.length,
@@ -3581,7 +4051,8 @@ router.post('/directives/risks', async (req, res, next) => {
       }
     }
 
-    res.status(201).json(serializeRisk(risk));
+    const riskPolicy = await getEffectiveRiskPolicy();
+    res.status(201).json(serializeRisk(risk, riskPolicy));
   } catch (error) {
     next(error);
   }
@@ -3739,7 +4210,8 @@ router.patch('/directives/risks/:id', async (req, res, next) => {
       }
     }
 
-    res.json(serializeRisk(updated));
+    const riskPolicy = await getEffectiveRiskPolicy();
+    res.json(serializeRisk(updated, riskPolicy));
   } catch (error) {
     next(error);
   }
