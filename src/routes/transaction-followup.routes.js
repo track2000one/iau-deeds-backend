@@ -247,12 +247,18 @@ const evaluateKpiMetrics = (metrics, targets) => ({
   ),
 });
 
-const calculateCurrentKpiSnapshot = async (periodDays, assigneeUserId = null) => {
-  const start = new Date(Date.now() - periodDays * 86400000);
+const calculateKpiSnapshotRange = async (start, end = null, assigneeUserId = null) => {
   const directives = await prisma.transactionFollowUpDirective.findMany({
     where: {
       ...(assigneeUserId ? { assigneeUserId } : {}),
-      reviews: { some: { reviewedAt: { gte: start } } },
+      reviews: {
+        some: {
+          reviewedAt: {
+            gte: start,
+            ...(end ? { lt: end } : {}),
+          },
+        },
+      },
     },
     select: {
       id: true,
@@ -269,6 +275,11 @@ const calculateCurrentKpiSnapshot = async (periodDays, assigneeUserId = null) =>
     },
   });
 
+  const inRange = (value) => {
+    const time = new Date(value).getTime();
+    return time >= start.getTime() && (!end || time < end.getTime());
+  };
+
   let reviewedDirectives = 0;
   let firstCandidates = 0;
   let firstApproved = 0;
@@ -279,9 +290,7 @@ const calculateCurrentKpiSnapshot = async (periodDays, assigneeUserId = null) =>
   const approvalHours = [];
 
   for (const directive of directives) {
-    const periodReviews = directive.reviews.filter(
-      (review) => new Date(review.reviewedAt).getTime() >= start.getTime(),
-    );
+    const periodReviews = directive.reviews.filter((review) => inRange(review.reviewedAt));
     if (!periodReviews.length) continue;
     reviewedDirectives += 1;
 
@@ -292,7 +301,7 @@ const calculateCurrentKpiSnapshot = async (periodDays, assigneeUserId = null) =>
     }
 
     const firstReview = directive.reviews[0];
-    if (firstReview && new Date(firstReview.reviewedAt).getTime() >= start.getTime()) {
+    if (firstReview && inRange(firstReview.reviewedAt)) {
       firstCandidates += 1;
       if (firstReview.decision === 'approved') firstApproved += 1;
       if (firstReview.submittedAt) {
@@ -333,6 +342,309 @@ const calculateCurrentKpiSnapshot = async (periodDays, assigneeUserId = null) =>
     avgExecutionHours: rounded(average(executionHours)),
     avgApprovalHours: rounded(average(approvalHours)),
     onTimeRate: completedWithDue ? rounded((completedOnTime / completedWithDue) * 100) : null,
+  };
+};
+
+const calculateCurrentKpiSnapshot = async (periodDays, assigneeUserId = null) => {
+  const start = new Date(Date.now() - periodDays * 86400000);
+  return calculateKpiSnapshotRange(start, null, assigneeUserId);
+};
+
+const KPI_RISK_CONFIG = {
+  firstPassRate: { targetField: 'firstPassRateMin', direction: 'min' },
+  onTimeRate: { targetField: 'onTimeRateMin', direction: 'min' },
+  reworkRate: { targetField: 'reworkRateMax', direction: 'max' },
+  avgExecutionHours: { targetField: 'avgExecutionHoursMax', direction: 'max' },
+  avgApprovalHours: { targetField: 'avgApprovalHoursMax', direction: 'max' },
+};
+
+const riskLevelFromScore = (score) => {
+  if (score >= 85) return 'critical';
+  if (score >= 65) return 'high';
+  if (score >= 40) return 'medium';
+  return 'low';
+};
+
+const preventiveRecommendation = (metricKey) => {
+  const recommendations = {
+    firstPassRate: 'مراجعة وضوح التكليف ومتطلبات الإثبات قبل بدء التنفيذ، مع قائمة تحقق قصيرة قبل الرفع.',
+    onTimeRate: 'تقليل الأعمال القريبة من الاستحقاق عبر متابعة منتصف المدة وتوزيع الحمل مبكرًا.',
+    reworkRate: 'تحليل أسباب الإعادة المتكررة وتوحيد نموذج الإنجاز ومتطلبات القبول قبل الرفع.',
+    avgExecutionHours: 'تفكيك التوجيه إلى خطوات قصيرة وتحديد نقاط متابعة وسيطة قبل تاريخ الاستحقاق.',
+    avgApprovalHours: 'تخصيص نافذة مراجعة يومية للتوجيهات المرفوعة وترتيبها حسب الاستحقاق والأولوية.',
+  };
+  return recommendations[metricKey] || 'مراجعة أسباب التراجع واتخاذ إجراء وقائي قبل تجاوز المستهدف.';
+};
+
+const projectMetricRisk = (metricKey, currentValue, previousValue, targets, reviewedDirectives = 0) => {
+  const config = KPI_RISK_CONFIG[metricKey];
+  const target = Number(targets[config.targetField]);
+  const direction = config.direction;
+  const currentEvaluation = evaluateMetric(
+    currentValue,
+    target,
+    direction,
+    targets.warningTolerancePercent,
+  );
+
+  if (currentValue == null) {
+    return {
+      metricKey,
+      metricLabel: KPI_METRIC_LABELS[metricKey],
+      currentValue: null,
+      previousValue: previousValue ?? null,
+      delta: null,
+      projectedValue: null,
+      target,
+      direction,
+      currentStatus: 'neutral',
+      projectedStatus: 'neutral',
+      riskScore: 0,
+      riskLevel: 'low',
+      confidence: 'low',
+      reasons: ['لا توجد بيانات كافية لاحتساب اتجاه موثوق.'],
+      recommendation: preventiveRecommendation(metricKey),
+    };
+  }
+
+  const delta = previousValue == null ? null : Number((currentValue - previousValue).toFixed(1));
+  let projectedValue = delta == null ? currentValue : currentValue + delta;
+  if (metricKey.endsWith('Rate')) projectedValue = Math.max(0, Math.min(100, projectedValue));
+  else projectedValue = Math.max(0, projectedValue);
+  projectedValue = Number(projectedValue.toFixed(1));
+
+  const projectedEvaluation = evaluateMetric(
+    projectedValue,
+    target,
+    direction,
+    targets.warningTolerancePercent,
+  );
+  const deteriorating = delta != null && (direction === 'min' ? delta < 0 : delta > 0);
+  const targetMarginPercent = target
+    ? (
+        direction === 'min'
+          ? ((currentValue - target) / Math.abs(target)) * 100
+          : ((target - currentValue) / Math.abs(target)) * 100
+      )
+    : null;
+  const nearTarget = currentEvaluation.status === 'green' &&
+    targetMarginPercent != null &&
+    targetMarginPercent <= 5;
+
+  let riskScore = 15;
+  if (currentEvaluation.status === 'red') riskScore = 100;
+  else if (projectedEvaluation.status === 'red') riskScore = 90;
+  else if (currentEvaluation.status === 'yellow') riskScore = 78;
+  else if (projectedEvaluation.status === 'yellow') riskScore = 68;
+  else if (deteriorating) riskScore = 48;
+  if (nearTarget) riskScore = Math.max(riskScore, 42);
+  if (deteriorating && projectedEvaluation.status !== 'green') riskScore = Math.min(100, riskScore + 5);
+
+  const reasons = [];
+  if (currentEvaluation.status === 'red') reasons.push('المؤشر متجاوز للمستهدف حاليًا.');
+  else if (currentEvaluation.status === 'yellow') reasons.push('المؤشر دخل نطاق التحذير قبل المستوى الأحمر.');
+  if (projectedEvaluation.status === 'red' && currentEvaluation.status !== 'red') {
+    reasons.push('استمرار الاتجاه الحالي يتوقع تجاوز المستهدف في فترة القياس القادمة.');
+  } else if (projectedEvaluation.status === 'yellow' && currentEvaluation.status === 'green') {
+    reasons.push('استمرار الاتجاه الحالي يتوقع دخول المؤشر نطاق التحذير.');
+  }
+  if (deteriorating) reasons.push('الاتجاه الحالي أسوأ من الفترة السابقة.');
+  if (nearTarget) reasons.push('الهامش الحالي عن المستهدف محدود.');
+  if (!reasons.length) reasons.push('المؤشر مستقر حاليًا ولا توجد إشارة مبكرة قوية.');
+
+  const confidence =
+    reviewedDirectives >= 12 ? 'high' :
+      reviewedDirectives >= 6 ? 'medium' : 'low';
+
+  return {
+    metricKey,
+    metricLabel: KPI_METRIC_LABELS[metricKey],
+    currentValue,
+    previousValue: previousValue ?? null,
+    delta,
+    projectedValue,
+    target,
+    direction,
+    currentStatus: currentEvaluation.status,
+    projectedStatus: projectedEvaluation.status,
+    riskScore,
+    riskLevel: riskLevelFromScore(riskScore),
+    confidence,
+    reasons,
+    recommendation: preventiveRecommendation(metricKey),
+  };
+};
+
+const buildEarlyWarningSnapshot = async (periodDays = 30, suppliedTargets = null) => {
+  const safePeriodDays = Math.min(90, Math.max(14, Number(periodDays) || 30));
+  const now = new Date();
+  const currentStart = new Date(now.getTime() - safePeriodDays * 86400000);
+  const previousStart = new Date(now.getTime() - safePeriodDays * 2 * 86400000);
+  const targets = suppliedTargets || await getKpiTargets();
+
+  const [current, previous, users, openDirectives] = await Promise.all([
+    calculateKpiSnapshotRange(currentStart, now),
+    calculateKpiSnapshotRange(previousStart, currentStart),
+    prisma.appUser.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { role: 'admin' },
+          { permissions: { some: { module: 'transaction_follow_up', canView: true } } },
+        ],
+      },
+      select: { id: true, username: true },
+      orderBy: { username: 'asc' },
+    }),
+    prisma.transactionFollowUpDirective.findMany({
+      where: { status: { in: ['pending', 'in_progress', 'returned', 'awaiting_approval'] } },
+      select: {
+        assigneeUserId: true,
+        assigneeName: true,
+        priority: true,
+        status: true,
+        dueDate: true,
+      },
+    }),
+  ]);
+
+  const metrics = Object.keys(KPI_RISK_CONFIG)
+    .map((metricKey) =>
+      projectMetricRisk(
+        metricKey,
+        current[metricKey],
+        previous[metricKey],
+        targets,
+        current.reviewedDirectives,
+      )
+    )
+    .sort((a, b) => b.riskScore - a.riskScore);
+
+  const openByUser = new Map();
+  for (const row of openDirectives) {
+    const currentItem = openByUser.get(row.assigneeUserId) || {
+      open: 0,
+      overdue: 0,
+      urgent: 0,
+      returned: 0,
+      name: row.assigneeName || 'مستخدم',
+    };
+    currentItem.open += 1;
+    if (row.priority === 'urgent') currentItem.urgent += 1;
+    if (row.status === 'returned') currentItem.returned += 1;
+    if (
+      row.dueDate &&
+      dayNumberFromKey(saudiDayKey(new Date(row.dueDate))) <
+        dayNumberFromKey(saudiDayKey(now))
+    ) {
+      currentItem.overdue += 1;
+    }
+    openByUser.set(row.assigneeUserId, currentItem);
+  }
+
+  const employeeRisks = [];
+  for (const user of users) {
+    const [employeeCurrent, employeePrevious] = await Promise.all([
+      calculateKpiSnapshotRange(currentStart, now, user.id),
+      calculateKpiSnapshotRange(previousStart, currentStart, user.id),
+    ]);
+    const operational = openByUser.get(user.id) || {
+      open: 0,
+      overdue: 0,
+      urgent: 0,
+      returned: 0,
+      name: user.username,
+    };
+    const employeeMetrics = Object.keys(KPI_RISK_CONFIG)
+      .map((metricKey) =>
+        projectMetricRisk(
+          metricKey,
+          employeeCurrent[metricKey],
+          employeePrevious[metricKey],
+          targets,
+          employeeCurrent.reviewedDirectives,
+        )
+      )
+      .sort((a, b) => b.riskScore - a.riskScore);
+
+    const metricRisk = employeeMetrics[0]?.riskScore || 0;
+    const operationalRisk = Math.min(
+      95,
+      operational.overdue * 18 +
+        operational.urgent * 10 +
+        operational.returned * 12 +
+        Math.max(0, operational.open - 5) * 4,
+    );
+    const riskScore = Math.max(metricRisk, operationalRisk);
+    if (
+      !employeeCurrent.reviewedDirectives &&
+      !employeePrevious.reviewedDirectives &&
+      !operational.open
+    ) {
+      continue;
+    }
+
+    const reasons = [];
+    const topMetric = employeeMetrics[0];
+    if (topMetric?.riskScore >= 40) {
+      reasons.push(`${topMetric.metricLabel}: ${topMetric.reasons[0]}`);
+    }
+    if (operational.overdue) reasons.push(`${operational.overdue} توجيه متأخر مفتوح.`);
+    if (operational.urgent) reasons.push(`${operational.urgent} توجيه عاجل مفتوح.`);
+    if (operational.returned) reasons.push(`${operational.returned} توجيه معاد للاستكمال.`);
+    if (!reasons.length) reasons.push('المؤشرات التشغيلية ضمن مستوى مستقر حاليًا.');
+
+    employeeRisks.push({
+      userId: user.id,
+      username: user.username,
+      riskScore,
+      riskLevel: riskLevelFromScore(riskScore),
+      confidence:
+        employeeCurrent.reviewedDirectives >= 12 ? 'high' :
+          employeeCurrent.reviewedDirectives >= 6 ? 'medium' : 'low',
+      openDirectives: operational.open,
+      overdueOpen: operational.overdue,
+      urgentOpen: operational.urgent,
+      returnedOpen: operational.returned,
+      reviewedDirectives: employeeCurrent.reviewedDirectives,
+      topMetric: topMetric || null,
+      predictedBreaches: employeeMetrics.filter(
+        (metric) => metric.currentStatus !== 'red' && metric.projectedStatus === 'red'
+      ).length,
+      reasons,
+      recommendation: topMetric?.recommendation || 'الحفاظ على وتيرة المتابعة الحالية.',
+    });
+  }
+
+  employeeRisks.sort((a, b) =>
+    (b.riskScore - a.riskScore) ||
+    (b.overdueOpen - a.overdueOpen) ||
+    (b.openDirectives - a.openDirectives)
+  );
+
+  const predictedMetricBreaches = metrics.filter(
+    (metric) => metric.currentStatus !== 'red' && metric.projectedStatus === 'red'
+  ).length;
+  const atRiskMetrics = metrics.filter((metric) => ['critical', 'high'].includes(metric.riskLevel)).length;
+  const atRiskEmployees = employeeRisks.filter(
+    (employee) => ['critical', 'high'].includes(employee.riskLevel)
+  ).length;
+
+  return {
+    generatedAt: now,
+    methodology: 'rule_based_linear_trend',
+    periodDays: safePeriodDays,
+    targets,
+    summary: {
+      atRiskMetrics,
+      predictedMetricBreaches,
+      atRiskEmployees,
+      criticalEmployees: employeeRisks.filter((item) => item.riskLevel === 'critical').length,
+      highRiskEmployees: employeeRisks.filter((item) => item.riskLevel === 'high').length,
+      mediumRiskEmployees: employeeRisks.filter((item) => item.riskLevel === 'medium').length,
+    },
+    metrics,
+    employees: employeeRisks.slice(0, 20),
   };
 };
 
