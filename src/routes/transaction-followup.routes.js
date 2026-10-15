@@ -88,6 +88,17 @@ const directiveEvidenceSchema = z.object({
   notes: nullableText(1000),
 });
 
+const kpiTargetSchema = z.object({
+  firstPassRateMin: z.coerce.number().min(0).max(100),
+  onTimeRateMin: z.coerce.number().min(0).max(100),
+  reworkRateMax: z.coerce.number().min(0).max(100),
+  avgExecutionHoursMax: z.coerce.number().min(1).max(8760),
+  avgApprovalHoursMax: z.coerce.number().min(1).max(8760),
+  warningTolerancePercent: z.coerce.number().min(0).max(100),
+  alertPeriodDays: z.coerce.number().int().min(7).max(365),
+  alertsEnabled: z.boolean(),
+});
+
 const reportArchiveSchema = z.object({
   reportType: z.enum(['weekly', 'monthly', 'custom']).default('custom'),
   from: z.string().trim().min(1),
@@ -126,6 +137,76 @@ const modulePermission = (req) =>
 
 const isSupervisor = (req) =>
   req.authUser?.role === 'admin' || Boolean(modulePermission(req)?.canDelete);
+
+const DEFAULT_KPI_TARGETS = {
+  scope: 'global',
+  firstPassRateMin: 90,
+  onTimeRateMin: 95,
+  reworkRateMax: 10,
+  avgExecutionHoursMax: 72,
+  avgApprovalHoursMax: 24,
+  warningTolerancePercent: 10,
+  alertPeriodDays: 30,
+  alertsEnabled: true,
+};
+
+const getKpiTargets = async () => {
+  const stored = await prisma.transactionFollowUpKpiTarget.findUnique({
+    where: { scope: 'global' },
+  });
+  return stored || DEFAULT_KPI_TARGETS;
+};
+
+const evaluateMetric = (value, target, direction, tolerancePercent) => {
+  if (value == null || Number.isNaN(Number(value))) {
+    return { status: 'neutral', met: null, value, target, direction };
+  }
+
+  if (direction === 'min') {
+    if (value >= target) return { status: 'green', met: true, value, target, direction };
+    const yellowFloor = Math.max(0, target - tolerancePercent);
+    if (value >= yellowFloor) return { status: 'yellow', met: false, value, target, direction };
+    return { status: 'red', met: false, value, target, direction };
+  }
+
+  if (value <= target) return { status: 'green', met: true, value, target, direction };
+  const yellowCeiling = target * (1 + tolerancePercent / 100);
+  if (value <= yellowCeiling) return { status: 'yellow', met: false, value, target, direction };
+  return { status: 'red', met: false, value, target, direction };
+};
+
+const evaluateKpiMetrics = (metrics, targets) => ({
+  firstPassRate: evaluateMetric(
+    metrics.firstPassRate,
+    targets.firstPassRateMin,
+    'min',
+    targets.warningTolerancePercent,
+  ),
+  onTimeRate: evaluateMetric(
+    metrics.onTimeRate,
+    targets.onTimeRateMin,
+    'min',
+    targets.warningTolerancePercent,
+  ),
+  reworkRate: evaluateMetric(
+    metrics.reworkRate,
+    targets.reworkRateMax,
+    'max',
+    targets.warningTolerancePercent,
+  ),
+  avgExecutionHours: evaluateMetric(
+    metrics.avgExecutionHours,
+    targets.avgExecutionHoursMax,
+    'max',
+    targets.warningTolerancePercent,
+  ),
+  avgApprovalHours: evaluateMetric(
+    metrics.avgApprovalHours,
+    targets.avgApprovalHoursMax,
+    'max',
+    targets.warningTolerancePercent,
+  ),
+});
 
 const canActOnRecord = (req, record) =>
   isSupervisor(req) ||
