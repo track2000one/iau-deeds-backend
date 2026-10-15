@@ -6204,6 +6204,17 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
         message: 'استخدم نموذج «بانتظار جهة أخرى» لتسجيل الجهة والمرجع وتاريخ المتابعة القادمة',
       });
     }
+    if (input.action === 'resume') {
+      const activeExternalWait = await prisma.transactionFollowUpExternalWait.findFirst({
+        where: { transactionId: current.id, status: 'active' },
+        select: { id: true },
+      });
+      if (activeExternalWait) {
+        return res.status(409).json({
+          message: 'لا يمكن استئناف المعاملة قبل تسجيل ورود الرد أو إلغاء انتظار الجهة',
+        });
+      }
+    }
     if (current.status === 'completed' && !supervisorOnly.includes(input.action)) {
       return res.status(409).json({ message: 'المعاملة بانتظار المراجعة الإشرافية' });
     }
