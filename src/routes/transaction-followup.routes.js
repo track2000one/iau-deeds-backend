@@ -1342,7 +1342,7 @@ const alertCopy = (record, indicator, escalated = false) => {
 };
 
 export const syncTransactionFollowUpAlerts = async () => {
-  const [rows, directives, improvementPlans, preventiveActions, risks, riskAcceptances] = await Promise.all([
+  const [rows, directives, improvementPlans, preventiveActions, risks, riskAcceptances, externalWaits] = await Promise.all([
     prisma.transactionFollowUp.findMany({
       where: { status: { in: OPEN_STATUSES } },
       select: {
@@ -1433,6 +1433,21 @@ export const syncTransactionFollowUpAlerts = async () => {
         },
       },
     }),
+    prisma.transactionFollowUpExternalWait.findMany({
+      where: { status: 'active' },
+      include: {
+        transaction: {
+          select: {
+            id: true,
+            transactionNumber: true,
+            subject: true,
+            currentAssigneeUserId: true,
+            currentAssigneeName: true,
+            status: true,
+          },
+        },
+      },
+    }),
   ]);
 
   const supervisorIds = await getFollowUpSupervisorIds();
@@ -1476,6 +1491,40 @@ export const syncTransactionFollowUpAlerts = async () => {
 
   const todayKey = saudiDayKey();
   const todayNumber = dayNumberFromKey(todayKey);
+
+  for (const wait of externalWaits) {
+    const transaction = wait.transaction;
+    if (!transaction) continue;
+
+    const followUpNumber = dayNumberFromKey(saudiDayKey(new Date(wait.nextFollowUpDate)));
+    const daysOverdue = todayNumber - followUpNumber;
+    if (daysOverdue < 0) continue;
+
+    const waitingDays = Math.max(
+      0,
+      todayNumber - dayNumberFromKey(saudiDayKey(new Date(wait.sentAt)))
+    );
+    const recipients = new Set([
+      transaction.currentAssigneeUserId,
+      ...(daysOverdue >= 2 ? supervisorIds : []),
+    ].filter(Boolean));
+
+    for (const userId of recipients) {
+      const overdue = daysOverdue > 0;
+      await createFollowUpAlert({
+        alertKey: `transaction:${transaction.id}:external_follow_up:${wait.id}:${todayKey}:${userId}`,
+        transactionId: transaction.id,
+        userId,
+        kind: overdue ? 'external_follow_up_overdue' : 'external_follow_up_due_today',
+        severity: overdue ? 'danger' : 'warning',
+        title: overdue ? 'متابعة جهة خارجية متأخرة' : 'موعد متابعة جهة خارجية اليوم',
+        message: overdue
+          ? `${transaction.transactionNumber} — بانتظار رد من ${wait.externalEntity} منذ ${waitingDays} يوم، والمتابعة متأخرة ${daysOverdue} يوم.`
+          : `${transaction.transactionNumber} — حان موعد متابعة ${wait.externalEntity}. مدة الانتظار الحالية ${waitingDays} يوم.`,
+      });
+      alerts += 1;
+    }
+  }
 
   for (const acceptance of riskAcceptances) {
     const risk = acceptance.risk;
@@ -1608,7 +1657,7 @@ export const syncTransactionFollowUpAlerts = async () => {
           transactionId: null,
           userId,
           kind: 'risk_acceptance_expired',
-          severity: risk.residualScore > appetiteLimit ? 'danger' : 'warning',
+          severity: risk.residualScore > 9 ? 'danger' : 'warning',
           title: 'انتهت مدة قبول خطر',
           message: `${risk.riskNumber} — انتهت مدة قبول الخطر وأعيد إلى المراقبة لإعادة التقييم.`,
         });
@@ -1860,7 +1909,8 @@ export const syncTransactionFollowUpAlerts = async () => {
       improvementPlans.length +
       preventiveActions.length +
       risks.length +
-      riskAcceptances.length,
+      riskAcceptances.length +
+      externalWaits.length,
     alerts,
   };
 };
