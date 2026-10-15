@@ -5424,6 +5424,84 @@ router.get('/external-waits', async (req, res, next) => {
   }
 });
 
+router.post('/:id/external-wait', async (req, res, next) => {
+  try {
+    const input = externalWaitCreateSchema.parse(req.body);
+    const current = await prisma.transactionFollowUp.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (!canActOnRecord(req, current)) return denyRecordAccess(res);
+    if (FINAL_STATUSES.includes(current.status)) {
+      return res.status(409).json({ message: 'لا يمكن وضع معاملة منجزة أو مغلقة في انتظار جهة أخرى' });
+    }
+
+    const existing = await prisma.transactionFollowUpExternalWait.findFirst({
+      where: { transactionId: current.id, status: 'active' },
+    });
+    if (existing) {
+      return res.status(409).json({ message: 'المعاملة مسجلة بالفعل بانتظار رد من جهة أخرى' });
+    }
+
+    const sentAt = toDate(input.sentAt, 'تاريخ إرسال الطلب');
+    const nextFollowUpDate = toDate(input.nextFollowUpDate, 'تاريخ المتابعة القادمة');
+    const todayNumber = dayNumberFromKey(saudiDayKey());
+    const sentNumber = dayNumberFromKey(saudiDayKey(sentAt));
+    const followUpNumber = dayNumberFromKey(saudiDayKey(nextFollowUpDate));
+
+    if (sentNumber > todayNumber) {
+      return res.status(400).json({ message: 'تاريخ إرسال الطلب لا يمكن أن يكون في المستقبل' });
+    }
+    if (followUpNumber <= todayNumber) {
+      return res.status(400).json({ message: 'تاريخ المتابعة القادمة يجب أن يكون بعد تاريخ اليوم' });
+    }
+
+    const changedBy = actor(req);
+    const changedAt = new Date();
+    const wait = await prisma.$transaction(async (tx) => {
+      const created = await tx.transactionFollowUpExternalWait.create({
+        data: {
+          transactionId: current.id,
+          externalEntity: input.externalEntity,
+          outboundReferenceNumber: input.outboundReferenceNumber || null,
+          sentAt,
+          nextFollowUpDate,
+          notes: input.notes || null,
+          createdById: changedBy.id,
+          createdByName: changedBy.name,
+        },
+      });
+      await tx.transactionFollowUp.update({
+        where: { id: current.id },
+        data: {
+          status: 'waiting_response',
+          lastActionAt: changedAt,
+          lastActionByUserId: changedBy.id,
+          lastActionByName: changedBy.name,
+        },
+      });
+      await tx.transactionFollowUpEvent.create({
+        data: {
+          transactionId: current.id,
+          eventType: 'external_wait_started',
+          fromStatus: current.status,
+          toStatus: 'waiting_response',
+          actionText: `بانتظار رد من ${input.externalEntity} — المتابعة القادمة ${saudiDayKey(nextFollowUpDate)}`,
+          note: [
+            input.outboundReferenceNumber ? `المرجع: ${input.outboundReferenceNumber}` : null,
+            input.notes || null,
+          ].filter(Boolean).join(' — ') || null,
+          createdById: changedBy.id,
+          createdByName: changedBy.name,
+        },
+      });
+      return created;
+    });
+
+    res.status(201).json(wait);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/extension-requests', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
