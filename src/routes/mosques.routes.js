@@ -1423,7 +1423,54 @@ router.get('/buildings', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
     if (!['head', 'supervisor'].includes(context.role)) return res.json([]);
+
+    const pendingOnly = String(req.query.pending || '').toLowerCase() === 'true';
+    if (pendingOnly) {
+      const requestedPage = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+      const pageSize = Math.min(60, Math.max(6, Number.parseInt(String(req.query.pageSize || '24'), 10) || 24));
+      const search = String(req.query.search || '').trim();
+      const where = {
+        buildingNumber: { startsWith: 'IMP-' },
+        ...(search ? {
+          OR: [
+            { buildingNumber: { contains: search, mode: 'insensitive' } },
+            { name: { contains: search, mode: 'insensitive' } },
+            { campusLocation: { contains: search, mode: 'insensitive' } },
+            { city: { contains: search, mode: 'insensitive' } },
+            { district: { contains: search, mode: 'insensitive' } },
+            { notes: { contains: search, mode: 'insensitive' } },
+          ],
+        } : {}),
+      };
+
+      const total = await prisma.mosqueBuilding.count({ where });
+      const totalPages = total ? Math.ceil(total / pageSize) : 0;
+      const page = totalPages ? Math.min(requestedPage, totalPages) : 1;
+      const items = await prisma.mosqueBuilding.findMany({
+        where,
+        select: {
+          id: true,
+          buildingNumber: true,
+          name: true,
+          campusLocation: true,
+          city: true,
+          district: true,
+          notes: true,
+          coverageStatus: true,
+          creationFeasibility: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      });
+
+      return res.json({ items, total, page, pageSize, totalPages });
+    }
+
     const rows = await prisma.mosqueBuilding.findMany({
+      where: { NOT: { buildingNumber: { startsWith: 'IMP-' } } },
       include: {
         deed: {
           select: {
