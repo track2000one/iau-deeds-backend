@@ -1695,6 +1695,7 @@ model TransactionFollowUpDirective {
   updatedAt             DateTime @updatedAt
 
   transaction           TransactionFollowUp @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  reviews               TransactionFollowUpDirectiveReview[]
 
   @@index([transactionId])
   @@index([assigneeUserId])
@@ -1702,6 +1703,29 @@ model TransactionFollowUpDirective {
   @@index([priority])
   @@index([dueDate])
   @@index([issuedAt])
+}
+
+model TransactionFollowUpDirectiveReview {
+  id                    String   @id @default(cuid())
+  directiveId           String
+  decision              String
+  previousStatus        String
+  nextStatus            String
+  reviewNote            String?
+  completionResponse    String?
+  completionNote        String?
+  submittedAt           DateTime?
+  evidenceSnapshot      Json?
+  reviewedById          String?
+  reviewedByName        String?
+  reviewedAt            DateTime @default(now())
+
+  directive             TransactionFollowUpDirective @relation(fields: [directiveId], references: [id], onDelete: Cascade)
+
+  @@index([directiveId])
+  @@index([decision])
+  @@index([reviewedById])
+  @@index([reviewedAt])
 }
 
 model TransactionFollowUpEvent {
