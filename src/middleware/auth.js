@@ -100,6 +100,15 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canView';
   }
 
+  // Reviewing directive completion is a supervisory action.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'PATCH' &&
+    /\/directives\/[^/]+\/review\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canDelete';
+  }
+
   // Follow-up report archive creation is a reporting/print capability.
   if (
     moduleName === 'transaction_follow_up' &&
