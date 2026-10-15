@@ -6149,6 +6149,11 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
     if (current.status === 'closed') {
       return res.status(409).json({ message: 'المعاملة مغلقة ولا تقبل إجراءً سريعًا جديدًا' });
     }
+    if (input.action === 'waiting_external') {
+      return res.status(409).json({
+        message: 'استخدم نموذج «بانتظار جهة أخرى» لتسجيل الجهة والمرجع وتاريخ المتابعة القادمة',
+      });
+    }
     if (current.status === 'completed' && !supervisorOnly.includes(input.action)) {
       return res.status(409).json({ message: 'المعاملة بانتظار المراجعة الإشرافية' });
     }
@@ -7719,6 +7724,9 @@ router.get('/:id', async (req, res, next) => {
           orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
         },
         extensionRequests: {
+          orderBy: { createdAt: 'desc' },
+        },
+        externalWaits: {
           orderBy: { createdAt: 'desc' },
         },
       },
