@@ -1041,6 +1041,311 @@ router.get('/directives/approval-history', async (req, res, next) => {
   }
 });
 
+router.get('/directives/kpi', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'مؤشرات أداء التوجيهات متاحة للمستخدم الإشرافي فقط' });
+    }
+
+    const periodDaysRaw = String(req.query.periodDays || '90').trim();
+    const periodDays = periodDaysRaw === 'all'
+      ? null
+      : Math.min(3650, Math.max(7, Number.parseInt(periodDaysRaw, 10) || 90));
+    const assigneeUserId = String(req.query.assigneeUserId || '').trim();
+    const now = new Date();
+    const currentStart = periodDays ? new Date(now.getTime() - periodDays * 86400000) : null;
+    const previousStart = periodDays ? new Date(now.getTime() - periodDays * 2 * 86400000) : null;
+    const previousEnd = currentStart;
+
+    const monthStarts = [];
+    const monthCursor = new Date(now);
+    monthCursor.setHours(0, 0, 0, 0);
+    monthCursor.setDate(1);
+    for (let index = 5; index >= 0; index -= 1) {
+      monthStarts.push(new Date(monthCursor.getFullYear(), monthCursor.getMonth() - index, 1));
+    }
+    const trendStart = monthStarts[0];
+    const earliestReviewStart = previousStart && previousStart < trendStart ? previousStart : trendStart;
+
+    const directiveWhere = {
+      ...(assigneeUserId ? { assigneeUserId } : {}),
+      reviews: periodDays
+        ? { some: { reviewedAt: { gte: earliestReviewStart } } }
+        : { some: {} },
+    };
+
+    const [directives, openRows, assigneeUsers] = await Promise.all([
+      prisma.transactionFollowUpDirective.findMany({
+        where: directiveWhere,
+        select: {
+          id: true,
+          directiveType: true,
+          title: true,
+          assigneeUserId: true,
+          assigneeName: true,
+          priority: true,
+          status: true,
+          issuedAt: true,
+          startedAt: true,
+          dueDate: true,
+          completedAt: true,
+          reviews: {
+            select: {
+              id: true,
+              decision: true,
+              submittedAt: true,
+              reviewedAt: true,
+            },
+            orderBy: { reviewedAt: 'asc' },
+          },
+        },
+      }),
+      prisma.transactionFollowUpDirective.findMany({
+        where: {
+          ...(assigneeUserId ? { assigneeUserId } : {}),
+          status: { in: ['pending', 'in_progress', 'returned'] },
+          dueDate: { not: null },
+        },
+        select: {
+          id: true,
+          assigneeUserId: true,
+          assigneeName: true,
+          status: true,
+          priority: true,
+          dueDate: true,
+        },
+      }),
+      prisma.appUser.findMany({
+        where: {
+          isActive: true,
+          OR: [
+            { role: 'admin' },
+            { permissions: { some: { module: 'transaction_follow_up', canView: true } } },
+          ],
+        },
+        select: { id: true, username: true },
+        orderBy: { username: 'asc' },
+      }),
+    ]);
+
+    const round = (value, digits = 1) =>
+      value == null ? null : Number(value.toFixed(digits));
+    const avg = (values) =>
+      values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    const inRange = (date, start, end) => {
+      const time = new Date(date).getTime();
+      return (!start || time >= start.getTime()) && (!end || time < end.getTime());
+    };
+    const isSubmittedOnTime = (submittedAt, dueDate) => {
+      if (!submittedAt || !dueDate) return null;
+      return dayNumberFromKey(saudiDayKey(new Date(submittedAt))) <=
+        dayNumberFromKey(saudiDayKey(new Date(dueDate)));
+    };
+
+    const currentOverdueByEmployee = new Map();
+    const currentOpenByEmployee = new Map();
+    const currentUrgentOpenByEmployee = new Map();
+    let currentOverdue = 0;
+    let currentOpen = 0;
+    let currentUrgentOpen = 0;
+
+    for (const row of openRows) {
+      currentOpen += 1;
+      currentOpenByEmployee.set(
+        row.assigneeUserId,
+        (currentOpenByEmployee.get(row.assigneeUserId) || 0) + 1,
+      );
+      if (row.priority === 'urgent') {
+        currentUrgentOpen += 1;
+        currentUrgentOpenByEmployee.set(
+          row.assigneeUserId,
+          (currentUrgentOpenByEmployee.get(row.assigneeUserId) || 0) + 1,
+        );
+      }
+      if (
+        row.dueDate &&
+        dayNumberFromKey(saudiDayKey(new Date(row.dueDate))) <
+          dayNumberFromKey(saudiDayKey(now))
+      ) {
+        currentOverdue += 1;
+        currentOverdueByEmployee.set(
+          row.assigneeUserId,
+          (currentOverdueByEmployee.get(row.assigneeUserId) || 0) + 1,
+        );
+      }
+    }
+
+    const summarize = (start, end, employeeId = null) => {
+      const relevant = employeeId
+        ? directives.filter((directive) => directive.assigneeUserId === employeeId)
+        : directives;
+
+      let reviewCount = 0;
+      let approvedReviews = 0;
+      let returnedReviews = 0;
+      let modificationReviews = 0;
+      let firstReviewCandidates = 0;
+      let firstPassApproved = 0;
+      let reviewedDirectiveCount = 0;
+      let reworkDirectiveCount = 0;
+      let approvedDirectiveCount = 0;
+      let completedOnTime = 0;
+      let completedWithDue = 0;
+      const executionHours = [];
+      const approvalHours = [];
+      const reviewedDirectiveIds = new Set();
+
+      for (const directive of relevant) {
+        const periodReviews = directive.reviews.filter((review) => inRange(review.reviewedAt, start, end));
+        if (!periodReviews.length) continue;
+
+        reviewedDirectiveIds.add(directive.id);
+        reviewedDirectiveCount += 1;
+        let hasRework = false;
+        let hasApproval = false;
+
+        for (const review of periodReviews) {
+          reviewCount += 1;
+          if (review.decision === 'approved') {
+            approvedReviews += 1;
+            hasApproval = true;
+            if (directive.dueDate && review.submittedAt) {
+              completedWithDue += 1;
+              if (isSubmittedOnTime(review.submittedAt, directive.dueDate)) completedOnTime += 1;
+            }
+          } else if (review.decision === 'return_for_completion') {
+            returnedReviews += 1;
+            hasRework = true;
+          } else if (review.decision === 'request_modification') {
+            modificationReviews += 1;
+            hasRework = true;
+          }
+
+          if (review.submittedAt) {
+            approvalHours.push(Math.max(
+              0,
+              (new Date(review.reviewedAt).getTime() - new Date(review.submittedAt).getTime()) / 3600000,
+            ));
+          }
+        }
+
+        if (hasRework) reworkDirectiveCount += 1;
+        if (hasApproval) approvedDirectiveCount += 1;
+
+        const firstReview = directive.reviews[0];
+        if (firstReview && inRange(firstReview.reviewedAt, start, end)) {
+          firstReviewCandidates += 1;
+          if (firstReview.decision === 'approved') firstPassApproved += 1;
+          if (firstReview.submittedAt) {
+            executionHours.push(Math.max(
+              0,
+              (new Date(firstReview.submittedAt).getTime() - new Date(directive.issuedAt).getTime()) / 3600000,
+            ));
+          }
+        }
+      }
+
+      return {
+        reviewCount,
+        reviewedDirectives: reviewedDirectiveCount,
+        approvedDirectives: approvedDirectiveCount,
+        approvedReviews,
+        returnedReviews,
+        modificationReviews,
+        firstPassRate: firstReviewCandidates
+          ? round((firstPassApproved / firstReviewCandidates) * 100, 1)
+          : null,
+        reworkRate: reviewedDirectiveCount
+          ? round((reworkDirectiveCount / reviewedDirectiveCount) * 100, 1)
+          : null,
+        avgExecutionHours: round(avg(executionHours), 1),
+        avgApprovalHours: round(avg(approvalHours), 1),
+        onTimeRate: completedWithDue
+          ? round((completedOnTime / completedWithDue) * 100, 1)
+          : null,
+      };
+    };
+
+    const currentSummaryBase = summarize(currentStart, null);
+    const previousSummaryBase = periodDays ? summarize(previousStart, previousEnd) : null;
+    const summary = {
+      ...currentSummaryBase,
+      openDirectives: currentOpen,
+      overdueOpen: currentOverdue,
+      urgentOpen: currentUrgentOpen,
+    };
+    const previousSummary = previousSummaryBase
+      ? {
+          ...previousSummaryBase,
+          openDirectives: null,
+          overdueOpen: null,
+          urgentOpen: null,
+        }
+      : null;
+
+    const employeeSeed = new Map(assigneeUsers.map((user) => [
+      user.id,
+      { userId: user.id, username: user.username },
+    ]));
+    directives.forEach((directive) => {
+      if (!employeeSeed.has(directive.assigneeUserId)) {
+        employeeSeed.set(directive.assigneeUserId, {
+          userId: directive.assigneeUserId,
+          username: directive.assigneeName || 'مستخدم',
+        });
+      }
+    });
+
+    const employees = [...employeeSeed.values()]
+      .map((employee) => {
+        const metrics = summarize(currentStart, null, employee.userId);
+        return {
+          ...employee,
+          ...metrics,
+          openDirectives: currentOpenByEmployee.get(employee.userId) || 0,
+          overdueOpen: currentOverdueByEmployee.get(employee.userId) || 0,
+          urgentOpen: currentUrgentOpenByEmployee.get(employee.userId) || 0,
+        };
+      })
+      .filter((employee) =>
+        employee.reviewCount ||
+        employee.openDirectives ||
+        employee.overdueOpen ||
+        employee.urgentOpen
+      )
+      .sort((a, b) =>
+        (b.overdueOpen - a.overdueOpen) ||
+        ((b.reworkRate || 0) - (a.reworkRate || 0)) ||
+        (b.reviewedDirectives - a.reviewedDirectives)
+      );
+
+    const monthlyTrend = monthStarts.map((start, index) => {
+      const end = index < monthStarts.length - 1
+        ? monthStarts[index + 1]
+        : new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      const metrics = summarize(start, end, assigneeUserId || null);
+      return {
+        key: `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`,
+        year: start.getFullYear(),
+        month: start.getMonth() + 1,
+        ...metrics,
+      };
+    });
+
+    res.json({
+      generatedAt: now,
+      periodDays,
+      assigneeUserId: assigneeUserId || null,
+      summary,
+      previousSummary,
+      employees,
+      monthlyTrend,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/alerts', async (req, res, next) => {
   try {
     await syncTransactionFollowUpAlerts();
