@@ -1565,6 +1565,42 @@ router.put('/buildings/:id', requireRoles('head'), async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.delete('/buildings/pending-imports/all', requireRoles('head'), async (req, res, next) => {
+  try {
+    const pendingWhere = {
+      buildingNumber: { startsWith: 'IMP-' },
+      notes: { contains: '[[IAU_BUILDING_IMPORT_PENDING_V1]]' },
+    };
+
+    const [totalPending, protectedPending] = await Promise.all([
+      prisma.mosqueBuilding.count({ where: pendingWhere }),
+      prisma.mosqueBuilding.count({
+        where: {
+          ...pendingWhere,
+          OR: [
+            { sites: { some: {} } },
+            { siteInspections: { some: {} } },
+          ],
+        },
+      }),
+    ]);
+
+    const deleted = await prisma.mosqueBuilding.deleteMany({
+      where: {
+        ...pendingWhere,
+        sites: { none: {} },
+        siteInspections: { none: {} },
+      },
+    });
+
+    res.json({
+      deletedCount: deleted.count,
+      skippedCount: protectedPending,
+      totalPending,
+    });
+  } catch (error) { next(error); }
+});
+
 router.delete('/buildings/:id', requireRoles('head'), async (req, res, next) => {
   try {
     const current = await prisma.mosqueBuilding.findUnique({
