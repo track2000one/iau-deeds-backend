@@ -118,6 +118,15 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canDelete';
   }
 
+  // CAPA improvement plan management is a supervisory administration action.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    ['POST', 'PATCH'].includes(method) &&
+    /\/directives\/improvement-plans(?:\/[^/]+(?:\/verify)?)?\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canDelete';
+  }
+
   // Directive execution evidence belongs to the assignee workflow, so adding or
   // removing evidence uses edit permission; route-level ownership checks still apply.
   if (
