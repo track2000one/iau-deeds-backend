@@ -213,6 +213,157 @@ const computeIndicator = (record) => {
 
 const serialize = (record) => ({ ...record, ...computeIndicator(record) });
 
+const saudiDayKey = (date = new Date()) =>
+  new Date(date.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+const getFollowUpSupervisorIds = async () => {
+  const users = await prisma.appUser.findMany({
+    where: {
+      isActive: true,
+      OR: [
+        { role: 'admin' },
+        { permissions: { some: { module: 'transaction_follow_up', canDelete: true } } },
+      ],
+    },
+    select: { id: true },
+  });
+  return users.map((user) => user.id);
+};
+
+const createFollowUpAlert = async ({
+  alertKey,
+  transactionId,
+  userId,
+  kind,
+  severity,
+  title,
+  message,
+}) => {
+  if (!userId) return null;
+  return prisma.transactionFollowUpAlert.upsert({
+    where: { alertKey },
+    update: { title, message, severity },
+    create: {
+      alertKey,
+      transactionId,
+      userId,
+      kind,
+      severity,
+      title,
+      message,
+    },
+  });
+};
+
+const alertCopy = (record, indicator, escalated = false) => {
+  const number = record.transactionNumber;
+  const subject = record.subject;
+  const prefix = escalated ? 'تصعيد متابعة' : 'تنبيه متابعة';
+
+  if (indicator.indicator === 'unassigned') {
+    return {
+      kind: 'unassigned',
+      severity: 'danger',
+      title: 'معاملة تحتاج إسناد',
+      message: `${number} — ${subject}. لم يتم إسناد المعاملة لموظف مختص.`,
+    };
+  }
+  if (indicator.indicator === 'overdue') {
+    return {
+      kind: escalated ? 'overdue_escalation' : 'overdue',
+      severity: 'danger',
+      title: `${prefix}: معاملة متأخرة`,
+      message: `${number} — ${subject}. ${indicator.indicatorLabel} ولم يتم إقفالها.`,
+    };
+  }
+  if (indicator.indicator === 'action_required') {
+    return {
+      kind: escalated ? 'action_escalation' : 'action_required',
+      severity: 'danger',
+      title: `${prefix}: المعاملة تحتاج إجراء`,
+      message: `${number} — ${subject}. الحالة الحالية تتطلب إجراء من الموظف المختص.`,
+    };
+  }
+  if (indicator.indicator === 'inactive') {
+    return {
+      kind: escalated ? 'inactive_escalation' : 'inactive',
+      severity: escalated ? 'danger' : 'warning',
+      title: escalated ? 'تصعيد: معاملة دون تحديث' : 'معاملة دون تحديث',
+      message: `${number} — ${subject}. ${indicator.indicatorLabel}.`,
+    };
+  }
+  if (indicator.indicator === 'due_soon') {
+    return {
+      kind: 'due_soon',
+      severity: 'warning',
+      title: 'موعد استحقاق معاملة قريب',
+      message: `${number} — ${subject}. ${indicator.indicatorLabel}.`,
+    };
+  }
+  return null;
+};
+
+export const syncTransactionFollowUpAlerts = async () => {
+  const rows = await prisma.transactionFollowUp.findMany({
+    where: { status: { in: OPEN_STATUSES } },
+    select: {
+      id: true,
+      transactionNumber: true,
+      subject: true,
+      status: true,
+      currentAssigneeUserId: true,
+      dueDate: true,
+      assignedAt: true,
+      lastActionAt: true,
+      inactivityAlertDays: true,
+      createdAt: true,
+    },
+  });
+
+  if (!rows.length) return { scanned: 0, alerts: 0 };
+
+  const supervisorIds = await getFollowUpSupervisorIds();
+  const dayKey = saudiDayKey();
+  let alerts = 0;
+
+  for (const row of rows) {
+    const indicator = computeIndicator(row);
+    if (!['unassigned', 'overdue', 'action_required', 'inactive', 'due_soon'].includes(indicator.indicator)) continue;
+
+    const recipients = new Map();
+
+    if (indicator.indicator === 'unassigned') {
+      supervisorIds.forEach((id) => recipients.set(id, true));
+    } else {
+      if (row.currentAssigneeUserId) recipients.set(row.currentAssigneeUserId, false);
+
+      const escalate =
+        indicator.indicator === 'overdue' ||
+        indicator.indicator === 'action_required' ||
+        (
+          indicator.indicator === 'inactive' &&
+          indicator.daysWithoutAction >= (row.inactivityAlertDays || 3) + 2
+        );
+
+      if (escalate) supervisorIds.forEach((id) => recipients.set(id, true));
+    }
+
+    for (const [userId, escalated] of recipients.entries()) {
+      const copy = alertCopy(row, indicator, escalated);
+      if (!copy) continue;
+      await createFollowUpAlert({
+        alertKey: `${row.id}:${copy.kind}:${dayKey}:${userId}`,
+        transactionId: row.id,
+        userId,
+        ...copy,
+      });
+      alerts += 1;
+    }
+  }
+
+  return { scanned: rows.length, alerts };
+};
+
 router.get('/assignees', async (_req, res, next) => {
   try {
     const users = await prisma.appUser.findMany({
@@ -227,6 +378,63 @@ router.get('/assignees', async (_req, res, next) => {
       orderBy: [{ role: 'asc' }, { username: 'asc' }],
     });
     res.json(users);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/alerts', async (req, res, next) => {
+  try {
+    await syncTransactionFollowUpAlerts();
+    const items = await prisma.transactionFollowUpAlert.findMany({
+      where: { userId: req.authUser.id },
+      include: {
+        transaction: {
+          select: {
+            id: true,
+            transactionNumber: true,
+            trackingNumber: true,
+            subject: true,
+            status: true,
+            currentAssigneeName: true,
+            dueDate: true,
+          },
+        },
+      },
+      orderBy: [{ isRead: 'asc' }, { createdAt: 'desc' }],
+      take: 50,
+    });
+    res.json(items);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/alerts/read-all', async (req, res, next) => {
+  try {
+    const result = await prisma.transactionFollowUpAlert.updateMany({
+      where: { userId: req.authUser.id, isRead: false },
+      data: { isRead: true, readAt: new Date() },
+    });
+    res.json({ updated: result.count });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/alerts/:id/read', async (req, res, next) => {
+  try {
+    const alert = await prisma.transactionFollowUpAlert.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!alert) return res.status(404).json({ message: 'التنبيه غير موجود' });
+    if (alert.userId !== req.authUser.id) {
+      return res.status(403).json({ message: 'هذا التنبيه غير موجه إلى حسابك' });
+    }
+    res.json(await prisma.transactionFollowUpAlert.update({
+      where: { id: alert.id },
+      data: { isRead: true, readAt: new Date() },
+    }));
   } catch (error) {
     next(error);
   }
@@ -405,6 +613,18 @@ router.post('/', async (req, res, next) => {
       }
     }
 
+    if (user) {
+      await createFollowUpAlert({
+        alertKey: `assignment:${row.id}:${row.createdAt.toISOString()}:${user.id}`,
+        transactionId: row.id,
+        userId: user.id,
+        kind: 'assigned',
+        severity: 'info',
+        title: 'تم إسناد معاملة إليك',
+        message: `${row.transactionNumber} — ${row.subject}. المطلوب: ${row.requiredAction || 'مراجعة المعاملة واتخاذ الإجراء المناسب'}.`,
+      });
+    }
+
     res.status(201).json(serialize(row));
   } catch (error) {
     next(error);
@@ -484,6 +704,16 @@ router.patch('/:id/assign', async (req, res, next) => {
           },
         },
       },
+    });
+
+    await createFollowUpAlert({
+      alertKey: `assignment:${updated.id}:${now.toISOString()}:${target.id}`,
+      transactionId: updated.id,
+      userId: target.id,
+      kind: eventType,
+      severity: 'info',
+      title: eventType === 'transferred' ? 'تم تحويل معاملة إليك' : 'تم إسناد معاملة إليك',
+      message: `${updated.transactionNumber} — ${updated.subject}. المطلوب: ${updated.requiredAction || 'مراجعة المعاملة واتخاذ الإجراء المناسب'}.`,
     });
 
     res.json(serialize(updated));
