@@ -5379,6 +5379,51 @@ router.patch('/alerts/:id/read', async (req, res, next) => {
   }
 });
 
+router.get('/external-waits', async (req, res, next) => {
+  try {
+    const supervisor = isSupervisor(req);
+    const status = String(req.query.status || 'active').trim();
+    const allowedStatuses = ['active', 'responded', 'cancelled'];
+    const where = {
+      ...(allowedStatuses.includes(status) ? { status } : {}),
+      ...(!supervisor ? { transaction: { currentAssigneeUserId: req.authUser.id } } : {}),
+    };
+    const rows = await prisma.transactionFollowUpExternalWait.findMany({
+      where,
+      include: {
+        transaction: {
+          select: {
+            id: true,
+            trackingNumber: true,
+            transactionNumber: true,
+            subject: true,
+            priority: true,
+            status: true,
+            currentAssigneeUserId: true,
+            currentAssigneeName: true,
+            dueDate: true,
+          },
+        },
+      },
+      orderBy: [{ nextFollowUpDate: 'asc' }, { createdAt: 'desc' }],
+      take: 150,
+    });
+    const todayNumber = dayNumberFromKey(saudiDayKey());
+    res.json(rows.map((row) => {
+      const sentNumber = dayNumberFromKey(saudiDayKey(new Date(row.sentAt)));
+      const followUpNumber = dayNumberFromKey(saudiDayKey(new Date(row.nextFollowUpDate)));
+      return {
+        ...row,
+        waitingDays: Math.max(0, todayNumber - sentNumber),
+        daysUntilFollowUp: followUpNumber - todayNumber,
+        followUpDue: row.status === 'active' && followUpNumber <= todayNumber,
+      };
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/extension-requests', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
