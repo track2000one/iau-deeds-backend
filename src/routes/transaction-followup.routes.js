@@ -2024,8 +2024,8 @@ router.post('/:id/directives/:directiveId/evidence', async (req, res, next) => {
     if (!supervisor && directive.assigneeUserId !== req.authUser.id) {
       return res.status(403).json({ message: 'هذا التوجيه غير مسند إلى حسابك' });
     }
-    if (!supervisor && ['awaiting_approval', 'completed', 'cancelled'].includes(directive.status)) {
-      return res.status(409).json({ message: 'لا يمكن تعديل أدلة التنفيذ أثناء الاعتماد أو بعد إغلاق التوجيه' });
+    if (['awaiting_approval', 'completed', 'cancelled'].includes(directive.status)) {
+      return res.status(409).json({ message: 'أدلة التنفيذ تصبح ثابتة أثناء الاعتماد وبعد إغلاق التوجيه' });
     }
 
     const changedBy = actor(req);
