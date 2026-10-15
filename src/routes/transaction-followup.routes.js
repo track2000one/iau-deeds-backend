@@ -2938,6 +2938,7 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
       riskEvents,
       preventiveActions,
       improvementPlans,
+      riskAcceptances,
       earlyWarning,
     ] = await Promise.all([
       prisma.transactionFollowUpRiskRegister.findMany({
@@ -2974,6 +2975,27 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
           dueDate: true,
           resultMetTarget: true,
           verifiedAt: true,
+        },
+      }),
+      prisma.transactionFollowUpRiskAcceptanceRequest.findMany({
+        where: {
+          OR: [
+            { status: { in: ['pending', 'approved'] } },
+            { decisionAt: { gte: new Date(now.getTime() - 30 * 86400000) } },
+            { expiredAt: { gte: new Date(now.getTime() - 30 * 86400000) } },
+          ],
+        },
+        include: {
+          risk: {
+            select: {
+              id: true,
+              riskNumber: true,
+              title: true,
+              residualScore: true,
+              residualLevel: true,
+              status: true,
+            },
+          },
         },
       }),
       (async () => {
@@ -3032,6 +3054,32 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
 
     const capaOverdue = improvementPlans.filter(
       (plan) => plan.dueDate && new Date(plan.dueDate).getTime() < now.getTime()
+    ).length;
+
+    const acceptancePending = riskAcceptances.filter((item) => item.status === 'pending').length;
+    const acceptanceActive = riskAcceptances.filter(
+      (item) => item.status === 'approved' && new Date(item.requestedUntil).getTime() > now.getTime()
+    ).length;
+    const acceptanceExpiringSoon = riskAcceptances.filter(
+      (item) =>
+        item.status === 'approved' &&
+        new Date(item.requestedUntil).getTime() > now.getTime() &&
+        new Date(item.requestedUntil).getTime() <= now.getTime() + 7 * 86400000
+    ).length;
+    const acceptanceRejected30d = riskAcceptances.filter(
+      (item) =>
+        item.status === 'rejected' &&
+        item.decisionAt &&
+        new Date(item.decisionAt).getTime() >= now.getTime() - 30 * 86400000
+    ).length;
+    const acceptanceExpired30d = riskAcceptances.filter(
+      (item) =>
+        item.status === 'expired' &&
+        item.expiredAt &&
+        new Date(item.expiredAt).getTime() >= now.getTime() - 30 * 86400000
+    ).length;
+    const acceptedOutsideAppetite = activeRisks.filter(
+      (risk) => risk.status === 'accepted' && risk.residualScore > appetiteMaxScore
     ).length;
 
     const riskAppetiteStatus =
@@ -3118,6 +3166,24 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
         status: kriStatusMax(capaOverdue, 1, 3),
         target: '0',
         description: 'عدد خطط التحسين المفتوحة التي تجاوزت تاريخ الاستحقاق.',
+      },
+      {
+        key: 'pendingRiskAcceptances',
+        label: 'طلبات قبول مخاطر معلقة',
+        value: acceptancePending,
+        unit: 'طلب',
+        status: kriStatusMax(acceptancePending, 1, 4),
+        target: '0',
+        description: 'طلبات قبول المخاطر التي ما زالت بانتظار قرار إداري.',
+      },
+      {
+        key: 'expiringRiskAcceptances',
+        label: 'قبول مخاطر يقترب من الانتهاء',
+        value: acceptanceExpiringSoon,
+        unit: 'خطر',
+        status: kriStatusMax(acceptanceExpiringSoon, 1, 3),
+        target: '0',
+        description: 'المخاطر المقبولة التي تنتهي مدة قبولها خلال سبعة أيام.',
       },
     ];
 
@@ -3289,6 +3355,14 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
       capa: {
         open: improvementPlans.length,
         overdue: capaOverdue,
+      },
+      acceptance: {
+        pending: acceptancePending,
+        activeApproved: acceptanceActive,
+        expiringSoon: acceptanceExpiringSoon,
+        rejected30d: acceptanceRejected30d,
+        expired30d: acceptanceExpired30d,
+        acceptedOutsideAppetite,
       },
     });
   } catch (error) {
