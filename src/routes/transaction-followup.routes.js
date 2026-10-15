@@ -585,6 +585,7 @@ router.get('/directives/dashboard', async (req, res, next) => {
       dueToday: 0,
       dueSoon: 0,
       completed7d: 0,
+      issuedToday: 0,
       urgentOpen: 0,
       decisions: 0,
       directives: 0,
@@ -613,6 +614,7 @@ router.get('/directives/dashboard', async (req, res, next) => {
       if (row.status === 'completed' && row.completedAt && new Date(row.completedAt) >= sevenDaysAgo) {
         summary.completed7d += 1;
       }
+      if (saudiDayKey(new Date(row.issuedAt)) === todayKey) summary.issuedToday += 1;
       if (open && row.priority === 'urgent') summary.urgentOpen += 1;
       if (row.directiveType === 'decision') summary.decisions += 1;
       else summary.directives += 1;
