@@ -27,7 +27,8 @@ const riyadhLocalToUtc = (year, month, day, hour = 8) =>
 
 const endOfSaudiDayUtc = (date) => {
   const parts = riyadhParts(date);
-  return new Date(Date.UTC(parts.year, parts.month, parts.day + 1, -3, -1, -1, 999));
+  const nextSaudiMidnightUtc = Date.UTC(parts.year, parts.month, parts.day + 1, -3, 0, 0, 0);
+  return new Date(nextSaudiMidnightUtc - 1);
 };
 
 const startOfSaudiDayUtc = (date) => {
