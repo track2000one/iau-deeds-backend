@@ -238,6 +238,11 @@ const serialize = (record) => ({ ...record, ...computeIndicator(record) });
 const saudiDayKey = (date = new Date()) =>
   new Date(date.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
+const dayNumberFromKey = (value) => {
+  const [year, month, day] = String(value).split('-').map(Number);
+  return Date.UTC(year, month - 1, day) / 86400000;
+};
+
 const getFollowUpSupervisorIds = async () => {
   const users = await prisma.appUser.findMany({
     where: {
@@ -457,6 +462,182 @@ router.patch('/alerts/:id/read', async (req, res, next) => {
       where: { id: alert.id },
       data: { isRead: true, readAt: new Date() },
     }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/executive-inbox', async (req, res, next) => {
+  try {
+    const supervisor = isSupervisor(req);
+    const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
+    const mine = !supervisor || mineRequested;
+    const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
+    const now = new Date();
+    const todayKey = saudiDayKey(now);
+    const todayNumber = dayNumberFromKey(todayKey);
+
+    const rows = await prisma.transactionFollowUp.findMany({
+      where: { ...baseWhere, status: { in: OPEN_STATUSES } },
+      select: {
+        id: true,
+        trackingNumber: true,
+        transactionNumber: true,
+        transactionDate: true,
+        subject: true,
+        priority: true,
+        status: true,
+        currentAssigneeUserId: true,
+        currentAssigneeName: true,
+        dueDate: true,
+        assignedAt: true,
+        lastActionAt: true,
+        inactivityAlertDays: true,
+        requiredAction: true,
+        createdAt: true,
+      },
+      orderBy: [{ priority: 'desc' }, { dueDate: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    const counters = {
+      totalOpen: rows.length,
+      attention: 0,
+      overdue: 0,
+      dueToday: 0,
+      unassigned: 0,
+      inactive: 0,
+      needsFollowUp: 0,
+      urgent: 0,
+      staleWaiting: 0,
+    };
+
+    const employeeMap = new Map();
+
+    const attentionItems = rows.flatMap((row) => {
+      const indicator = computeIndicator(row);
+      const dueKey = row.dueDate ? saudiDayKey(new Date(row.dueDate)) : null;
+      const dueDayNumber = dueKey ? dayNumberFromKey(dueKey) : null;
+      const daysOverdue = dueDayNumber == null ? 0 : Math.max(0, todayNumber - dueDayNumber);
+      const isDueToday = dueKey === todayKey;
+      const isUnassigned = !row.currentAssigneeUserId;
+      const isInactive = indicator.indicator === 'inactive';
+      const isNeedsFollowUp = row.status === 'needs_follow_up';
+      const isUrgent = row.priority === 'urgent';
+      const isStaleWaiting = row.status === 'waiting_response' && indicator.daysWithoutAction >= 5;
+      const isOverdue = daysOverdue > 0;
+
+      if (isOverdue) counters.overdue += 1;
+      if (isDueToday) counters.dueToday += 1;
+      if (isUnassigned) counters.unassigned += 1;
+      if (isInactive) counters.inactive += 1;
+      if (isNeedsFollowUp) counters.needsFollowUp += 1;
+      if (isUrgent) counters.urgent += 1;
+      if (isStaleWaiting) counters.staleWaiting += 1;
+
+      const reasons = [];
+      let score = 0;
+
+      if (isOverdue) {
+        reasons.push(`متأخرة ${daysOverdue} يوم`);
+        score += 100 + Math.min(daysOverdue * 4, 40);
+      }
+      if (isUnassigned) {
+        reasons.push('غير مسندة');
+        score += 95;
+      }
+      if (isNeedsFollowUp) {
+        reasons.push('تحتاج إجراء');
+        score += 90;
+      }
+      if (isUrgent) {
+        reasons.push('أولوية عاجلة');
+        score += 85;
+      }
+      if (isDueToday) {
+        reasons.push('مستحقة اليوم');
+        score += 80;
+      }
+      if (isInactive) {
+        reasons.push(`دون إجراء منذ ${indicator.daysWithoutAction} يوم`);
+        score += 70 + Math.min(indicator.daysWithoutAction, 20);
+      }
+      if (isStaleWaiting) {
+        reasons.push(`بانتظار رد منذ ${indicator.daysWithoutAction} يوم`);
+        score += 60;
+      }
+
+      const needsAttention = reasons.length > 0;
+      if (needsAttention) counters.attention += 1;
+
+      if (row.currentAssigneeUserId) {
+        const employee = employeeMap.get(row.currentAssigneeUserId) || {
+          userId: row.currentAssigneeUserId,
+          username: row.currentAssigneeName || 'مستخدم',
+          open: 0,
+          overdue: 0,
+          needsAction: 0,
+          urgent: 0,
+        };
+        employee.open += 1;
+        if (isOverdue) employee.overdue += 1;
+        if (needsAttention) employee.needsAction += 1;
+        if (isUrgent) employee.urgent += 1;
+        employeeMap.set(employee.userId, employee);
+      }
+
+      if (!needsAttention) return [];
+
+      return [{
+        id: row.id,
+        trackingNumber: row.trackingNumber,
+        transactionNumber: row.transactionNumber,
+        transactionDate: row.transactionDate,
+        subject: row.subject,
+        priority: row.priority,
+        status: row.status,
+        currentAssigneeUserId: row.currentAssigneeUserId,
+        currentAssigneeName: row.currentAssigneeName,
+        dueDate: row.dueDate,
+        requiredAction: row.requiredAction,
+        lastActionAt: row.lastActionAt,
+        daysWithoutAction: indicator.daysWithoutAction,
+        daysOverdue,
+        reasons,
+        primaryReason: reasons[0],
+        score,
+      }];
+    })
+      .sort((a, b) =>
+        (b.score - a.score) ||
+        ((a.dueDate ? new Date(a.dueDate).getTime() : Number.MAX_SAFE_INTEGER) -
+          (b.dueDate ? new Date(b.dueDate).getTime() : Number.MAX_SAFE_INTEGER))
+      );
+
+    const employeesRaw = [...employeeMap.values()];
+    const averageOpen = employeesRaw.length
+      ? employeesRaw.reduce((sum, item) => sum + item.open, 0) / employeesRaw.length
+      : 0;
+    const highLoadThreshold = Math.max(3, Math.ceil(averageOpen * 1.4));
+
+    const employeeLoad = supervisor && !mine
+      ? employeesRaw
+        .map((item) => ({
+          ...item,
+          highLoad: item.open >= highLoadThreshold || item.overdue >= 2,
+          riskScore: item.overdue * 4 + item.needsAction * 2 + item.urgent * 2 + item.open,
+        }))
+        .sort((a, b) => (b.riskScore - a.riskScore) || (b.open - a.open))
+        .slice(0, 8)
+      : [];
+
+    res.json({
+      generatedAt: now,
+      scope: mine ? 'mine' : 'all',
+      counters,
+      attentionItems: attentionItems.slice(0, 12),
+      employeeLoad,
+      highLoadThreshold,
+    });
   } catch (error) {
     next(error);
   }
