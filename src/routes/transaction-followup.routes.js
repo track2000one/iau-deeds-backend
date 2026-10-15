@@ -1333,6 +1333,317 @@ router.get('/directives/approval-history', async (req, res, next) => {
   }
 });
 
+router.get('/directives/improvement-plans/effectiveness', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'تحليل فعالية خطط التحسين متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const rawPeriod = String(req.query.periodDays || '180').trim().toLowerCase();
+    const periodDays = rawPeriod === 'all'
+      ? null
+      : Math.min(730, Math.max(30, Number.parseInt(rawPeriod, 10) || 180));
+    const now = new Date();
+    const from = periodDays ? new Date(now.getTime() - periodDays * 86400000) : null;
+    const cohortWhere = from
+      ? {
+          OR: [
+            { createdAt: { gte: from } },
+            { verifiedAt: { gte: from } },
+            { completedAt: { gte: from } },
+          ],
+        }
+      : {};
+
+    const [plans, allPlans] = await Promise.all([
+      prisma.transactionFollowUpImprovementPlan.findMany({
+        where: cohortWhere,
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.transactionFollowUpImprovementPlan.findMany({
+        select: {
+          id: true,
+          metricKey: true,
+          scopeType: true,
+          assigneeUserId: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
+    ]);
+
+    const verifiedPlans = plans.filter(
+      (plan) => plan.verifiedAt && plan.resultMetTarget !== null && plan.resultMetTarget !== undefined,
+    );
+    const successfulPlans = verifiedPlans.filter((plan) => plan.resultMetTarget === true);
+    const unsuccessfulPlans = verifiedPlans.filter((plan) => plan.resultMetTarget === false);
+    const openPlans = plans.filter((plan) => ['open', 'in_progress', 'monitoring'].includes(plan.status));
+    const overduePlans = openPlans.filter((plan) => new Date(plan.dueDate).getTime() < now.getTime());
+
+    const average = (values) =>
+      values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    const rounded = (value, digits = 1) =>
+      value == null ? null : Number(value.toFixed(digits));
+
+    const recoveryDays = successfulPlans
+      .filter((plan) => plan.completedAt)
+      .map((plan) =>
+        Math.max(
+          0,
+          (new Date(plan.completedAt).getTime() - new Date(plan.createdAt).getTime()) / 86400000,
+        )
+      );
+
+    const improvementPercentages = verifiedPlans.flatMap((plan) => {
+      if (
+        plan.baselineValue == null ||
+        plan.resultValue == null ||
+        Number(plan.baselineValue) === 0
+      ) {
+        return [];
+      }
+      const baseline = Number(plan.baselineValue);
+      const result = Number(plan.resultValue);
+      const directionalGain = plan.direction === 'min'
+        ? result - baseline
+        : baseline - result;
+      return [(directionalGain / Math.abs(baseline)) * 100];
+    });
+
+    const recurrenceWindowDays = 90;
+    const recurrenceWindowMs = recurrenceWindowDays * 86400000;
+    const recurrenceMaturePlans = successfulPlans.filter(
+      (plan) =>
+        plan.completedAt &&
+        now.getTime() - new Date(plan.completedAt).getTime() >= recurrenceWindowMs,
+    );
+
+    const hasRecurrence = (plan) => {
+      if (!plan.completedAt) return false;
+      const completedAt = new Date(plan.completedAt).getTime();
+      const windowEnd = completedAt + recurrenceWindowMs;
+      return allPlans.some((candidate) => {
+        if (candidate.id === plan.id) return false;
+        if (candidate.metricKey !== plan.metricKey || candidate.scopeType !== plan.scopeType) return false;
+        if (plan.scopeType === 'employee' && candidate.assigneeUserId !== plan.assigneeUserId) return false;
+        const createdAt = new Date(candidate.createdAt).getTime();
+        return createdAt > completedAt && createdAt <= windowEnd;
+      });
+    };
+
+    const recurrenceCount = recurrenceMaturePlans.filter(hasRecurrence).length;
+    const recurrenceRate90d = recurrenceMaturePlans.length
+      ? rounded((recurrenceCount / recurrenceMaturePlans.length) * 100)
+      : null;
+
+    const normalizePhrase = (value) =>
+      String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+    const groupText = (field) => {
+      const map = new Map();
+      for (const plan of plans) {
+        const text = String(plan[field] || '').trim();
+        if (!text) continue;
+        const key = normalizePhrase(text);
+        const current = map.get(key) || {
+          text,
+          plans: 0,
+          verified: 0,
+          successful: 0,
+          open: 0,
+          recoveryDays: [],
+        };
+        current.plans += 1;
+        if (plan.verifiedAt && plan.resultMetTarget !== null && plan.resultMetTarget !== undefined) {
+          current.verified += 1;
+          if (plan.resultMetTarget === true) current.successful += 1;
+        }
+        if (['open', 'in_progress', 'monitoring'].includes(plan.status)) current.open += 1;
+        if (plan.resultMetTarget === true && plan.completedAt) {
+          current.recoveryDays.push(
+            Math.max(
+              0,
+              (new Date(plan.completedAt).getTime() - new Date(plan.createdAt).getTime()) / 86400000,
+            ),
+          );
+        }
+        map.set(key, current);
+      }
+
+      return [...map.values()]
+        .map((item) => ({
+          text: item.text,
+          plans: item.plans,
+          verified: item.verified,
+          successful: item.successful,
+          open: item.open,
+          effectivenessRate: item.verified
+            ? rounded((item.successful / item.verified) * 100)
+            : null,
+          avgRecoveryDays: rounded(average(item.recoveryDays)),
+        }))
+        .sort((a, b) =>
+          (b.plans - a.plans) ||
+          ((b.effectivenessRate ?? -1) - (a.effectivenessRate ?? -1))
+        )
+        .slice(0, 8);
+    };
+
+    const metricBreakdown = Object.entries(KPI_METRIC_LABELS).map(([metricKey, metricLabel]) => {
+      const metricPlans = plans.filter((plan) => plan.metricKey === metricKey);
+      const metricVerified = metricPlans.filter(
+        (plan) => plan.verifiedAt && plan.resultMetTarget !== null && plan.resultMetTarget !== undefined,
+      );
+      const metricSuccessful = metricVerified.filter((plan) => plan.resultMetTarget === true);
+      const metricRecoveryDays = metricSuccessful
+        .filter((plan) => plan.completedAt)
+        .map((plan) =>
+          Math.max(
+            0,
+            (new Date(plan.completedAt).getTime() - new Date(plan.createdAt).getTime()) / 86400000,
+          )
+        );
+      const mature = metricSuccessful.filter(
+        (plan) =>
+          plan.completedAt &&
+          now.getTime() - new Date(plan.completedAt).getTime() >= recurrenceWindowMs,
+      );
+      const repeated = mature.filter(hasRecurrence).length;
+
+      return {
+        metricKey,
+        metricLabel,
+        plans: metricPlans.length,
+        verified: metricVerified.length,
+        successful: metricSuccessful.length,
+        effectivenessRate: metricVerified.length
+          ? rounded((metricSuccessful.length / metricVerified.length) * 100)
+          : null,
+        avgRecoveryDays: rounded(average(metricRecoveryDays)),
+        recurrenceRate90d: mature.length
+          ? rounded((repeated / mature.length) * 100)
+          : null,
+      };
+    });
+
+    const ownerMap = new Map();
+    for (const plan of plans) {
+      const key = plan.ownerUserId || 'unassigned';
+      const item = ownerMap.get(key) || {
+        userId: plan.ownerUserId || null,
+        username: plan.ownerName || 'غير محدد',
+        plans: 0,
+        open: 0,
+        overdue: 0,
+        verified: 0,
+        successful: 0,
+        recoveryDays: [],
+      };
+      item.plans += 1;
+      if (['open', 'in_progress', 'monitoring'].includes(plan.status)) item.open += 1;
+      if (
+        ['open', 'in_progress', 'monitoring'].includes(plan.status) &&
+        new Date(plan.dueDate).getTime() < now.getTime()
+      ) {
+        item.overdue += 1;
+      }
+      if (plan.verifiedAt && plan.resultMetTarget !== null && plan.resultMetTarget !== undefined) {
+        item.verified += 1;
+        if (plan.resultMetTarget === true) item.successful += 1;
+      }
+      if (plan.resultMetTarget === true && plan.completedAt) {
+        item.recoveryDays.push(
+          Math.max(
+            0,
+            (new Date(plan.completedAt).getTime() - new Date(plan.createdAt).getTime()) / 86400000,
+          ),
+        );
+      }
+      ownerMap.set(key, item);
+    }
+
+    const owners = [...ownerMap.values()]
+      .map((item) => ({
+        userId: item.userId,
+        username: item.username,
+        plans: item.plans,
+        open: item.open,
+        overdue: item.overdue,
+        verified: item.verified,
+        successful: item.successful,
+        effectivenessRate: item.verified
+          ? rounded((item.successful / item.verified) * 100)
+          : null,
+        avgRecoveryDays: rounded(average(item.recoveryDays)),
+      }))
+      .sort((a, b) =>
+        (b.overdue - a.overdue) ||
+        (b.plans - a.plans)
+      );
+
+    const monthCount = 6;
+    const monthlyTrend = [];
+    for (let offset = monthCount - 1; offset >= 0; offset -= 1) {
+      const monthStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+      const monthEnd = new Date(now.getFullYear(), now.getMonth() - offset + 1, 1);
+      const created = plans.filter((plan) => {
+        const value = new Date(plan.createdAt);
+        return value >= monthStart && value < monthEnd;
+      }).length;
+      const verified = plans.filter((plan) => {
+        if (!plan.verifiedAt) return false;
+        const value = new Date(plan.verifiedAt);
+        return value >= monthStart && value < monthEnd;
+      }).length;
+      const successful = plans.filter((plan) => {
+        if (!plan.completedAt || plan.resultMetTarget !== true) return false;
+        const value = new Date(plan.completedAt);
+        return value >= monthStart && value < monthEnd;
+      }).length;
+      monthlyTrend.push({
+        key: `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}`,
+        year: monthStart.getFullYear(),
+        month: monthStart.getMonth() + 1,
+        created,
+        verified,
+        successful,
+      });
+    }
+
+    res.json({
+      generatedAt: now,
+      periodDays,
+      recurrenceWindowDays,
+      summary: {
+        plans: plans.length,
+        open: openPlans.length,
+        overdue: overduePlans.length,
+        verified: verifiedPlans.length,
+        successful: successfulPlans.length,
+        unsuccessful: unsuccessfulPlans.length,
+        effectivenessRate: verifiedPlans.length
+          ? rounded((successfulPlans.length / verifiedPlans.length) * 100)
+          : null,
+        avgRecoveryDays: rounded(average(recoveryDays)),
+        avgImprovementPercent: rounded(average(improvementPercentages)),
+        recurrenceEligible: recurrenceMaturePlans.length,
+        recurrenceCount,
+        recurrenceRate90d,
+        sustainedSuccessRate90d: recurrenceRate90d == null
+          ? null
+          : rounded(100 - recurrenceRate90d),
+      },
+      metricBreakdown,
+      topRootCauses: groupText('rootCause'),
+      topCorrectiveActions: groupText('correctiveAction'),
+      owners,
+      monthlyTrend,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/directives/improvement-plans', async (req, res, next) => {
   try {
     if (!isSupervisor(req)) {
