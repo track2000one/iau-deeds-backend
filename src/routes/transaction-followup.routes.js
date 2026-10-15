@@ -99,6 +99,37 @@ const kpiTargetSchema = z.object({
   alertsEnabled: z.boolean(),
 });
 
+const improvementPlanCreateSchema = z.object({
+  metricKey: z.enum([
+    'firstPassRate',
+    'onTimeRate',
+    'reworkRate',
+    'avgExecutionHours',
+    'avgApprovalHours',
+  ]),
+  scopeType: z.enum(['global', 'employee']).default('global'),
+  assigneeUserId: nullableText(100),
+  baselineValue: z.coerce.number().optional().nullable(),
+  targetValue: z.coerce.number(),
+  direction: z.enum(['min', 'max']),
+  periodDays: z.coerce.number().int().min(7).max(365).default(30),
+  rootCause: z.string().trim().min(2, 'سبب الانحراف مطلوب').max(4000),
+  correctiveAction: z.string().trim().min(2, 'الإجراء التصحيحي مطلوب').max(5000),
+  preventiveAction: nullableText(5000),
+  ownerUserId: nullableText(100),
+  dueDate: z.string().trim().min(1, 'تاريخ الاستحقاق مطلوب'),
+});
+
+const improvementPlanUpdateSchema = z.object({
+  status: z.enum(['open', 'in_progress', 'monitoring', 'completed', 'cancelled']).optional(),
+  rootCause: z.string().trim().min(2).max(4000).optional(),
+  correctiveAction: z.string().trim().min(2).max(5000).optional(),
+  preventiveAction: nullableText(5000),
+  ownerUserId: nullableText(100),
+  dueDate: z.string().trim().optional(),
+  progressNote: nullableText(5000),
+});
+
 const reportArchiveSchema = z.object({
   reportType: z.enum(['weekly', 'monthly', 'custom']).default('custom'),
   from: z.string().trim().min(1),
@@ -208,10 +239,13 @@ const evaluateKpiMetrics = (metrics, targets) => ({
   ),
 });
 
-const calculateCurrentKpiSnapshot = async (periodDays) => {
+const calculateCurrentKpiSnapshot = async (periodDays, assigneeUserId = null) => {
   const start = new Date(Date.now() - periodDays * 86400000);
   const directives = await prisma.transactionFollowUpDirective.findMany({
-    where: { reviews: { some: { reviewedAt: { gte: start } } } },
+    where: {
+      ...(assigneeUserId ? { assigneeUserId } : {}),
+      reviews: { some: { reviewedAt: { gte: start } } },
+    },
     select: {
       id: true,
       issuedAt: true,
