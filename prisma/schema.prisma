@@ -1831,6 +1831,8 @@ model TransactionFollowUpPreventiveAction {
   cancelledAt       DateTime?
   improvementPlanId String?
   escalatedAt       DateTime?
+  riskRegisterId    String?
+  riskRegisteredAt  DateTime?
   createdById       String?
   createdByName     String?
   createdAt         DateTime @default(now())
@@ -1845,6 +1847,7 @@ model TransactionFollowUpPreventiveAction {
   @@index([status])
   @@index([dueDate])
   @@index([improvementPlanId])
+  @@index([riskRegisterId])
   @@index([createdAt])
 }
 
@@ -1866,6 +1869,86 @@ model TransactionFollowUpPreventiveActionEvent {
   preventiveAction TransactionFollowUpPreventiveAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
 
   @@index([actionId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model TransactionFollowUpRiskRegister {
+  id                      String   @id @default(cuid())
+  riskNumber              String   @unique
+  title                   String
+  description             String
+  category                String   @default("operational")
+  sourceType              String   @default("manual")
+  metricKey               String?
+  metricLabel             String?
+  scopeType               String   @default("global")
+  assigneeUserId          String?
+  assigneeName            String?
+  ownerUserId             String
+  ownerName               String
+  probability             Int
+  impact                  Int
+  inherentScore           Int
+  inherentLevel           String
+  controls                Json?
+  treatmentStrategy       String   @default("reduce")
+  treatmentPlan           String?
+  residualProbability     Int
+  residualImpact          Int
+  residualScore           Int
+  residualLevel           String
+  reviewDate              DateTime?
+  status                  String   @default("open")
+  sourcePreventiveActionId String? @unique
+  sourceImprovementPlanId String?
+  recurrenceCount         Int      @default(0)
+  lastOccurrenceAt        DateTime?
+  notes                   String?
+  closedAt                DateTime?
+  createdById             String?
+  createdByName           String?
+  updatedById             String?
+  updatedByName           String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  events                  TransactionFollowUpRiskRegisterEvent[]
+
+  @@index([category])
+  @@index([sourceType])
+  @@index([metricKey])
+  @@index([scopeType])
+  @@index([assigneeUserId])
+  @@index([ownerUserId])
+  @@index([inherentLevel])
+  @@index([residualLevel])
+  @@index([status])
+  @@index([reviewDate])
+  @@index([sourceImprovementPlanId])
+  @@index([createdAt])
+}
+
+model TransactionFollowUpRiskRegisterEvent {
+  id                    String   @id @default(cuid())
+  riskId                String
+  action                String
+  fromStatus            String?
+  toStatus              String?
+  probability           Int?
+  impact                Int?
+  residualProbability   Int?
+  residualImpact        Int?
+  residualScore         Int?
+  residualLevel         String?
+  note                  String?
+  changedById           String?
+  changedByName         String?
+  createdAt             DateTime @default(now())
+
+  risk                  TransactionFollowUpRiskRegister @relation(fields: [riskId], references: [id], onDelete: Cascade)
+
+  @@index([riskId])
   @@index([action])
   @@index([createdAt])
 }
