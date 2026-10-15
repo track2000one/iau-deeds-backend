@@ -587,7 +587,7 @@ const alertCopy = (record, indicator, escalated = false) => {
 };
 
 export const syncTransactionFollowUpAlerts = async () => {
-  const [rows, directives] = await Promise.all([
+  const [rows, directives, improvementPlans] = await Promise.all([
     prisma.transactionFollowUp.findMany({
       where: { status: { in: OPEN_STATUSES } },
       select: {
@@ -612,6 +612,20 @@ export const syncTransactionFollowUpAlerts = async () => {
         transaction: {
           select: { id: true, transactionNumber: true, subject: true },
         },
+      },
+    }),
+    prisma.transactionFollowUpImprovementPlan.findMany({
+      where: {
+        status: { in: ['open', 'in_progress', 'monitoring'] },
+      },
+      select: {
+        id: true,
+        metricLabel: true,
+        scopeType: true,
+        assigneeName: true,
+        ownerName: true,
+        dueDate: true,
+        status: true,
       },
     }),
   ]);
@@ -700,6 +714,37 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
+  for (const plan of improvementPlans) {
+    const dueKey = saudiDayKey(new Date(plan.dueDate));
+    const dueNumber = dayNumberFromKey(dueKey);
+    const daysOverdue = Math.max(0, todayNumber - dueNumber);
+    const dueToday = dueKey === todayKey;
+    if (!daysOverdue && !dueToday) continue;
+
+    const scopeLabel = plan.scopeType === 'employee' && plan.assigneeName
+      ? ` للموظف ${plan.assigneeName}`
+      : '';
+    const kind = daysOverdue ? 'capa_overdue' : 'capa_due_today';
+    const severity = daysOverdue ? 'danger' : 'warning';
+    const title = daysOverdue ? 'خطة تحسين أداء متأخرة' : 'خطة تحسين أداء مستحقة اليوم';
+    const message = daysOverdue
+      ? `خطة تحسين مؤشر «${plan.metricLabel}»${scopeLabel} متأخرة ${daysOverdue} يوم.`
+      : `خطة تحسين مؤشر «${plan.metricLabel}»${scopeLabel} مستحقة اليوم.`;
+
+    for (const supervisorId of supervisorIds) {
+      await createFollowUpAlert({
+        alertKey: `capa:${plan.id}:${kind}:${todayKey}:${supervisorId}`,
+        transactionId: null,
+        userId: supervisorId,
+        kind,
+        severity,
+        title,
+        message,
+      });
+      alerts += 1;
+    }
+  }
+
   const targets = await getKpiTargets();
   if (targets.alertsEnabled && supervisorIds.length) {
     const snapshot = await calculateCurrentKpiSnapshot(targets.alertPeriodDays);
@@ -738,7 +783,7 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
-  return { scanned: rows.length + directives.length, alerts };
+  return { scanned: rows.length + directives.length + improvementPlans.length, alerts };
 };
 
 router.get('/assignees', async (_req, res, next) => {
