@@ -121,7 +121,7 @@ const improvementPlanCreateSchema = z.object({
 });
 
 const improvementPlanUpdateSchema = z.object({
-  status: z.enum(['open', 'in_progress', 'monitoring', 'completed', 'cancelled']).optional(),
+  status: z.enum(['open', 'in_progress', 'monitoring', 'cancelled']).optional(),
   rootCause: z.string().trim().min(2).max(4000).optional(),
   correctiveAction: z.string().trim().min(2).max(5000).optional(),
   preventiveAction: nullableText(5000),
