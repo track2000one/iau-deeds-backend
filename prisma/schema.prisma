@@ -20,6 +20,7 @@ enum AttachmentEntityType {
   investment_area
   investment_opportunity
   asset
+  transaction_follow_up_directive
 }
 
 enum AttachmentType {
