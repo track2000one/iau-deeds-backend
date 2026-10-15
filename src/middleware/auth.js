@@ -109,6 +109,15 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canDelete';
   }
 
+  // KPI target configuration is a supervisory administration action.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'PUT' &&
+    /\/directives\/kpi-targets\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canDelete';
+  }
+
   // Directive execution evidence belongs to the assignee workflow, so adding or
   // removing evidence uses edit permission; route-level ownership checks still apply.
   if (
