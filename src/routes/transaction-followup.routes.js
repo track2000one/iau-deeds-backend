@@ -319,14 +319,14 @@ const KPI_METRIC_LABELS = {
   avgApprovalHours: 'متوسط زمن الاعتماد',
 };
 
-const riskLevelFromScore = (score) => {
+const riskMatrixLevelFromScore = (score) => {
   if (score >= 17) return 'critical';
   if (score >= 10) return 'high';
   if (score >= 5) return 'medium';
   return 'low';
 };
 
-const riskScore = (probability, impact) => Number(probability) * Number(impact);
+const riskMatrixScore = (probability, impact) => Number(probability) * Number(impact);
 
 const nextRiskNumber = async () => {
   const year = new Date().getFullYear();
@@ -2373,8 +2373,8 @@ router.post('/directives/risks', async (req, res, next) => {
     const impact = input.impact;
     const residualProbability = input.residualProbability ?? probability;
     const residualImpact = input.residualImpact ?? impact;
-    const inherentScore = riskScore(probability, impact);
-    const residualScore = riskScore(residualProbability, residualImpact);
+    const inherentScore = riskMatrixScore(probability, impact);
+    const residualScore = riskMatrixScore(residualProbability, residualImpact);
     const createdBy = actor(req);
     const riskNumber = await nextRiskNumber();
     const metricKey = input.metricKey || preventiveAction?.metricKey || null;
@@ -2400,14 +2400,14 @@ router.post('/directives/risks', async (req, res, next) => {
           probability,
           impact,
           inherentScore,
-          inherentLevel: riskLevelFromScore(inherentScore),
+          inherentLevel: riskMatrixLevelFromScore(inherentScore),
           controls: input.controls || [],
           treatmentStrategy: input.treatmentStrategy,
           treatmentPlan: input.treatmentPlan || null,
           residualProbability,
           residualImpact,
           residualScore,
-          residualLevel: riskLevelFromScore(residualScore),
+          residualLevel: riskMatrixLevelFromScore(residualScore),
           reviewDate: input.reviewDate ? toDate(input.reviewDate, 'تاريخ المراجعة') : null,
           sourcePreventiveActionId: preventiveAction?.id || null,
           sourceImprovementPlanId,
@@ -2427,7 +2427,7 @@ router.post('/directives/risks', async (req, res, next) => {
               residualProbability,
               residualImpact,
               residualScore,
-              residualLevel: riskLevelFromScore(residualScore),
+              residualLevel: riskMatrixLevelFromScore(residualScore),
               note: preventiveAction
                 ? 'إنشاء سجل خطر من تدخل وقائي'
                 : 'إنشاء سجل خطر',
@@ -2525,8 +2525,8 @@ router.patch('/directives/risks/:id', async (req, res, next) => {
     const impact = input.impact ?? current.impact;
     const residualProbability = input.residualProbability ?? current.residualProbability;
     const residualImpact = input.residualImpact ?? current.residualImpact;
-    const inherentScore = riskScore(probability, impact);
-    const residualScore = riskScore(residualProbability, residualImpact);
+    const inherentScore = riskMatrixScore(probability, impact);
+    const residualScore = riskMatrixScore(residualProbability, residualImpact);
     const residualLevel = riskLevelFromScore(residualScore);
     const changedBy = actor(req);
     const nextStatus = input.status || current.status;
@@ -2546,7 +2546,7 @@ router.patch('/directives/risks/:id', async (req, res, next) => {
           probability,
           impact,
           inherentScore,
-          inherentLevel: riskLevelFromScore(inherentScore),
+          inherentLevel: riskMatrixLevelFromScore(inherentScore),
           ...(input.controls !== undefined ? { controls: input.controls } : {}),
           ...(input.treatmentStrategy !== undefined ? { treatmentStrategy: input.treatmentStrategy } : {}),
           ...(input.treatmentPlan !== undefined ? { treatmentPlan: input.treatmentPlan || null } : {}),
