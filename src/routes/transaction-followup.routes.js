@@ -483,6 +483,238 @@ router.get('/dashboard', async (req, res, next) => {
   }
 });
 
+router.get('/analytics', async (req, res, next) => {
+  try {
+    const mine = String(req.query.mine || '').toLowerCase() === 'true';
+    const periodDaysRaw = String(req.query.periodDays || '90');
+    const periodDays = periodDaysRaw === 'all'
+      ? null
+      : Math.min(730, Math.max(7, Number.parseInt(periodDaysRaw, 10) || 90));
+    const from = periodDays ? new Date(Date.now() - periodDays * 86400000) : null;
+    const scope = mine ? { currentAssigneeUserId: req.authUser.id } : {};
+    const periodWhere = { ...scope, ...(from ? { createdAt: { gte: from } } : {}) };
+    const now = new Date();
+
+    const [periodRows, openRows, assigneeUsers] = await Promise.all([
+      prisma.transactionFollowUp.findMany({
+        where: periodWhere,
+        select: {
+          id: true,
+          trackingNumber: true,
+          transactionNumber: true,
+          subject: true,
+          status: true,
+          priority: true,
+          currentAssigneeUserId: true,
+          currentAssigneeName: true,
+          assignedAt: true,
+          dueDate: true,
+          completedAt: true,
+          closedAt: true,
+          createdAt: true,
+          events: {
+            where: { eventType: { in: ['action_recorded', 'status_changed'] } },
+            select: { createdAt: true },
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+      }),
+      prisma.transactionFollowUp.findMany({
+        where: { ...scope, status: { in: OPEN_STATUSES } },
+        select: {
+          id: true,
+          trackingNumber: true,
+          transactionNumber: true,
+          subject: true,
+          status: true,
+          priority: true,
+          currentAssigneeUserId: true,
+          currentAssigneeName: true,
+          dueDate: true,
+          assignedAt: true,
+          lastActionAt: true,
+          inactivityAlertDays: true,
+          createdAt: true,
+        },
+      }),
+      prisma.appUser.findMany({
+        where: {
+          isActive: true,
+          OR: [
+            { role: 'admin' },
+            { permissions: { some: { module: 'transaction_follow_up', canView: true } } },
+          ],
+        },
+        select: { id: true, username: true },
+        orderBy: { username: 'asc' },
+      }),
+    ]);
+
+    const completedRows = periodRows.filter((row) => FINAL_STATUSES.includes(row.status) && (row.completedAt || row.closedAt));
+    const completedWithDue = completedRows.filter((row) => row.dueDate);
+    const onTimeRows = completedWithDue.filter((row) => {
+      const finishedAt = row.completedAt || row.closedAt;
+      return finishedAt && new Date(finishedAt).getTime() <= new Date(row.dueDate).getTime();
+    });
+
+    const avg = (values) => values.length
+      ? values.reduce((sum, value) => sum + value, 0) / values.length
+      : null;
+    const round = (value, digits = 1) => value == null
+      ? null
+      : Number(value.toFixed(digits));
+
+    const completionDurationsDays = completedRows
+      .map((row) => {
+        const finishedAt = row.completedAt || row.closedAt;
+        if (!finishedAt) return null;
+        return Math.max(0, (new Date(finishedAt).getTime() - new Date(row.createdAt).getTime()) / 86400000);
+      })
+      .filter((value) => value != null);
+
+    const firstActionSamples = periodRows.flatMap((row) => {
+      if (!row.assignedAt || !row.events?.length) return [];
+      const assignedAt = new Date(row.assignedAt).getTime();
+      const first = row.events.find((event) => new Date(event.createdAt).getTime() >= assignedAt);
+      if (!first) return [];
+      return [Math.max(0, (new Date(first.createdAt).getTime() - assignedAt) / 3600000)];
+    });
+
+    const overdueOpenRows = openRows.filter((row) => row.dueDate && new Date(row.dueDate).getTime() < now.getTime());
+    const activeWithoutAction = openRows.filter((row) => {
+      const indicator = computeIndicator(row);
+      return ['action_required', 'inactive'].includes(indicator.indicator);
+    });
+
+    const ageBuckets = {
+      upTo2Days: 0,
+      from3To7Days: 0,
+      from8To14Days: 0,
+      over14Days: 0,
+    };
+    openRows.forEach((row) => {
+      const ageDays = Math.max(0, Math.floor((now.getTime() - new Date(row.createdAt).getTime()) / 86400000));
+      if (ageDays <= 2) ageBuckets.upTo2Days += 1;
+      else if (ageDays <= 7) ageBuckets.from3To7Days += 1;
+      else if (ageDays <= 14) ageBuckets.from8To14Days += 1;
+      else ageBuckets.over14Days += 1;
+    });
+
+    const userMap = new Map(assigneeUsers.map((user) => [user.id, {
+      userId: user.id,
+      username: user.username,
+      open: 0,
+      overdue: 0,
+      completed: 0,
+      completedOnTime: 0,
+      completedWithDue: 0,
+      completionDays: [],
+      firstActionHours: [],
+    }]));
+
+    for (const row of openRows) {
+      if (!row.currentAssigneeUserId) continue;
+      const metric = userMap.get(row.currentAssigneeUserId) || {
+        userId: row.currentAssigneeUserId,
+        username: row.currentAssigneeName || 'مستخدم',
+        open: 0,
+        overdue: 0,
+        completed: 0,
+        completedOnTime: 0,
+        completedWithDue: 0,
+        completionDays: [],
+        firstActionHours: [],
+      };
+      metric.open += 1;
+      if (row.dueDate && new Date(row.dueDate).getTime() < now.getTime()) metric.overdue += 1;
+      userMap.set(metric.userId, metric);
+    }
+
+    for (const row of completedRows) {
+      if (!row.currentAssigneeUserId) continue;
+      const metric = userMap.get(row.currentAssigneeUserId) || {
+        userId: row.currentAssigneeUserId,
+        username: row.currentAssigneeName || 'مستخدم',
+        open: 0,
+        overdue: 0,
+        completed: 0,
+        completedOnTime: 0,
+        completedWithDue: 0,
+        completionDays: [],
+        firstActionHours: [],
+      };
+      metric.completed += 1;
+
+      const finishedAt = row.completedAt || row.closedAt;
+      if (finishedAt) {
+        metric.completionDays.push(Math.max(0, (new Date(finishedAt).getTime() - new Date(row.createdAt).getTime()) / 86400000));
+      }
+      if (row.dueDate && finishedAt) {
+        metric.completedWithDue += 1;
+        if (new Date(finishedAt).getTime() <= new Date(row.dueDate).getTime()) metric.completedOnTime += 1;
+      }
+      if (row.assignedAt && row.events?.length) {
+        const assignedAt = new Date(row.assignedAt).getTime();
+        const first = row.events.find((event) => new Date(event.createdAt).getTime() >= assignedAt);
+        if (first) metric.firstActionHours.push(Math.max(0, (new Date(first.createdAt).getTime() - assignedAt) / 3600000));
+      }
+      userMap.set(metric.userId, metric);
+    }
+
+    const employees = [...userMap.values()]
+      .filter((item) => item.open || item.completed)
+      .map((item) => ({
+        userId: item.userId,
+        username: item.username,
+        open: item.open,
+        overdue: item.overdue,
+        completed: item.completed,
+        onTimeRate: item.completedWithDue
+          ? round((item.completedOnTime / item.completedWithDue) * 100, 1)
+          : null,
+        avgCompletionDays: round(avg(item.completionDays), 1),
+        avgFirstActionHours: round(avg(item.firstActionHours), 1),
+      }))
+      .sort((a, b) => (b.overdue - a.overdue) || (b.open - a.open) || (b.completed - a.completed));
+
+    const oldestOverdue = overdueOpenRows
+      .map((row) => ({
+        id: row.id,
+        trackingNumber: row.trackingNumber,
+        transactionNumber: row.transactionNumber,
+        subject: row.subject,
+        assigneeName: row.currentAssigneeName,
+        dueDate: row.dueDate,
+        overdueDays: Math.max(1, Math.floor((now.getTime() - new Date(row.dueDate).getTime()) / 86400000)),
+        priority: row.priority,
+      }))
+      .sort((a, b) => b.overdueDays - a.overdueDays)
+      .slice(0, 10);
+
+    res.json({
+      periodDays,
+      generatedAt: now,
+      summary: {
+        tracked: periodRows.length,
+        open: openRows.length,
+        completed: completedRows.length,
+        overdueOpen: overdueOpenRows.length,
+        needsAction: activeWithoutAction.length,
+        onTimeRate: completedWithDue.length
+          ? round((onTimeRows.length / completedWithDue.length) * 100, 1)
+          : null,
+        avgCompletionDays: round(avg(completionDurationsDays), 1),
+        avgFirstActionHours: round(avg(firstActionSamples), 1),
+      },
+      ageBuckets,
+      employees,
+      oldestOverdue,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/', async (req, res, next) => {
   try {
     const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
