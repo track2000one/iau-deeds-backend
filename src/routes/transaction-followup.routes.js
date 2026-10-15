@@ -1920,6 +1920,21 @@ router.patch('/:id/action', async (req, res, next) => {
     const changedBy = actor(req);
     const now = new Date();
     const nextStatus = input.status || (current.status === 'new' || current.status === 'assigned' ? 'in_progress' : current.status);
+
+    if (FINAL_STATUSES.includes(nextStatus)) {
+      const openDirectives = await prisma.transactionFollowUpDirective.count({
+        where: {
+          transactionId: current.id,
+          status: { in: ['pending', 'in_progress'] },
+        },
+      });
+      if (openDirectives > 0) {
+        return res.status(409).json({
+          message: `لا يمكن إنهاء المعاملة قبل معالجة ${openDirectives} من التوجيهات أو القرارات المفتوحة`,
+        });
+      }
+    }
+
     const completedAt = nextStatus === 'completed' ? now : nextStatus === 'closed' ? current.completedAt : null;
     const closedAt = nextStatus === 'closed' ? now : null;
 
