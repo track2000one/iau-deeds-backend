@@ -2515,7 +2515,10 @@ router.get('/:id', async (req, res, next) => {
       where: { id: req.params.id },
       include: {
         events: { orderBy: { createdAt: 'desc' } },
-        directives: { orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }] },
+        directives: {
+          include: { reviews: { orderBy: { reviewedAt: 'desc' } } },
+          orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
+        },
       },
     });
     if (!row) return res.status(404).json({ message: 'المعاملة غير موجودة' });
