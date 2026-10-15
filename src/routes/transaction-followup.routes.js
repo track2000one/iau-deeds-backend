@@ -499,6 +499,169 @@ router.get('/assignees', async (_req, res, next) => {
   }
 });
 
+router.get('/directives/dashboard', async (req, res, next) => {
+  try {
+    const supervisor = isSupervisor(req);
+    const search = String(req.query.search || '').trim();
+    const status = String(req.query.status || '').trim();
+    const priority = String(req.query.priority || '').trim();
+    const requestedAssignee = String(req.query.assigneeUserId || '').trim();
+    const assigneeUserId = supervisor
+      ? (requestedAssignee || null)
+      : req.authUser.id;
+
+    const baseWhere = {
+      ...(assigneeUserId ? { assigneeUserId } : {}),
+    };
+
+    const itemWhere = {
+      ...baseWhere,
+      ...(['pending', 'in_progress', 'completed', 'cancelled'].includes(status) ? { status } : {}),
+      ...(['normal', 'high', 'urgent'].includes(priority) ? { priority } : {}),
+      ...(search
+        ? {
+            OR: [
+              { title: { contains: search, mode: 'insensitive' } },
+              { instruction: { contains: search, mode: 'insensitive' } },
+              { assigneeName: { contains: search, mode: 'insensitive' } },
+              { transaction: { transactionNumber: { contains: search, mode: 'insensitive' } } },
+              { transaction: { subject: { contains: search, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+
+    const now = new Date();
+    const todayKey = saudiDayKey(now);
+    const todayNumber = dayNumberFromKey(todayKey);
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000);
+
+    const [allRows, itemRows] = await Promise.all([
+      prisma.transactionFollowUpDirective.findMany({
+        where: baseWhere,
+        include: {
+          transaction: {
+            select: {
+              id: true,
+              transactionNumber: true,
+              trackingNumber: true,
+              subject: true,
+              status: true,
+              currentAssigneeName: true,
+            },
+          },
+        },
+      }),
+      prisma.transactionFollowUpDirective.findMany({
+        where: itemWhere,
+        include: {
+          transaction: {
+            select: {
+              id: true,
+              transactionNumber: true,
+              trackingNumber: true,
+              subject: true,
+              status: true,
+              currentAssigneeName: true,
+            },
+          },
+        },
+        orderBy: [
+          { status: 'asc' },
+          { priority: 'desc' },
+          { dueDate: { sort: 'asc', nulls: 'last' } },
+          { issuedAt: 'desc' },
+        ],
+        take: 100,
+      }),
+    ]);
+
+    const summary = {
+      total: allRows.length,
+      open: 0,
+      pending: 0,
+      inProgress: 0,
+      overdue: 0,
+      dueToday: 0,
+      dueSoon: 0,
+      completed7d: 0,
+      urgentOpen: 0,
+      decisions: 0,
+      directives: 0,
+    };
+
+    const employeeMap = new Map();
+
+    for (const row of allRows) {
+      const serialized = serializeDirective(row);
+      const open = ['pending', 'in_progress'].includes(row.status);
+      if (open) summary.open += 1;
+      if (row.status === 'pending') summary.pending += 1;
+      if (row.status === 'in_progress') summary.inProgress += 1;
+      if (serialized.isOverdue) summary.overdue += 1;
+      if (serialized.isDueToday) summary.dueToday += 1;
+      if (
+        open &&
+        row.dueDate &&
+        !serialized.isOverdue &&
+        !serialized.isDueToday
+      ) {
+        const dueNumber = dayNumberFromKey(saudiDayKey(new Date(row.dueDate)));
+        const daysUntilDue = dueNumber - todayNumber;
+        if (daysUntilDue >= 1 && daysUntilDue <= 3) summary.dueSoon += 1;
+      }
+      if (row.status === 'completed' && row.completedAt && new Date(row.completedAt) >= sevenDaysAgo) {
+        summary.completed7d += 1;
+      }
+      if (open && row.priority === 'urgent') summary.urgentOpen += 1;
+      if (row.directiveType === 'decision') summary.decisions += 1;
+      else summary.directives += 1;
+
+      const employee = employeeMap.get(row.assigneeUserId) || {
+        userId: row.assigneeUserId,
+        username: row.assigneeName,
+        open: 0,
+        pending: 0,
+        inProgress: 0,
+        overdue: 0,
+        completed: 0,
+        urgent: 0,
+      };
+      if (open) employee.open += 1;
+      if (row.status === 'pending') employee.pending += 1;
+      if (row.status === 'in_progress') employee.inProgress += 1;
+      if (serialized.isOverdue) employee.overdue += 1;
+      if (row.status === 'completed') employee.completed += 1;
+      if (open && row.priority === 'urgent') employee.urgent += 1;
+      employeeMap.set(row.assigneeUserId, employee);
+    }
+
+    const employees = [...employeeMap.values()]
+      .sort((a, b) =>
+        (b.overdue - a.overdue) ||
+        (b.urgent - a.urgent) ||
+        (b.open - a.open) ||
+        (b.completed - a.completed)
+      );
+
+    const items = itemRows.map((row) => ({
+      ...serializeDirective(row),
+      transaction: row.transaction,
+    }));
+
+    res.json({
+      generatedAt: now,
+      scope: supervisor && !requestedAssignee ? 'all' : 'mine_or_employee',
+      summary,
+      employees,
+      items,
+      totalItems: items.length,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/alerts', async (req, res, next) => {
   try {
     await syncTransactionFollowUpAlerts();
