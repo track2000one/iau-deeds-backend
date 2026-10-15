@@ -1233,12 +1233,13 @@ export const syncTransactionFollowUpAlerts = async () => {
         todayNumber - dayNumberFromKey(saudiDayKey(new Date(acceptance.createdAt)))
       );
       if (ageDays >= 2) {
-        for (const supervisorId of supervisorIds) {
-          if (supervisorId === acceptance.requestedById) continue;
+        const recipients = new Set([risk.ownerUserId, ...supervisorIds].filter(Boolean));
+        for (const userId of recipients) {
+          if (userId === acceptance.requestedById) continue;
           await createFollowUpAlert({
-            alertKey: `risk:${risk.id}:acceptance_pending_overdue:${todayKey}:${supervisorId}`,
+            alertKey: `risk:${risk.id}:acceptance_pending_overdue:${todayKey}:${userId}`,
             transactionId: null,
-            userId: supervisorId,
+            userId,
             kind: 'risk_acceptance_pending_overdue',
             severity: ageDays >= 5 ? 'danger' : 'warning',
             title: 'طلب قبول خطر بانتظار الاعتماد',
@@ -2749,12 +2750,13 @@ router.post('/directives/risks/:id/acceptance-requests', async (req, res, next) 
     });
 
     const supervisorIds = await getFollowUpSupervisorIds();
-    for (const supervisorId of supervisorIds) {
-      if (supervisorId === requestedBy.id) continue;
+    const requestRecipients = new Set([risk.ownerUserId, ...supervisorIds].filter(Boolean));
+    for (const userId of requestRecipients) {
+      if (userId === requestedBy.id) continue;
       await createFollowUpAlert({
-        alertKey: `risk:${risk.id}:acceptance_pending:${request.id}:${supervisorId}`,
+        alertKey: `risk:${risk.id}:acceptance_pending:${request.id}:${userId}`,
         transactionId: null,
-        userId: supervisorId,
+        userId,
         kind: 'risk_acceptance_pending',
         severity: risk.residualScore > 9 ? 'danger' : 'warning',
         title: 'طلب اعتماد قبول خطر',
