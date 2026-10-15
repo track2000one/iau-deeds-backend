@@ -1616,3 +1616,69 @@ model AccountingTransformationRecord {
   @@index([overallProgress])
   @@index([updatedAt])
 }
+
+
+model TransactionFollowUp {
+  id                    String   @id @default(cuid())
+  trackingNumber        String   @unique
+  transactionNumber     String
+  transactionDate       DateTime
+  transactionType       String   @default("incoming")
+  subject               String
+  sourceEntity          String?
+  priority              String   @default("normal")
+  status                String   @default("new")
+  currentAssigneeUserId String?
+  currentAssigneeName   String?
+  assignedAt            DateTime?
+  requiredAction        String?
+  dueDate               DateTime?
+  inactivityAlertDays   Int      @default(3)
+  lastActionAt          DateTime?
+  lastActionByUserId    String?
+  lastActionByName      String?
+  notes                 String?
+  relatedModule         String?
+  relatedEntityId       String?
+  relatedEntityLabel    String?
+  completedAt           DateTime?
+  closedAt              DateTime?
+  createdById           String?
+  createdByName         String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  events                TransactionFollowUpEvent[]
+
+  @@index([transactionNumber])
+  @@index([transactionDate])
+  @@index([status])
+  @@index([priority])
+  @@index([currentAssigneeUserId])
+  @@index([dueDate])
+  @@index([lastActionAt])
+  @@index([createdAt])
+}
+
+model TransactionFollowUpEvent {
+  id                 String   @id @default(cuid())
+  transactionId      String
+  eventType          String
+  fromStatus         String?
+  toStatus           String?
+  fromAssigneeUserId String?
+  fromAssigneeName   String?
+  toAssigneeUserId   String?
+  toAssigneeName     String?
+  actionText         String?
+  note               String?
+  createdById        String?
+  createdByName      String?
+  createdAt          DateTime @default(now())
+
+  transaction        TransactionFollowUp @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([eventType])
+  @@index([createdAt])
+}
