@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
+import { deleteGoogleDriveFile } from '../services/googleDrive.js';
 import {
   archiveTransactionExecutiveReport,
   calculateNextTransactionReportRun,
@@ -77,6 +78,14 @@ const directiveUpdateSchema = z.object({
 const directiveReviewSchema = z.object({
   decision: z.enum(['approved', 'return_for_completion', 'request_modification']),
   reviewNote: nullableText(3000),
+});
+
+const directiveEvidenceSchema = z.object({
+  title: z.string().trim().min(1, 'اسم المرفق مطلوب').max(300),
+  driveUrl: z.string().url('رابط الملف غير صحيح'),
+  driveFileId: nullableText(300),
+  mimeType: nullableText(300),
+  notes: nullableText(1000),
 });
 
 const reportArchiveSchema = z.object({
