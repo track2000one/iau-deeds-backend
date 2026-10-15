@@ -658,6 +658,44 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
+  const targets = await getKpiTargets();
+  if (targets.alertsEnabled && supervisorIds.length) {
+    const snapshot = await calculateCurrentKpiSnapshot(targets.alertPeriodDays);
+    if (snapshot.reviewedDirectives > 0) {
+      const evaluation = evaluateKpiMetrics(snapshot, targets);
+      const labels = {
+        firstPassRate: 'الإنجاز من أول مرة',
+        onTimeRate: 'الالتزام بالمواعيد',
+        reworkRate: 'معدل إعادة العمل',
+        avgExecutionHours: 'متوسط زمن التنفيذ',
+        avgApprovalHours: 'متوسط زمن الاعتماد',
+      };
+      const formatKpi = (key, value) =>
+        key.includes('Rate') ? `${value}%` : `${value} ساعة`;
+
+      for (const [key, result] of Object.entries(evaluation)) {
+        if (!['yellow', 'red'].includes(result.status)) continue;
+        const targetText = result.direction === 'min'
+          ? `المستهدف ≥ ${formatKpi(key, result.target)}`
+          : `المستهدف ≤ ${formatKpi(key, result.target)}`;
+        const severity = result.status === 'red' ? 'danger' : 'warning';
+
+        for (const supervisorId of supervisorIds) {
+          await createFollowUpAlert({
+            alertKey: `kpi:${key}:${todayKey}:${supervisorId}`,
+            transactionId: null,
+            userId: supervisorId,
+            kind: 'kpi_target_breach',
+            severity,
+            title: `تنبيه KPI: ${labels[key]}`,
+            message: `${labels[key]} الحالي ${formatKpi(key, result.value)} — ${targetText}. الفترة: آخر ${targets.alertPeriodDays} يومًا.`,
+          });
+          alerts += 1;
+        }
+      }
+    }
+  }
+
   return { scanned: rows.length + directives.length, alerts };
 };
 
