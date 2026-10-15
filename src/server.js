@@ -8,6 +8,7 @@ import { ensureOfficialMosqueSites } from './services/mosqueSites.service.js';
 import { archiveOrphanedMosqueLeaves } from './services/mosqueLeaveLifecycle.service.js';
 import { syncCompletionTaskAlerts } from './routes/mosques.routes.js';
 import { syncTransactionFollowUpAlerts } from './routes/transaction-followup.routes.js';
+import { syncScheduledTransactionReports } from './services/transactionReports.service.js';
 import { backfillEvidenceAuditMirror } from './services/accountingEvidenceAudit.service.js';
 import { prisma } from './prisma.js';
 
@@ -29,6 +30,12 @@ const startServer = async () => {
     void syncTransactionFollowUpAlerts();
   }, 60 * 60 * 1000);
   transactionFollowUpAlertTimer.unref?.();
+
+  await syncScheduledTransactionReports();
+  const transactionReportScheduleTimer = setInterval(() => {
+    void syncScheduledTransactionReports();
+  }, 60 * 60 * 1000);
+  transactionReportScheduleTimer.unref?.();
 
   // The reviewed Stage 6 workbook is the requested accounting baseline. In
   // production we fail closed: if Google Sheets cannot be read or the verified
