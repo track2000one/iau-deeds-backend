@@ -6154,6 +6154,16 @@ router.get('/work-queue', async (req, res, next) => {
           });
         }
       }
+
+      if (bucket !== 'waiting_external' && activeExternalWait) {
+        counts.waiting_external += 1;
+        if (buckets.waiting_external.length < 80) {
+          buckets.waiting_external.push({
+            ...queueItem,
+            queueBucket: 'waiting_external',
+          });
+        }
+      }
     }
 
     const priorityBuckets = [
@@ -8015,6 +8025,18 @@ router.patch('/:id/action', async (req, res, next) => {
       return res.status(409).json({
         message: 'المعاملة مكتملة وبانتظار المراجعة الإشرافية ولا يمكن تعديل حالتها من الموظف',
       });
+    }
+
+    if (current.status === 'waiting_response' && nextStatus !== 'waiting_response') {
+      const activeExternalWait = await prisma.transactionFollowUpExternalWait.findFirst({
+        where: { transactionId: current.id, status: 'active' },
+        select: { id: true },
+      });
+      if (activeExternalWait) {
+        return res.status(409).json({
+          message: 'المعاملة مرتبطة بانتظار جهة نشط؛ سجّل ورود الرد أو ألغِ الانتظار قبل تغيير الحالة',
+        });
+      }
     }
 
     if (FINAL_STATUSES.includes(nextStatus)) {
