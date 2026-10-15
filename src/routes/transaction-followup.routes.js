@@ -483,6 +483,222 @@ router.get('/dashboard', async (req, res, next) => {
   }
 });
 
+router.get('/reports/executive', async (req, res, next) => {
+  try {
+    const now = new Date();
+    const defaultFrom = new Date(now.getFullYear(), now.getMonth(), 1);
+    const defaultTo = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const from = req.query.from
+      ? toDate(String(req.query.from), 'بداية فترة التقرير')
+      : defaultFrom;
+    const toRaw = req.query.to
+      ? toDate(String(req.query.to), 'نهاية فترة التقرير')
+      : defaultTo;
+    const to = new Date(toRaw);
+    to.setHours(23, 59, 59, 999);
+
+    if (from.getTime() > to.getTime()) {
+      return res.status(400).json({ message: 'بداية فترة التقرير يجب أن تسبق نهايتها' });
+    }
+
+    const requestedAssignee = String(req.query.assigneeUserId || '').trim();
+    const mine = String(req.query.mine || '').toLowerCase() === 'true';
+    const supervisor = isSupervisor(req);
+    const scopeAssigneeId = supervisor
+      ? (mine ? req.authUser.id : requestedAssignee || null)
+      : req.authUser.id;
+
+    const assigneeScope = scopeAssigneeId ? { currentAssigneeUserId: scopeAssigneeId } : {};
+    const activityWhere = {
+      ...assigneeScope,
+      OR: [
+        { transactionDate: { gte: from, lte: to } },
+        { completedAt: { gte: from, lte: to } },
+        { closedAt: { gte: from, lte: to } },
+      ],
+    };
+
+    const [rows, overdueSnapshot] = await Promise.all([
+      prisma.transactionFollowUp.findMany({
+        where: activityWhere,
+        select: {
+          id: true,
+          trackingNumber: true,
+          transactionNumber: true,
+          transactionDate: true,
+          transactionType: true,
+          subject: true,
+          sourceEntity: true,
+          priority: true,
+          status: true,
+          currentAssigneeUserId: true,
+          currentAssigneeName: true,
+          assignedAt: true,
+          requiredAction: true,
+          dueDate: true,
+          inactivityAlertDays: true,
+          lastActionAt: true,
+          completedAt: true,
+          closedAt: true,
+          createdAt: true,
+          events: {
+            where: { eventType: { in: ['action_recorded', 'status_changed'] } },
+            select: { createdAt: true },
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+        orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }],
+      }),
+      prisma.transactionFollowUp.findMany({
+        where: {
+          ...assigneeScope,
+          status: { in: OPEN_STATUSES },
+          dueDate: { lte: to },
+        },
+        select: {
+          id: true,
+          trackingNumber: true,
+          transactionNumber: true,
+          subject: true,
+          priority: true,
+          status: true,
+          currentAssigneeName: true,
+          dueDate: true,
+          lastActionAt: true,
+          assignedAt: true,
+          inactivityAlertDays: true,
+          createdAt: true,
+        },
+        orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
+      }),
+    ]);
+
+    const finishedRows = rows.filter((row) => FINAL_STATUSES.includes(row.status) && (row.completedAt || row.closedAt));
+    const completedWithDue = finishedRows.filter((row) => row.dueDate);
+    const onTimeCompleted = completedWithDue.filter((row) => {
+      const finishedAt = row.completedAt || row.closedAt;
+      return finishedAt && new Date(finishedAt).getTime() <= new Date(row.dueDate).getTime();
+    });
+
+    const avg = (values) => values.length
+      ? values.reduce((sum, value) => sum + value, 0) / values.length
+      : null;
+    const round = (value, digits = 1) => value == null ? null : Number(value.toFixed(digits));
+
+    const completionDays = finishedRows
+      .map((row) => {
+        const finishedAt = row.completedAt || row.closedAt;
+        return finishedAt
+          ? Math.max(0, (new Date(finishedAt).getTime() - new Date(row.createdAt).getTime()) / 86400000)
+          : null;
+      })
+      .filter((value) => value != null);
+
+    const firstActionHours = rows.flatMap((row) => {
+      if (!row.assignedAt || !row.events?.length) return [];
+      const assignedAt = new Date(row.assignedAt).getTime();
+      const first = row.events.find((event) => new Date(event.createdAt).getTime() >= assignedAt);
+      return first
+        ? [Math.max(0, (new Date(first.createdAt).getTime() - assignedAt) / 3600000)]
+        : [];
+    });
+
+    const statusCounts = ALL_STATUSES.reduce((acc, status) => {
+      acc[status] = rows.filter((row) => row.status === status).length;
+      return acc;
+    }, {});
+
+    const employeeMap = new Map();
+    rows.forEach((row) => {
+      const key = row.currentAssigneeUserId || '__unassigned__';
+      const current = employeeMap.get(key) || {
+        userId: row.currentAssigneeUserId || null,
+        username: row.currentAssigneeName || 'غير مسندة',
+        total: 0,
+        open: 0,
+        completed: 0,
+        overdue: 0,
+      };
+      current.total += 1;
+      if (OPEN_STATUSES.includes(row.status)) current.open += 1;
+      if (FINAL_STATUSES.includes(row.status)) current.completed += 1;
+      if (row.dueDate && OPEN_STATUSES.includes(row.status) && new Date(row.dueDate).getTime() < to.getTime()) {
+        current.overdue += 1;
+      }
+      employeeMap.set(key, current);
+    });
+
+    const transactions = rows.map((row) => {
+      const indicator = computeIndicator(row);
+      return {
+        id: row.id,
+        trackingNumber: row.trackingNumber,
+        transactionNumber: row.transactionNumber,
+        transactionDate: row.transactionDate,
+        transactionType: row.transactionType,
+        subject: row.subject,
+        sourceEntity: row.sourceEntity,
+        priority: row.priority,
+        status: row.status,
+        currentAssigneeName: row.currentAssigneeName,
+        requiredAction: row.requiredAction,
+        dueDate: row.dueDate,
+        completedAt: row.completedAt,
+        closedAt: row.closedAt,
+        indicator: indicator.indicator,
+        indicatorLabel: indicator.indicatorLabel,
+      };
+    });
+
+    const overdueRows = overdueSnapshot.map((row) => ({
+      id: row.id,
+      trackingNumber: row.trackingNumber,
+      transactionNumber: row.transactionNumber,
+      subject: row.subject,
+      priority: row.priority,
+      status: row.status,
+      currentAssigneeName: row.currentAssigneeName,
+      dueDate: row.dueDate,
+      overdueDays: Math.max(
+        0,
+        Math.floor((to.getTime() - new Date(row.dueDate).getTime()) / 86400000),
+      ),
+      indicatorLabel: computeIndicator(row).indicatorLabel,
+    }));
+
+    res.json({
+      generatedAt: now,
+      period: { from, to },
+      scope: {
+        mine: !supervisor || mine,
+        assigneeUserId: scopeAssigneeId,
+      },
+      summary: {
+        totalIncluded: rows.length,
+        open: rows.filter((row) => OPEN_STATUSES.includes(row.status)).length,
+        completed: finishedRows.length,
+        waiting: rows.filter((row) => row.status === 'waiting_response').length,
+        needsFollowUp: rows.filter((row) => ['needs_follow_up'].includes(row.status)).length,
+        overdueSnapshot: overdueRows.length,
+        onTimeRate: completedWithDue.length
+          ? round((onTimeCompleted.length / completedWithDue.length) * 100, 1)
+          : null,
+        avgCompletionDays: round(avg(completionDays), 1),
+        avgFirstActionHours: round(avg(firstActionHours), 1),
+      },
+      statusCounts,
+      employees: [...employeeMap.values()].sort((a, b) =>
+        (b.overdue - a.overdue) || (b.open - a.open) || (b.total - a.total)
+      ),
+      transactions,
+      overdueSnapshot: overdueRows.slice(0, 100),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/analytics', async (req, res, next) => {
   try {
     const mine = String(req.query.mine || '').toLowerCase() === 'true';
