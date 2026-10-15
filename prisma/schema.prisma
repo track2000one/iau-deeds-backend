@@ -1796,6 +1796,80 @@ model TransactionFollowUpKpiTarget {
   @@index([updatedAt])
 }
 
+model TransactionFollowUpPreventiveAction {
+  id                String   @id @default(cuid())
+  sourceType        String   @default("metric")
+  metricKey         String?
+  metricLabel       String?
+  scopeType         String   @default("global")
+  assigneeUserId    String?
+  assigneeName      String?
+  ownerUserId       String
+  ownerName         String
+  actionText        String
+  expectedOutcome   String?
+  periodDays        Int      @default(30)
+  baselineValue     Float?
+  projectedValue    Float?
+  targetValue       Float?
+  direction         String?
+  sourceRiskScore   Int?
+  sourceRiskLevel   String?
+  sourceReasons     Json?
+  dueDate           DateTime
+  status            String   @default("open")
+  progressNote      String?
+  resultValue       Float?
+  resultRiskScore   Int?
+  resultStatus      String?
+  resultMetTarget   Boolean?
+  verifiedAt        DateTime?
+  verifiedById      String?
+  verifiedByName    String?
+  completedAt       DateTime?
+  failedAt          DateTime?
+  cancelledAt       DateTime?
+  improvementPlanId String?
+  escalatedAt       DateTime?
+  createdById       String?
+  createdByName     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  events            TransactionFollowUpPreventiveActionEvent[]
+
+  @@index([metricKey])
+  @@index([scopeType])
+  @@index([assigneeUserId])
+  @@index([ownerUserId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([improvementPlanId])
+  @@index([createdAt])
+}
+
+model TransactionFollowUpPreventiveActionEvent {
+  id             String   @id @default(cuid())
+  actionId       String
+  action         String
+  fromStatus     String?
+  toStatus       String?
+  note           String?
+  resultValue    Float?
+  resultRiskScore Int?
+  resultStatus   String?
+  resultMetTarget Boolean?
+  changedById    String?
+  changedByName  String?
+  createdAt      DateTime @default(now())
+
+  preventiveAction TransactionFollowUpPreventiveAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+
+  @@index([actionId])
+  @@index([action])
+  @@index([createdAt])
+}
+
 model TransactionFollowUpImprovementPlan {
   id                String   @id @default(cuid())
   metricKey         String
