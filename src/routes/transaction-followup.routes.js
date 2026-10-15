@@ -208,6 +208,92 @@ const evaluateKpiMetrics = (metrics, targets) => ({
   ),
 });
 
+const calculateCurrentKpiSnapshot = async (periodDays) => {
+  const start = new Date(Date.now() - periodDays * 86400000);
+  const directives = await prisma.transactionFollowUpDirective.findMany({
+    where: { reviews: { some: { reviewedAt: { gte: start } } } },
+    select: {
+      id: true,
+      issuedAt: true,
+      dueDate: true,
+      reviews: {
+        select: {
+          decision: true,
+          submittedAt: true,
+          reviewedAt: true,
+        },
+        orderBy: { reviewedAt: 'asc' },
+      },
+    },
+  });
+
+  let reviewedDirectives = 0;
+  let firstCandidates = 0;
+  let firstApproved = 0;
+  let reworkedDirectives = 0;
+  let completedWithDue = 0;
+  let completedOnTime = 0;
+  const executionHours = [];
+  const approvalHours = [];
+
+  for (const directive of directives) {
+    const periodReviews = directive.reviews.filter(
+      (review) => new Date(review.reviewedAt).getTime() >= start.getTime(),
+    );
+    if (!periodReviews.length) continue;
+    reviewedDirectives += 1;
+
+    if (periodReviews.some((review) =>
+      ['return_for_completion', 'request_modification'].includes(review.decision)
+    )) {
+      reworkedDirectives += 1;
+    }
+
+    const firstReview = directive.reviews[0];
+    if (firstReview && new Date(firstReview.reviewedAt).getTime() >= start.getTime()) {
+      firstCandidates += 1;
+      if (firstReview.decision === 'approved') firstApproved += 1;
+      if (firstReview.submittedAt) {
+        executionHours.push(Math.max(
+          0,
+          (new Date(firstReview.submittedAt).getTime() - new Date(directive.issuedAt).getTime()) / 3600000,
+        ));
+      }
+    }
+
+    for (const review of periodReviews) {
+      if (review.submittedAt) {
+        approvalHours.push(Math.max(
+          0,
+          (new Date(review.reviewedAt).getTime() - new Date(review.submittedAt).getTime()) / 3600000,
+        ));
+      }
+      if (review.decision === 'approved' && directive.dueDate && review.submittedAt) {
+        completedWithDue += 1;
+        if (
+          dayNumberFromKey(saudiDayKey(new Date(review.submittedAt))) <=
+          dayNumberFromKey(saudiDayKey(new Date(directive.dueDate)))
+        ) {
+          completedOnTime += 1;
+        }
+      }
+    }
+  }
+
+  const average = (values) =>
+    values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  const rounded = (value) => value == null ? null : Number(value.toFixed(1));
+
+  return {
+    reviewedDirectives,
+    firstPassRate: firstCandidates ? rounded((firstApproved / firstCandidates) * 100) : null,
+    reworkRate: reviewedDirectives ? rounded((reworkedDirectives / reviewedDirectives) * 100) : null,
+    avgExecutionHours: rounded(average(executionHours)),
+    avgApprovalHours: rounded(average(approvalHours)),
+    onTimeRate: completedWithDue ? rounded((completedOnTime / completedWithDue) * 100) : null,
+  };
+};
+
 const canActOnRecord = (req, record) =>
   isSupervisor(req) ||
   record.createdById === req.authUser?.id ||
