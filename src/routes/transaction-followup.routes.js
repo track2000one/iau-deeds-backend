@@ -2118,19 +2118,22 @@ router.patch('/:id/directives/:directiveId/review', async (req, res, next) => {
     const approved = input.decision === 'approved';
     const nextStatus = approved ? 'completed' : 'returned';
 
-    const updated = await prisma.transactionFollowUpDirective.update({
-      where: { id: directive.id },
-      data: {
-        status: nextStatus,
-        completedAt: approved ? now : null,
-        reviewDecision: input.decision,
-        reviewNote: input.reviewNote || null,
-        reviewedAt: now,
-        reviewedById: reviewer.id,
-        reviewedByName: reviewer.name,
-        lastUpdatedById: reviewer.id,
-        lastUpdatedByName: reviewer.name,
+    const evidence = await prisma.attachment.findMany({
+      where: {
+        entityType: 'transaction_follow_up_directive',
+        entityId: directive.id,
       },
+      select: {
+        id: true,
+        title: true,
+        driveUrl: true,
+        driveFileId: true,
+        mimeType: true,
+        notes: true,
+        createdBy: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'asc' },
     });
 
     const decisionLabel =
@@ -2140,20 +2143,52 @@ router.patch('/:id/directives/:directiveId/review', async (req, res, next) => {
           ? 'إعادة التوجيه للاستكمال'
           : 'طلب تعديل على نتيجة التنفيذ';
 
-    await prisma.transactionFollowUpEvent.create({
-      data: {
-        transactionId: directive.transactionId,
-        eventType: 'directive_reviewed',
-        fromAssigneeUserId: directive.assigneeUserId,
-        fromAssigneeName: directive.assigneeName,
-        toAssigneeUserId: directive.assigneeUserId,
-        toAssigneeName: directive.assigneeName,
-        actionText: `${decisionLabel}: ${directive.title}`,
-        note: input.reviewNote || null,
-        createdById: reviewer.id,
-        createdByName: reviewer.name,
-      },
-    });
+    const [updated] = await prisma.$transaction([
+      prisma.transactionFollowUpDirective.update({
+        where: { id: directive.id },
+        data: {
+          status: nextStatus,
+          completedAt: approved ? now : null,
+          reviewDecision: input.decision,
+          reviewNote: input.reviewNote || null,
+          reviewedAt: now,
+          reviewedById: reviewer.id,
+          reviewedByName: reviewer.name,
+          lastUpdatedById: reviewer.id,
+          lastUpdatedByName: reviewer.name,
+        },
+      }),
+      prisma.transactionFollowUpDirectiveReview.create({
+        data: {
+          directiveId: directive.id,
+          decision: input.decision,
+          previousStatus: directive.status,
+          nextStatus,
+          reviewNote: input.reviewNote || null,
+          completionResponse: directive.completionResponse || null,
+          completionNote: directive.completionNote || null,
+          submittedAt: directive.completionSubmittedAt || null,
+          evidenceSnapshot: evidence,
+          reviewedById: reviewer.id,
+          reviewedByName: reviewer.name,
+          reviewedAt: now,
+        },
+      }),
+      prisma.transactionFollowUpEvent.create({
+        data: {
+          transactionId: directive.transactionId,
+          eventType: 'directive_reviewed',
+          fromAssigneeUserId: directive.assigneeUserId,
+          fromAssigneeName: directive.assigneeName,
+          toAssigneeUserId: directive.assigneeUserId,
+          toAssigneeName: directive.assigneeName,
+          actionText: `${decisionLabel}: ${directive.title}`,
+          note: input.reviewNote || null,
+          createdById: reviewer.id,
+          createdByName: reviewer.name,
+        },
+      }),
+    ]);
 
     await createFollowUpAlert({
       alertKey: `directive:${directive.id}:review:${input.decision}:${now.toISOString()}:${directive.assigneeUserId}`,
