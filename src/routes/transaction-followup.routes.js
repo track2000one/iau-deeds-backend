@@ -199,7 +199,7 @@ const riskRegisterUpdateSchema = z.object({
   residualProbability: z.coerce.number().int().min(1).max(5).optional(),
   residualImpact: z.coerce.number().int().min(1).max(5).optional(),
   reviewDate: nullableText(100),
-  status: z.enum(['open', 'monitoring', 'controlled', 'closed']).optional(),
+  status: z.enum(['open', 'monitoring', 'controlled', 'accepted', 'closed']).optional(),
   recurrenceCount: z.coerce.number().int().min(0).max(100000).optional(),
   notes: nullableText(5000),
 });
@@ -2371,6 +2371,415 @@ router.get('/directives/risks', async (req, res, next) => {
   }
 });
 
+router.get('/directives/risk-acceptances', async (req, res, next) => {
+  try {
+    const status = String(req.query.status || '').trim();
+    const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const pageSize = Math.min(50, Math.max(10, Number.parseInt(String(req.query.pageSize || '20'), 10) || 20));
+    const supervisor = isSupervisor(req);
+    const currentUserId = req.authUser?.id;
+    const visibility = supervisor
+      ? {}
+      : {
+          OR: [
+            { requestedById: currentUserId },
+            { risk: { ownerUserId: currentUserId } },
+            { risk: { assigneeUserId: currentUserId } },
+          ],
+        };
+    const filters = {
+      ...visibility,
+      ...(['pending', 'approved', 'rejected', 'cancelled', 'expired'].includes(status)
+        ? { status }
+        : {}),
+    };
+    const now = new Date();
+    const sevenDays = new Date(now.getTime() + 7 * 86400000);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 86400000);
+
+    const [total, items, pending, activeApproved, expiringSoon, rejected30d, expired30d] = await Promise.all([
+      prisma.transactionFollowUpRiskAcceptanceRequest.count({ where: filters }),
+      prisma.transactionFollowUpRiskAcceptanceRequest.findMany({
+        where: filters,
+        include: {
+          risk: {
+            select: {
+              id: true,
+              riskNumber: true,
+              title: true,
+              category: true,
+              ownerUserId: true,
+              ownerName: true,
+              assigneeUserId: true,
+              assigneeName: true,
+              residualScore: true,
+              residualLevel: true,
+              status: true,
+              acceptanceExpiresAt: true,
+            },
+          },
+        },
+        orderBy: [{ createdAt: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.transactionFollowUpRiskAcceptanceRequest.count({
+        where: { ...visibility, status: 'pending' },
+      }),
+      prisma.transactionFollowUpRiskAcceptanceRequest.count({
+        where: {
+          ...visibility,
+          status: 'approved',
+          requestedUntil: { gt: now },
+        },
+      }),
+      prisma.transactionFollowUpRiskAcceptanceRequest.count({
+        where: {
+          ...visibility,
+          status: 'approved',
+          requestedUntil: { gt: now, lte: sevenDays },
+        },
+      }),
+      prisma.transactionFollowUpRiskAcceptanceRequest.count({
+        where: {
+          ...visibility,
+          status: 'rejected',
+          decisionAt: { gte: thirtyDaysAgo },
+        },
+      }),
+      prisma.transactionFollowUpRiskAcceptanceRequest.count({
+        where: {
+          ...visibility,
+          status: 'expired',
+          expiredAt: { gte: thirtyDaysAgo },
+        },
+      }),
+    ]);
+
+    res.json({
+      generatedAt: now,
+      supervisor,
+      summary: {
+        pending,
+        activeApproved,
+        expiringSoon,
+        rejected30d,
+        expired30d,
+      },
+      items,
+      total,
+      page,
+      pageSize,
+      totalPages: total ? Math.ceil(total / pageSize) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/directives/risks/:id/acceptance-requests', async (req, res, next) => {
+  try {
+    const input = riskAcceptanceRequestSchema.parse(req.body);
+    const risk = await prisma.transactionFollowUpRiskRegister.findUnique({
+      where: { id: req.params.id },
+      include: {
+        acceptanceRequests: {
+          where: { status: 'pending' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+    if (!risk) return res.status(404).json({ message: 'سجل الخطر غير موجود' });
+
+    const supervisor = isSupervisor(req);
+    const canRequest =
+      supervisor ||
+      risk.ownerUserId === req.authUser?.id ||
+      risk.assigneeUserId === req.authUser?.id;
+    if (!canRequest) {
+      return res.status(403).json({ message: 'لا يمكنك طلب قبول هذا الخطر' });
+    }
+    if (risk.status === 'closed') {
+      return res.status(409).json({ message: 'لا يمكن طلب قبول خطر مغلق' });
+    }
+    if (
+      risk.status === 'accepted' &&
+      risk.acceptanceExpiresAt &&
+      new Date(risk.acceptanceExpiresAt).getTime() > Date.now()
+    ) {
+      return res.status(409).json({ message: 'الخطر مقبول حاليًا حتى انتهاء مدة القبول المعتمدة' });
+    }
+    if (risk.acceptanceRequests.length) {
+      return res.status(409).json({ message: 'يوجد طلب قبول معلق لهذا الخطر بالفعل' });
+    }
+
+    const requestedUntil = toDate(input.requestedUntil, 'تاريخ انتهاء قبول الخطر');
+    const now = new Date();
+    const maxUntil = new Date(now.getTime() + 365 * 86400000);
+    if (requestedUntil.getTime() <= now.getTime()) {
+      return res.status(400).json({ message: 'تاريخ انتهاء القبول يجب أن يكون في المستقبل' });
+    }
+    if (requestedUntil.getTime() > maxUntil.getTime()) {
+      return res.status(400).json({ message: 'مدة قبول الخطر لا يمكن أن تتجاوز سنة واحدة' });
+    }
+    if (risk.residualScore > 9 && !(input.compensatingControls || []).length) {
+      return res.status(400).json({
+        message: 'الخطر خارج شهية المخاطر؛ يلزم تحديد ضابط تعويضي واحد على الأقل قبل طلب القبول',
+      });
+    }
+
+    const requestedBy = actor(req);
+    const request = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpRiskAcceptanceRequest.create({
+        data: {
+          riskId: risk.id,
+          justification: input.justification,
+          compensatingControls: input.compensatingControls || [],
+          requestedUntil,
+          requestedById: requestedBy.id,
+          requestedByName: requestedBy.name,
+        },
+        include: {
+          risk: {
+            select: {
+              id: true,
+              riskNumber: true,
+              title: true,
+              category: true,
+              ownerUserId: true,
+              ownerName: true,
+              residualScore: true,
+              residualLevel: true,
+              status: true,
+            },
+          },
+        },
+      });
+
+      await tx.transactionFollowUpRiskRegisterEvent.create({
+        data: {
+          riskId: risk.id,
+          action: 'acceptance_requested',
+          fromStatus: risk.status,
+          toStatus: risk.status,
+          residualProbability: risk.residualProbability,
+          residualImpact: risk.residualImpact,
+          residualScore: risk.residualScore,
+          residualLevel: risk.residualLevel,
+          note: `طلب قبول الخطر حتى ${saudiDayKey(requestedUntil)}: ${input.justification}`,
+          changedById: requestedBy.id,
+          changedByName: requestedBy.name,
+        },
+      });
+
+      return row;
+    });
+
+    const supervisorIds = await getFollowUpSupervisorIds();
+    for (const supervisorId of supervisorIds) {
+      if (supervisorId === requestedBy.id) continue;
+      await createFollowUpAlert({
+        alertKey: `risk:${risk.id}:acceptance_pending:${request.id}:${supervisorId}`,
+        transactionId: null,
+        userId: supervisorId,
+        kind: 'risk_acceptance_pending',
+        severity: risk.residualScore > 9 ? 'danger' : 'warning',
+        title: 'طلب اعتماد قبول خطر',
+        message: `${risk.riskNumber} — ${risk.title}. طلب قبول حتى ${saudiDayKey(requestedUntil)} بانتظار القرار الإداري.`,
+      });
+    }
+
+    res.status(201).json(request);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/risk-acceptances/:id/decision', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'اعتماد أو رفض قبول المخاطر متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = riskAcceptanceDecisionSchema.parse(req.body);
+    const request = await prisma.transactionFollowUpRiskAcceptanceRequest.findUnique({
+      where: { id: req.params.id },
+      include: { risk: true },
+    });
+    if (!request) return res.status(404).json({ message: 'طلب قبول الخطر غير موجود' });
+    if (request.status !== 'pending') {
+      return res.status(409).json({ message: 'تم البت في طلب قبول الخطر مسبقًا' });
+    }
+
+    const reviewer = actor(req);
+    if (request.requestedById === reviewer.id) {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      const hasOtherApprover = supervisorIds.some((id) => id !== reviewer.id);
+      if (hasOtherApprover || req.authUser?.role !== 'admin') {
+        return res.status(409).json({
+          message: 'لا يمكن لمقدم طلب قبول الخطر اعتماد طلبه؛ يلزم اعتماد مشرف آخر',
+        });
+      }
+    }
+
+    const now = new Date();
+    if (new Date(request.requestedUntil).getTime() <= now.getTime()) {
+      await prisma.transactionFollowUpRiskAcceptanceRequest.update({
+        where: { id: request.id },
+        data: { status: 'expired', expiredAt: now },
+      });
+      return res.status(409).json({ message: 'انتهت مدة القبول المطلوبة قبل اتخاذ القرار؛ أنشئ طلبًا جديدًا' });
+    }
+
+    const approved = input.decision === 'approved';
+    const currentRisk = request.risk;
+    const nextReviewDate = approved
+      ? (
+          currentRisk.reviewDate &&
+          new Date(currentRisk.reviewDate).getTime() < new Date(request.requestedUntil).getTime()
+            ? currentRisk.reviewDate
+            : request.requestedUntil
+        )
+      : currentRisk.reviewDate;
+
+    const updatedRequest = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpRiskAcceptanceRequest.update({
+        where: { id: request.id },
+        data: {
+          status: input.decision,
+          reviewedById: reviewer.id,
+          reviewedByName: reviewer.name,
+          reviewComment: input.reviewComment,
+          decisionAt: now,
+        },
+        include: {
+          risk: {
+            select: {
+              id: true,
+              riskNumber: true,
+              title: true,
+              ownerUserId: true,
+              ownerName: true,
+              residualScore: true,
+              residualLevel: true,
+              status: true,
+              acceptanceExpiresAt: true,
+            },
+          },
+        },
+      });
+
+      if (approved) {
+        await tx.transactionFollowUpRiskRegister.update({
+          where: { id: currentRisk.id },
+          data: {
+            status: 'accepted',
+            acceptanceExpiresAt: request.requestedUntil,
+            acceptanceApprovedAt: now,
+            acceptanceApprovedById: reviewer.id,
+            acceptanceApprovedByName: reviewer.name,
+            acceptanceReason: request.justification,
+            reviewDate: nextReviewDate,
+            updatedById: reviewer.id,
+            updatedByName: reviewer.name,
+          },
+        });
+      }
+
+      await tx.transactionFollowUpRiskRegisterEvent.create({
+        data: {
+          riskId: currentRisk.id,
+          action: approved ? 'acceptance_approved' : 'acceptance_rejected',
+          fromStatus: currentRisk.status,
+          toStatus: approved ? 'accepted' : currentRisk.status,
+          residualProbability: currentRisk.residualProbability,
+          residualImpact: currentRisk.residualImpact,
+          residualScore: currentRisk.residualScore,
+          residualLevel: currentRisk.residualLevel,
+          note: `${approved ? 'اعتماد' : 'رفض'} قبول الخطر: ${input.reviewComment}`,
+          changedById: reviewer.id,
+          changedByName: reviewer.name,
+        },
+      });
+
+      return row;
+    });
+
+    const recipients = new Set([
+      request.requestedById,
+      currentRisk.ownerUserId,
+    ].filter(Boolean));
+    for (const userId of recipients) {
+      await createFollowUpAlert({
+        alertKey: `risk:${currentRisk.id}:acceptance_${input.decision}:${request.id}:${userId}`,
+        transactionId: null,
+        userId,
+        kind: approved ? 'risk_acceptance_approved' : 'risk_acceptance_rejected',
+        severity: approved ? 'info' : 'warning',
+        title: approved ? 'تم اعتماد قبول الخطر' : 'تم رفض طلب قبول الخطر',
+        message: approved
+          ? `${currentRisk.riskNumber} — تم قبول الخطر حتى ${saudiDayKey(new Date(request.requestedUntil))}.`
+          : `${currentRisk.riskNumber} — تم رفض طلب القبول. ${input.reviewComment}`,
+      });
+    }
+
+    res.json(updatedRequest);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/risk-acceptances/:id/cancel', async (req, res, next) => {
+  try {
+    const request = await prisma.transactionFollowUpRiskAcceptanceRequest.findUnique({
+      where: { id: req.params.id },
+      include: { risk: true },
+    });
+    if (!request) return res.status(404).json({ message: 'طلب قبول الخطر غير موجود' });
+    if (request.status !== 'pending') {
+      return res.status(409).json({ message: 'لا يمكن إلغاء طلب تم البت فيه' });
+    }
+    const supervisor = isSupervisor(req);
+    if (!supervisor && request.requestedById !== req.authUser?.id) {
+      return res.status(403).json({ message: 'لا يمكنك إلغاء هذا الطلب' });
+    }
+
+    const changedBy = actor(req);
+    const now = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpRiskAcceptanceRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'cancelled',
+          cancelledAt: now,
+        },
+        include: { risk: true },
+      });
+      await tx.transactionFollowUpRiskRegisterEvent.create({
+        data: {
+          riskId: request.riskId,
+          action: 'acceptance_cancelled',
+          fromStatus: request.risk.status,
+          toStatus: request.risk.status,
+          residualProbability: request.risk.residualProbability,
+          residualImpact: request.risk.residualImpact,
+          residualScore: request.risk.residualScore,
+          residualLevel: request.risk.residualLevel,
+          note: 'إلغاء طلب قبول الخطر قبل اتخاذ القرار',
+          changedById: changedBy.id,
+          changedByName: changedBy.name,
+        },
+      });
+      return row;
+    });
+
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/directives/risk-dashboard', async (req, res, next) => {
   try {
     if (!isSupervisor(req)) {
@@ -2890,6 +3299,11 @@ router.post('/directives/risks', async (req, res, next) => {
 router.patch('/directives/risks/:id', async (req, res, next) => {
   try {
     const input = riskRegisterUpdateSchema.parse(req.body);
+    if (input.status === 'accepted') {
+      return res.status(409).json({
+        message: 'لا يمكن قبول الخطر مباشرة؛ أنشئ طلب قبول واعتمده عبر مسار الحوكمة',
+      });
+    }
     const current = await prisma.transactionFollowUpRiskRegister.findUnique({
       where: { id: req.params.id },
     });
