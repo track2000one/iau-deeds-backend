@@ -5635,6 +5635,62 @@ router.patch('/external-waits/:id/response', async (req, res, next) => {
   }
 });
 
+router.patch('/external-waits/:id/cancel', async (req, res, next) => {
+  try {
+    const input = externalWaitCancelSchema.parse(req.body);
+    const wait = await prisma.transactionFollowUpExternalWait.findUnique({
+      where: { id: req.params.id },
+      include: { transaction: true },
+    });
+    if (!wait) return res.status(404).json({ message: 'سجل انتظار الجهة غير موجود' });
+    if (!canActOnRecord(req, wait.transaction)) return denyRecordAccess(res);
+    if (wait.status !== 'active') {
+      return res.status(409).json({ message: 'حالة الانتظار منتهية مسبقًا' });
+    }
+
+    const changedBy = actor(req);
+    const changedAt = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpExternalWait.update({
+        where: { id: wait.id },
+        data: {
+          status: 'cancelled',
+          responseNote: input.note,
+          closedById: changedBy.id,
+          closedByName: changedBy.name,
+          closedAt: changedAt,
+        },
+      });
+      await tx.transactionFollowUp.update({
+        where: { id: wait.transactionId },
+        data: {
+          status: 'in_progress',
+          lastActionAt: changedAt,
+          lastActionByUserId: changedBy.id,
+          lastActionByName: changedBy.name,
+        },
+      });
+      await tx.transactionFollowUpEvent.create({
+        data: {
+          transactionId: wait.transactionId,
+          eventType: 'external_wait_cancelled',
+          fromStatus: wait.transaction.status,
+          toStatus: 'in_progress',
+          actionText: `إلغاء انتظار الرد من ${wait.externalEntity} واستئناف العمل`,
+          note: input.note,
+          createdById: changedBy.id,
+          createdByName: changedBy.name,
+        },
+      });
+      return row;
+    });
+
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/extension-requests', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
