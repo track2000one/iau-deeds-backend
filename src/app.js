@@ -23,6 +23,7 @@ import assetsRoutes from './routes/assets.routes.js';
 import assetCyclesRoutes from './routes/asset-cycles.routes.js';
 import assetsFastRoutes from './routes/assets-fast.routes.js';
 import contractsFollowUpRoutes from './routes/contracts-followup.routes.js';
+import transactionFollowUpRoutes from './routes/transaction-followup.routes.js';
 import mosquesRoutes, { mosquesPublicRoutes } from './routes/mosques.routes.js';
 import mosqueJobImportRoutes from './routes/mosques-job-import.routes.js';
 import accountingTransformationRoutes from './routes/accounting-transformation.routes.js';
@@ -149,6 +150,14 @@ app.use(
   requireAuth,
   auditTrail('contracts_followup'),
   contractsFollowUpRoutes
+);
+
+app.use(
+  '/api/transaction-follow-up',
+  requireAuth,
+  auditTrail('transaction_follow_up'),
+  requirePermission('transaction_follow_up'),
+  transactionFollowUpRoutes
 );
 
 app.use(
