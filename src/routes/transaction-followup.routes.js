@@ -1201,6 +1201,33 @@ export const syncTransactionFollowUpAlerts = async () => {
     if (!risk) continue;
 
     if (acceptance.status === 'pending') {
+      const requestedUntilKey = saudiDayKey(new Date(acceptance.requestedUntil));
+      const requestedUntilNumber = dayNumberFromKey(requestedUntilKey);
+      if (requestedUntilNumber < todayNumber) {
+        await prisma.transactionFollowUpRiskAcceptanceRequest.updateMany({
+          where: { id: acceptance.id, status: 'pending' },
+          data: { status: 'expired', expiredAt: new Date() },
+        });
+        const recipients = new Set([
+          acceptance.requestedById,
+          risk.ownerUserId,
+          ...supervisorIds,
+        ].filter(Boolean));
+        for (const userId of recipients) {
+          await createFollowUpAlert({
+            alertKey: `risk:${risk.id}:acceptance_request_expired:${acceptance.id}:${userId}`,
+            transactionId: null,
+            userId,
+            kind: 'risk_acceptance_request_expired',
+            severity: 'warning',
+            title: 'انتهت صلاحية طلب قبول خطر',
+            message: `${risk.riskNumber} — انتهت المدة المطلوبة قبل اعتماد طلب القبول، ويلزم رفع طلب جديد عند الحاجة.`,
+          });
+          alerts += 1;
+        }
+        continue;
+      }
+
       const ageDays = Math.max(
         0,
         todayNumber - dayNumberFromKey(saudiDayKey(new Date(acceptance.createdAt)))
@@ -2573,6 +2600,7 @@ router.get('/directives/risk-acceptances', async (req, res, next) => {
           ...visibility,
           status: 'approved',
           requestedUntil: { gt: now },
+          risk: { status: 'accepted' },
         },
       }),
       prisma.transactionFollowUpRiskAcceptanceRequest.count({
@@ -2580,6 +2608,7 @@ router.get('/directives/risk-acceptances', async (req, res, next) => {
           ...visibility,
           status: 'approved',
           requestedUntil: { gt: now, lte: sevenDays },
+          risk: { status: 'accepted' },
         },
       }),
       prisma.transactionFollowUpRiskAcceptanceRequest.count({
@@ -3058,11 +3087,15 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
 
     const acceptancePending = riskAcceptances.filter((item) => item.status === 'pending').length;
     const acceptanceActive = riskAcceptances.filter(
-      (item) => item.status === 'approved' && new Date(item.requestedUntil).getTime() > now.getTime()
+      (item) =>
+        item.status === 'approved' &&
+        item.risk?.status === 'accepted' &&
+        new Date(item.requestedUntil).getTime() > now.getTime()
     ).length;
     const acceptanceExpiringSoon = riskAcceptances.filter(
       (item) =>
         item.status === 'approved' &&
+        item.risk?.status === 'accepted' &&
         new Date(item.requestedUntil).getTime() > now.getTime() &&
         new Date(item.requestedUntil).getTime() <= now.getTime() + 7 * 86400000
     ).length;
