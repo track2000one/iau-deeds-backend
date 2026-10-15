@@ -367,23 +367,34 @@ const alertCopy = (record, indicator, escalated = false) => {
 };
 
 export const syncTransactionFollowUpAlerts = async () => {
-  const rows = await prisma.transactionFollowUp.findMany({
-    where: { status: { in: OPEN_STATUSES } },
-    select: {
-      id: true,
-      transactionNumber: true,
-      subject: true,
-      status: true,
-      currentAssigneeUserId: true,
-      dueDate: true,
-      assignedAt: true,
-      lastActionAt: true,
-      inactivityAlertDays: true,
-      createdAt: true,
-    },
-  });
-
-  if (!rows.length) return { scanned: 0, alerts: 0 };
+  const [rows, directives] = await Promise.all([
+    prisma.transactionFollowUp.findMany({
+      where: { status: { in: OPEN_STATUSES } },
+      select: {
+        id: true,
+        transactionNumber: true,
+        subject: true,
+        status: true,
+        currentAssigneeUserId: true,
+        dueDate: true,
+        assignedAt: true,
+        lastActionAt: true,
+        inactivityAlertDays: true,
+        createdAt: true,
+      },
+    }),
+    prisma.transactionFollowUpDirective.findMany({
+      where: {
+        status: { in: ['pending', 'in_progress'] },
+        dueDate: { not: null },
+      },
+      include: {
+        transaction: {
+          select: { id: true, transactionNumber: true, subject: true },
+        },
+      },
+    }),
+  ]);
 
   const supervisorIds = await getFollowUpSupervisorIds();
   const dayKey = saudiDayKey();
@@ -424,7 +435,52 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
-  return { scanned: rows.length, alerts };
+  const todayKey = saudiDayKey();
+  const todayNumber = dayNumberFromKey(todayKey);
+
+  for (const directive of directives) {
+    const dueKey = saudiDayKey(new Date(directive.dueDate));
+    const dueNumber = dayNumberFromKey(dueKey);
+    const daysOverdue = Math.max(0, todayNumber - dueNumber);
+    const dueToday = dueKey === todayKey;
+    if (!daysOverdue && !dueToday) continue;
+
+    const title = directive.directiveType === 'decision' ? 'قرار إداري' : 'توجيه إداري';
+    const severity = daysOverdue ? 'danger' : 'warning';
+    const kind = daysOverdue ? 'directive_overdue' : 'directive_due_today';
+    const message = daysOverdue
+      ? `${title}: ${directive.title} — المعاملة ${directive.transaction.transactionNumber}. متأخر ${daysOverdue} يوم.`
+      : `${title}: ${directive.title} — المعاملة ${directive.transaction.transactionNumber}. مستحق اليوم.`;
+
+    await createFollowUpAlert({
+      alertKey: `${directive.transactionId}:${directive.id}:${kind}:${todayKey}:${directive.assigneeUserId}`,
+      transactionId: directive.transactionId,
+      userId: directive.assigneeUserId,
+      kind,
+      severity,
+      title: daysOverdue ? 'توجيه إداري متأخر' : 'توجيه إداري مستحق اليوم',
+      message,
+    });
+    alerts += 1;
+
+    if (daysOverdue) {
+      for (const supervisorId of supervisorIds) {
+        if (supervisorId === directive.assigneeUserId) continue;
+        await createFollowUpAlert({
+          alertKey: `${directive.transactionId}:${directive.id}:directive_escalation:${todayKey}:${supervisorId}`,
+          transactionId: directive.transactionId,
+          userId: supervisorId,
+          kind: 'directive_escalation',
+          severity: 'danger',
+          title: 'تصعيد توجيه إداري متأخر',
+          message,
+        });
+        alerts += 1;
+      }
+    }
+  }
+
+  return { scanned: rows.length + directives.length, alerts };
 };
 
 router.get('/assignees', async (_req, res, next) => {
