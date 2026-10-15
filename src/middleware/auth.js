@@ -91,6 +91,15 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canCreateUser';
   }
 
+  // Reading follow-up alerts is a view operation even though marking them read uses PATCH.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'PATCH' &&
+    /\/alerts\/(?:read-all|[^/]+\/read)\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canView';
+  }
+
   // GIS bulk geometry changes are editing operations even though they use POST
   // to submit a transactional batch payload.
   if (
