@@ -1652,6 +1652,7 @@ model TransactionFollowUp {
   events                TransactionFollowUpEvent[]
   alerts                TransactionFollowUpAlert[]
   directives            TransactionFollowUpDirective[]
+  extensionRequests       TransactionFollowUpExtensionRequest[]
 
   @@index([transactionNumber])
   @@index([transactionDate])
@@ -1726,6 +1727,33 @@ model TransactionFollowUpDirectiveReview {
   @@index([decision])
   @@index([reviewedById])
   @@index([reviewedAt])
+}
+
+model TransactionFollowUpExtensionRequest {
+  id                  String   @id @default(cuid())
+  transactionId       String
+  currentDueDate      DateTime
+  requestedDueDate    DateTime
+  reason              String
+  status              String   @default("pending")
+  requestedById       String
+  requestedByName     String
+  reviewedById        String?
+  reviewedByName      String?
+  reviewNote          String?
+  decisionAt          DateTime?
+  cancelledAt         DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  transaction         TransactionFollowUp @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([status])
+  @@index([requestedDueDate])
+  @@index([requestedById])
+  @@index([reviewedById])
+  @@index([createdAt])
 }
 
 model TransactionFollowUpEvent {

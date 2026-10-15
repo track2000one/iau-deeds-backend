@@ -73,6 +73,16 @@ const workQueueQuickActionSchema = z.object({
   note: nullableText(3000),
 });
 
+const extensionRequestCreateSchema = z.object({
+  requestedDueDate: z.string().trim().min(1, 'تاريخ التمديد المقترح مطلوب'),
+  reason: z.string().trim().min(5, 'سبب طلب التمديد مطلوب').max(3000),
+});
+
+const extensionRequestDecisionSchema = z.object({
+  decision: z.enum(['approved', 'rejected']),
+  reviewNote: nullableText(3000),
+});
+
 const directiveCreateSchema = z.object({
   directiveType: z.enum(['directive', 'decision']).default('directive'),
   title: z.string().trim().min(2, 'عنوان التوجيه أو القرار مطلوب').max(300),
@@ -5346,6 +5356,298 @@ router.patch('/alerts/:id/read', async (req, res, next) => {
   }
 });
 
+router.get('/extension-requests', async (req, res, next) => {
+  try {
+    const supervisor = isSupervisor(req);
+    const status = String(req.query.status || 'pending').trim();
+    const allowedStatuses = ['pending', 'approved', 'rejected', 'cancelled'];
+    const where = {
+      ...(allowedStatuses.includes(status) ? { status } : {}),
+      ...(!supervisor
+        ? {
+            OR: [
+              { requestedById: req.authUser.id },
+              { transaction: { currentAssigneeUserId: req.authUser.id } },
+            ],
+          }
+        : {}),
+    };
+
+    const rows = await prisma.transactionFollowUpExtensionRequest.findMany({
+      where,
+      include: {
+        transaction: {
+          select: {
+            id: true,
+            trackingNumber: true,
+            transactionNumber: true,
+            subject: true,
+            priority: true,
+            status: true,
+            currentAssigneeUserId: true,
+            currentAssigneeName: true,
+            dueDate: true,
+          },
+        },
+      },
+      orderBy: [{ createdAt: 'desc' }],
+      take: 100,
+    });
+
+    res.json(rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/:id/extension-requests', async (req, res, next) => {
+  try {
+    const input = extensionRequestCreateSchema.parse(req.body);
+    const current = await prisma.transactionFollowUp.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (!canActOnRecord(req, current)) return denyRecordAccess(res);
+    if (FINAL_STATUSES.includes(current.status)) {
+      return res.status(409).json({ message: 'لا يمكن طلب تمديد لمعاملة منجزة أو مغلقة' });
+    }
+    if (!current.dueDate) {
+      return res.status(409).json({ message: 'لا يوجد تاريخ استحقاق حالي للمعاملة حتى يتم تمديده' });
+    }
+
+    const existingPending = await prisma.transactionFollowUpExtensionRequest.findFirst({
+      where: { transactionId: current.id, status: 'pending' },
+    });
+    if (existingPending) {
+      return res.status(409).json({ message: 'يوجد طلب تمديد معلق لهذه المعاملة بالفعل' });
+    }
+
+    const requestedDueDate = toDate(input.requestedDueDate, 'تاريخ التمديد المقترح');
+    const todayNumber = dayNumberFromKey(saudiDayKey());
+    const currentDueNumber = dayNumberFromKey(saudiDayKey(new Date(current.dueDate)));
+    const requestedNumber = dayNumberFromKey(saudiDayKey(requestedDueDate));
+
+    if (requestedNumber <= currentDueNumber) {
+      return res.status(400).json({ message: 'تاريخ التمديد المقترح يجب أن يكون بعد تاريخ الاستحقاق الحالي' });
+    }
+    if (requestedNumber <= todayNumber) {
+      return res.status(400).json({ message: 'تاريخ التمديد المقترح يجب أن يكون تاريخًا مستقبليًا' });
+    }
+    if (requestedNumber - todayNumber > 365) {
+      return res.status(400).json({ message: 'مدة التمديد المقترحة لا يمكن أن تتجاوز سنة من تاريخ اليوم' });
+    }
+
+    const requestedBy = actor(req);
+    const createdAt = new Date();
+    const request = await prisma.$transaction(async (tx) => {
+      const created = await tx.transactionFollowUpExtensionRequest.create({
+        data: {
+          transactionId: current.id,
+          currentDueDate: current.dueDate,
+          requestedDueDate,
+          reason: input.reason,
+          requestedById: requestedBy.id,
+          requestedByName: requestedBy.name,
+        },
+      });
+
+      await tx.transactionFollowUpEvent.create({
+        data: {
+          transactionId: current.id,
+          eventType: 'extension_requested',
+          fromStatus: current.status,
+          toStatus: current.status,
+          fromAssigneeUserId: current.currentAssigneeUserId,
+          fromAssigneeName: current.currentAssigneeName,
+          toAssigneeUserId: current.currentAssigneeUserId,
+          toAssigneeName: current.currentAssigneeName,
+          actionText: `طلب تمديد تاريخ الاستحقاق من ${saudiDayKey(new Date(current.dueDate))} إلى ${saudiDayKey(requestedDueDate)}`,
+          note: input.reason,
+          createdById: requestedBy.id,
+          createdByName: requestedBy.name,
+        },
+      });
+
+      return created;
+    });
+
+    const supervisorIds = await getFollowUpSupervisorIds();
+    const overdue = currentDueNumber < todayNumber;
+    for (const userId of supervisorIds) {
+      if (userId === requestedBy.id) continue;
+      await createFollowUpAlert({
+        alertKey: `transaction:${current.id}:extension_request:${request.id}:${userId}`,
+        transactionId: current.id,
+        userId,
+        kind: 'transaction_extension_requested',
+        severity: overdue ? 'danger' : 'warning',
+        title: 'طلب تمديد معاملة بانتظار الاعتماد',
+        message: `${current.transactionNumber} — طلب ${requestedBy.name} تمديد الاستحقاق إلى ${saudiDayKey(requestedDueDate)}. السبب: ${input.reason}`,
+      });
+    }
+
+    res.status(201).json(request);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/extension-requests/:id/decision', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'اعتماد أو رفض طلب التمديد متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = extensionRequestDecisionSchema.parse(req.body);
+    const request = await prisma.transactionFollowUpExtensionRequest.findUnique({
+      where: { id: req.params.id },
+      include: { transaction: true },
+    });
+    if (!request) return res.status(404).json({ message: 'طلب التمديد غير موجود' });
+    if (request.status !== 'pending') {
+      return res.status(409).json({ message: 'تم البت في طلب التمديد مسبقًا' });
+    }
+    if (input.decision === 'rejected' && !input.reviewNote?.trim()) {
+      return res.status(400).json({ message: 'سبب رفض طلب التمديد مطلوب' });
+    }
+
+    const reviewer = actor(req);
+    if (request.requestedById === reviewer.id) {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      const hasOtherApprover = supervisorIds.some((id) => id !== reviewer.id);
+      if (hasOtherApprover || req.authUser?.role !== 'admin') {
+        return res.status(409).json({ message: 'لا يمكن لمقدم طلب التمديد اعتماد طلبه؛ يلزم مراجع إشرافي آخر' });
+      }
+    }
+
+    const approved = input.decision === 'approved';
+    const currentDueKey = request.transaction.dueDate
+      ? saudiDayKey(new Date(request.transaction.dueDate))
+      : null;
+    const requestBaseKey = saudiDayKey(new Date(request.currentDueDate));
+    if (approved && currentDueKey !== requestBaseKey) {
+      return res.status(409).json({
+        message: 'تغير تاريخ استحقاق المعاملة بعد تقديم الطلب؛ يجب إلغاء الطلب الحالي وإنشاء طلب جديد',
+      });
+    }
+    if (FINAL_STATUSES.includes(request.transaction.status)) {
+      return res.status(409).json({ message: 'المعاملة منجزة أو مغلقة ولا يمكن اعتماد تمديد جديد لها' });
+    }
+
+    const decisionAt = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const decided = await tx.transactionFollowUpExtensionRequest.update({
+        where: { id: request.id },
+        data: {
+          status: input.decision,
+          reviewedById: reviewer.id,
+          reviewedByName: reviewer.name,
+          reviewNote: input.reviewNote || null,
+          decisionAt,
+        },
+      });
+
+      if (approved) {
+        await tx.transactionFollowUp.update({
+          where: { id: request.transactionId },
+          data: {
+            dueDate: request.requestedDueDate,
+            lastActionAt: decisionAt,
+            lastActionByUserId: reviewer.id,
+            lastActionByName: reviewer.name,
+          },
+        });
+      }
+
+      await tx.transactionFollowUpEvent.create({
+        data: {
+          transactionId: request.transactionId,
+          eventType: approved ? 'extension_approved' : 'extension_rejected',
+          fromStatus: request.transaction.status,
+          toStatus: request.transaction.status,
+          fromAssigneeUserId: request.transaction.currentAssigneeUserId,
+          fromAssigneeName: request.transaction.currentAssigneeName,
+          toAssigneeUserId: request.transaction.currentAssigneeUserId,
+          toAssigneeName: request.transaction.currentAssigneeName,
+          actionText: approved
+            ? `اعتماد تمديد تاريخ الاستحقاق من ${requestBaseKey} إلى ${saudiDayKey(new Date(request.requestedDueDate))}`
+            : `رفض طلب تمديد تاريخ الاستحقاق إلى ${saudiDayKey(new Date(request.requestedDueDate))}`,
+          note: input.reviewNote || request.reason,
+          createdById: reviewer.id,
+          createdByName: reviewer.name,
+        },
+      });
+
+      return decided;
+    });
+
+    const recipients = new Set([
+      request.requestedById,
+      request.transaction.currentAssigneeUserId,
+    ].filter(Boolean));
+    for (const userId of recipients) {
+      if (userId === reviewer.id) continue;
+      await createFollowUpAlert({
+        alertKey: `transaction:${request.transactionId}:extension_${input.decision}:${request.id}:${userId}`,
+        transactionId: request.transactionId,
+        userId,
+        kind: approved ? 'transaction_extension_approved' : 'transaction_extension_rejected',
+        severity: approved ? 'info' : 'warning',
+        title: approved ? 'تم اعتماد طلب تمديد المعاملة' : 'تم رفض طلب تمديد المعاملة',
+        message: approved
+          ? `${request.transaction.transactionNumber} — تم تمديد تاريخ الاستحقاق إلى ${saudiDayKey(new Date(request.requestedDueDate))}.`
+          : `${request.transaction.transactionNumber} — تم رفض طلب التمديد${input.reviewNote ? `: ${input.reviewNote}` : '.'}`,
+      });
+    }
+
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/extension-requests/:id/cancel', async (req, res, next) => {
+  try {
+    const request = await prisma.transactionFollowUpExtensionRequest.findUnique({
+      where: { id: req.params.id },
+      include: { transaction: true },
+    });
+    if (!request) return res.status(404).json({ message: 'طلب التمديد غير موجود' });
+    if (request.status !== 'pending') {
+      return res.status(409).json({ message: 'لا يمكن إلغاء طلب تم البت فيه' });
+    }
+    if (!isSupervisor(req) && request.requestedById !== req.authUser.id) {
+      return res.status(403).json({ message: 'لا يمكنك إلغاء طلب تمديد مقدم من مستخدم آخر' });
+    }
+
+    const changedBy = actor(req);
+    const cancelledAt = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const cancelled = await tx.transactionFollowUpExtensionRequest.update({
+        where: { id: request.id },
+        data: { status: 'cancelled', cancelledAt },
+      });
+      await tx.transactionFollowUpEvent.create({
+        data: {
+          transactionId: request.transactionId,
+          eventType: 'extension_cancelled',
+          fromStatus: request.transaction.status,
+          toStatus: request.transaction.status,
+          actionText: 'إلغاء طلب تمديد تاريخ الاستحقاق',
+          note: request.reason,
+          createdById: changedBy.id,
+          createdByName: changedBy.name,
+        },
+      });
+      return cancelled;
+    });
+
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/work-queue', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
@@ -5371,6 +5673,13 @@ router.get('/work-queue', async (req, res, next) => {
           },
         ],
       },
+      include: {
+        extensionRequests: {
+          where: { status: 'pending' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
       orderBy: [
         { dueDate: { sort: 'asc', nulls: 'last' } },
         { priority: 'desc' },
@@ -5382,6 +5691,7 @@ router.get('/work-queue', async (req, res, next) => {
     const bucketOrder = [
       'overdue',
       'urgent_today',
+      'extension_requests',
       'due_3_days',
       'awaiting_review',
       'waiting_external',
@@ -5407,19 +5717,33 @@ router.get('/work-queue', async (req, res, next) => {
         todayNumber - dayNumberFromKey(saudiDayKey(new Date(row.createdAt)))
       );
 
-      buckets[bucket].push({
+      const pendingExtension = row.extensionRequests?.[0] || null;
+      const queueItem = {
         ...serialized,
+        pendingExtension,
         queueBucket: bucket,
         daysUntilDue,
         overdueDays: daysUntilDue != null && daysUntilDue < 0 ? Math.abs(daysUntilDue) : 0,
         ageDays,
         quickActions: workQueueActionOptions(row, supervisor),
-      });
+      };
+      buckets[bucket].push(queueItem);
+
+      if (supervisor && pendingExtension) {
+        counts.extension_requests += 1;
+        if (buckets.extension_requests.length < 80) {
+          buckets.extension_requests.push({
+            ...queueItem,
+            queueBucket: 'extension_requests',
+          });
+        }
+      }
     }
 
     const priorityBuckets = [
       'overdue',
       'urgent_today',
+      'extension_requests',
       'due_3_days',
       'awaiting_review',
       'waiting_external',
@@ -7026,6 +7350,9 @@ router.get('/:id', async (req, res, next) => {
         directives: {
           include: { reviews: { orderBy: { reviewedAt: 'desc' } } },
           orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
+        },
+        extensionRequests: {
+          orderBy: { createdAt: 'desc' },
         },
       },
     });
