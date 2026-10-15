@@ -70,6 +70,23 @@ const actor = (req) => ({
   name: req.authUser?.username || req.authUser?.email || 'مستخدم',
 });
 
+const modulePermission = (req) =>
+  req.authUser?.permissions?.find((item) => item.module === 'transaction_follow_up');
+
+const isSupervisor = (req) =>
+  req.authUser?.role === 'admin' || Boolean(modulePermission(req)?.canDelete);
+
+const canActOnRecord = (req, record) =>
+  isSupervisor(req) ||
+  record.createdById === req.authUser?.id ||
+  record.currentAssigneeUserId === req.authUser?.id;
+
+const canEditRecordMaster = (req, record) =>
+  isSupervisor(req) || record.createdById === req.authUser?.id;
+
+const denyRecordAccess = (res) =>
+  res.status(403).json({ message: 'لا يمكنك تعديل هذه المعاملة لأنها ليست مسندة لك ولم تقم بإنشائها' });
+
 const assigneeSelect = {
   id: true,
   username: true,
@@ -399,6 +416,7 @@ router.patch('/:id', async (req, res, next) => {
     const input = updateSchema.parse(req.body);
     const current = await prisma.transactionFollowUp.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (!canEditRecordMaster(req, current)) return denyRecordAccess(res);
 
     const updated = await prisma.transactionFollowUp.update({
       where: { id: current.id },
@@ -430,6 +448,7 @@ router.patch('/:id/assign', async (req, res, next) => {
     const input = assignSchema.parse(req.body);
     const current = await prisma.transactionFollowUp.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (!canActOnRecord(req, current)) return denyRecordAccess(res);
     if (FINAL_STATUSES.includes(current.status)) {
       return res.status(409).json({ message: 'المعاملة منجزة أو مغلقة. أعد فتحها قبل إعادة الإسناد.' });
     }
@@ -478,6 +497,7 @@ router.patch('/:id/action', async (req, res, next) => {
     const input = actionSchema.parse(req.body);
     const current = await prisma.transactionFollowUp.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (!canActOnRecord(req, current)) return denyRecordAccess(res);
 
     const changedBy = actor(req);
     const now = new Date();
