@@ -59,6 +59,21 @@ const actionSchema = z.object({
   dueDate: nullableText(100),
 });
 
+const directiveCreateSchema = z.object({
+  directiveType: z.enum(['directive', 'decision']).default('directive'),
+  title: z.string().trim().min(2, 'عنوان التوجيه أو القرار مطلوب').max(300),
+  instruction: z.string().trim().min(2, 'نص التوجيه أو القرار مطلوب').max(5000),
+  priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
+  assigneeUserId: z.string().trim().min(1, 'الموظف المكلف مطلوب'),
+  dueDate: nullableText(100),
+});
+
+const directiveUpdateSchema = z.object({
+  status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']),
+  completionResponse: nullableText(5000),
+  completionNote: nullableText(3000),
+});
+
 const reportArchiveSchema = z.object({
   reportType: z.enum(['weekly', 'monthly', 'custom']).default('custom'),
   from: z.string().trim().min(1),
@@ -234,6 +249,27 @@ const computeIndicator = (record) => {
 };
 
 const serialize = (record) => ({ ...record, ...computeIndicator(record) });
+
+const serializeDirective = (directive) => {
+  const now = new Date();
+  const overdue =
+    !['completed', 'cancelled'].includes(directive.status) &&
+    directive.dueDate &&
+    new Date(directive.dueDate).getTime() < now.getTime();
+  const dueToday =
+    !['completed', 'cancelled'].includes(directive.status) &&
+    directive.dueDate &&
+    saudiDayKey(new Date(directive.dueDate)) === saudiDayKey(now);
+
+  return {
+    ...directive,
+    isOverdue: Boolean(overdue),
+    isDueToday: Boolean(dueToday),
+    daysOverdue: overdue
+      ? Math.max(1, Math.floor((now.getTime() - new Date(directive.dueDate).getTime()) / 86400000))
+      : 0,
+  };
+};
 
 const saudiDayKey = (date = new Date()) =>
   new Date(date.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
