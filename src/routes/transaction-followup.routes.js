@@ -3566,6 +3566,11 @@ router.patch('/directives/risks/:id', async (req, res, next) => {
     if (current.status === 'closed' && !supervisor) {
       return res.status(409).json({ message: 'لا يمكن تعديل خطر مغلق' });
     }
+    if (current.status === 'accepted' && input.status && input.status !== 'closed') {
+      return res.status(409).json({
+        message: 'حالة الخطر المقبول محكومة بقرار القبول؛ لا يمكن تغييرها مباشرة قبل انتهاء القبول أو إغلاق الخطر',
+      });
+    }
     if (!supervisor && (
       input.ownerUserId !== undefined ||
       input.title !== undefined ||
@@ -3635,6 +3640,19 @@ router.patch('/directives/risks/:id', async (req, res, next) => {
           updatedByName: changedBy.name,
         },
       });
+
+      if (current.status === 'accepted' && input.status === 'closed') {
+        await tx.transactionFollowUpRiskAcceptanceRequest.updateMany({
+          where: {
+            riskId: current.id,
+            status: 'approved',
+          },
+          data: {
+            status: 'expired',
+            expiredAt: new Date(),
+          },
+        });
+      }
 
       await tx.transactionFollowUpRiskRegisterEvent.create({
         data: {
