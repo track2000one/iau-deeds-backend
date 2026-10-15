@@ -5502,6 +5502,67 @@ router.post('/:id/external-wait', async (req, res, next) => {
   }
 });
 
+router.patch('/external-waits/:id/follow-up', async (req, res, next) => {
+  try {
+    const input = externalWaitFollowUpSchema.parse(req.body);
+    const wait = await prisma.transactionFollowUpExternalWait.findUnique({
+      where: { id: req.params.id },
+      include: { transaction: true },
+    });
+    if (!wait) return res.status(404).json({ message: 'سجل انتظار الجهة غير موجود' });
+    if (!canActOnRecord(req, wait.transaction)) return denyRecordAccess(res);
+    if (wait.status !== 'active') {
+      return res.status(409).json({ message: 'تم إنهاء حالة الانتظار ولا يمكن تسجيل متابعة جديدة عليها' });
+    }
+
+    const nextFollowUpDate = toDate(input.nextFollowUpDate, 'تاريخ المتابعة القادمة');
+    const todayNumber = dayNumberFromKey(saudiDayKey());
+    const nextNumber = dayNumberFromKey(saudiDayKey(nextFollowUpDate));
+    if (nextNumber <= todayNumber) {
+      return res.status(400).json({ message: 'تاريخ المتابعة القادمة يجب أن يكون بعد تاريخ اليوم' });
+    }
+
+    const changedBy = actor(req);
+    const changedAt = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpExternalWait.update({
+        where: { id: wait.id },
+        data: {
+          nextFollowUpDate,
+          lastFollowUpAt: changedAt,
+          lastFollowUpNote: input.note,
+          followUpCount: { increment: 1 },
+        },
+      });
+      await tx.transactionFollowUp.update({
+        where: { id: wait.transactionId },
+        data: {
+          lastActionAt: changedAt,
+          lastActionByUserId: changedBy.id,
+          lastActionByName: changedBy.name,
+        },
+      });
+      await tx.transactionFollowUpEvent.create({
+        data: {
+          transactionId: wait.transactionId,
+          eventType: 'external_follow_up_recorded',
+          fromStatus: wait.transaction.status,
+          toStatus: wait.transaction.status,
+          actionText: `متابعة مع ${wait.externalEntity} — الموعد القادم ${saudiDayKey(nextFollowUpDate)}`,
+          note: input.note,
+          createdById: changedBy.id,
+          createdByName: changedBy.name,
+        },
+      });
+      return row;
+    });
+
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/extension-requests', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
