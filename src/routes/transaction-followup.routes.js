@@ -1204,9 +1204,29 @@ export const syncTransactionFollowUpAlerts = async () => {
       const requestedUntilKey = saudiDayKey(new Date(acceptance.requestedUntil));
       const requestedUntilNumber = dayNumberFromKey(requestedUntilKey);
       if (requestedUntilNumber < todayNumber) {
-        await prisma.transactionFollowUpRiskAcceptanceRequest.updateMany({
-          where: { id: acceptance.id, status: 'pending' },
-          data: { status: 'expired', expiredAt: new Date() },
+        const expiredAt = new Date();
+        await prisma.$transaction(async (tx) => {
+          const updated = await tx.transactionFollowUpRiskAcceptanceRequest.updateMany({
+            where: { id: acceptance.id, status: 'pending' },
+            data: { status: 'expired', expiredAt },
+          });
+          if (updated.count) {
+            await tx.transactionFollowUpRiskRegisterEvent.create({
+              data: {
+                riskId: risk.id,
+                action: 'acceptance_request_expired',
+                fromStatus: risk.status,
+                toStatus: risk.status,
+                residualProbability: risk.residualProbability,
+                residualImpact: risk.residualImpact,
+                residualScore: risk.residualScore,
+                residualLevel: risk.residualLevel,
+                note: 'انتهت صلاحية طلب قبول الخطر قبل اتخاذ قرار الاعتماد.',
+                changedById: null,
+                changedByName: 'النظام',
+              },
+            });
+          }
         });
         const recipients = new Set([
           acceptance.requestedById,
@@ -2801,9 +2821,26 @@ router.patch('/directives/risk-acceptances/:id/decision', async (req, res, next)
     const requestedUntilDay = dayNumberFromKey(saudiDayKey(new Date(request.requestedUntil)));
     const todayDay = dayNumberFromKey(saudiDayKey(now));
     if (requestedUntilDay < todayDay) {
-      await prisma.transactionFollowUpRiskAcceptanceRequest.update({
-        where: { id: request.id },
-        data: { status: 'expired', expiredAt: now },
+      await prisma.$transaction(async (tx) => {
+        await tx.transactionFollowUpRiskAcceptanceRequest.update({
+          where: { id: request.id },
+          data: { status: 'expired', expiredAt: now },
+        });
+        await tx.transactionFollowUpRiskRegisterEvent.create({
+          data: {
+            riskId: request.riskId,
+            action: 'acceptance_request_expired',
+            fromStatus: request.risk.status,
+            toStatus: request.risk.status,
+            residualProbability: request.risk.residualProbability,
+            residualImpact: request.risk.residualImpact,
+            residualScore: request.risk.residualScore,
+            residualLevel: request.risk.residualLevel,
+            note: 'انتهت صلاحية طلب قبول الخطر قبل اتخاذ قرار الاعتماد.',
+            changedById: reviewer.id,
+            changedByName: reviewer.name,
+          },
+        });
       });
       return res.status(409).json({ message: 'انتهت مدة القبول المطلوبة قبل اتخاذ القرار؛ أنشئ طلبًا جديدًا' });
     }
