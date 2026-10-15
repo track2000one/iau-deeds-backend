@@ -2563,7 +2563,8 @@ router.get('/directives/risk-acceptances', async (req, res, next) => {
         : {}),
     };
     const now = new Date();
-    const sevenDays = new Date(now.getTime() + 7 * 86400000);
+    const todayStart = new Date(`${saudiDayKey(now)}T00:00:00.000Z`);
+    const sevenDays = new Date(todayStart.getTime() + 7 * 86400000);
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 86400000);
 
     const [total, items, pending, activeApproved, expiringSoon, rejected30d, expired30d] = await Promise.all([
@@ -2599,7 +2600,7 @@ router.get('/directives/risk-acceptances', async (req, res, next) => {
         where: {
           ...visibility,
           status: 'approved',
-          requestedUntil: { gt: now },
+          requestedUntil: { gte: todayStart },
           risk: { status: 'accepted' },
         },
       }),
@@ -2607,7 +2608,7 @@ router.get('/directives/risk-acceptances', async (req, res, next) => {
         where: {
           ...visibility,
           status: 'approved',
-          requestedUntil: { gt: now, lte: sevenDays },
+          requestedUntil: { gte: todayStart, lte: sevenDays },
           risk: { status: 'accepted' },
         },
       }),
@@ -2795,7 +2796,9 @@ router.patch('/directives/risk-acceptances/:id/decision', async (req, res, next)
     }
 
     const now = new Date();
-    if (new Date(request.requestedUntil).getTime() <= now.getTime()) {
+    const requestedUntilDay = dayNumberFromKey(saudiDayKey(new Date(request.requestedUntil)));
+    const todayDay = dayNumberFromKey(saudiDayKey(now));
+    if (requestedUntilDay < todayDay) {
       await prisma.transactionFollowUpRiskAcceptanceRequest.update({
         where: { id: request.id },
         data: { status: 'expired', expiredAt: now },
@@ -3085,20 +3088,20 @@ router.get('/directives/risk-dashboard', async (req, res, next) => {
       (plan) => plan.dueDate && new Date(plan.dueDate).getTime() < now.getTime()
     ).length;
 
+    const dashboardTodayNumber = dayNumberFromKey(saudiDayKey(now));
     const acceptancePending = riskAcceptances.filter((item) => item.status === 'pending').length;
     const acceptanceActive = riskAcceptances.filter(
       (item) =>
         item.status === 'approved' &&
         item.risk?.status === 'accepted' &&
-        new Date(item.requestedUntil).getTime() > now.getTime()
+        dayNumberFromKey(saudiDayKey(new Date(item.requestedUntil))) >= dashboardTodayNumber
     ).length;
-    const acceptanceExpiringSoon = riskAcceptances.filter(
-      (item) =>
-        item.status === 'approved' &&
-        item.risk?.status === 'accepted' &&
-        new Date(item.requestedUntil).getTime() > now.getTime() &&
-        new Date(item.requestedUntil).getTime() <= now.getTime() + 7 * 86400000
-    ).length;
+    const acceptanceExpiringSoon = riskAcceptances.filter((item) => {
+      if (item.status !== 'approved' || item.risk?.status !== 'accepted') return false;
+      const untilNumber = dayNumberFromKey(saudiDayKey(new Date(item.requestedUntil)));
+      const daysUntil = untilNumber - dashboardTodayNumber;
+      return daysUntil >= 0 && daysUntil <= 7;
+    }).length;
     const acceptanceRejected30d = riskAcceptances.filter(
       (item) =>
         item.status === 'rejected' &&
