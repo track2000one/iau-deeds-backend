@@ -1059,6 +1059,44 @@ export const syncTransactionFollowUpAlerts = async () => {
 
   const targets = await getKpiTargets();
   if (targets.alertsEnabled && supervisorIds.length) {
+    const earlyWarning = await buildEarlyWarningSnapshot(targets.alertPeriodDays, targets);
+    const projectedBreaches = earlyWarning.metrics.filter(
+      (metric) => metric.currentStatus !== 'red' && metric.projectedStatus === 'red',
+    );
+    const riskyEmployees = earlyWarning.employees.filter(
+      (employee) => ['critical', 'high'].includes(employee.riskLevel),
+    ).slice(0, 3);
+
+    for (const metric of projectedBreaches) {
+      for (const supervisorId of supervisorIds) {
+        await createFollowUpAlert({
+          alertKey: `early-warning:metric:${metric.metricKey}:${todayKey}:${supervisorId}`,
+          transactionId: null,
+          userId: supervisorId,
+          kind: 'early_warning_kpi',
+          severity: metric.riskLevel === 'critical' ? 'danger' : 'warning',
+          title: `إنذار مبكر: ${metric.metricLabel}`,
+          message: `الاتجاه الحالي يتوقع انتقال المؤشر إلى المستوى الأحمر. الحالي ${metric.currentValue ?? '—'}، والمتوقع ${metric.projectedValue ?? '—'}، والمستهدف ${metric.direction === 'min' ? '≥' : '≤'} ${metric.target}.`,
+        });
+        alerts += 1;
+      }
+    }
+
+    for (const employee of riskyEmployees) {
+      for (const supervisorId of supervisorIds) {
+        await createFollowUpAlert({
+          alertKey: `early-warning:employee:${employee.userId}:${todayKey}:${supervisorId}`,
+          transactionId: null,
+          userId: supervisorId,
+          kind: 'early_warning_employee',
+          severity: employee.riskLevel === 'critical' ? 'danger' : 'warning',
+          title: `إنذار مبكر تشغيلي: ${employee.username}`,
+          message: `مؤشر المخاطر ${employee.riskScore}/100. ${employee.reasons.slice(0, 2).join(' ')}`,
+        });
+        alerts += 1;
+      }
+    }
+
     const snapshot = await calculateCurrentKpiSnapshot(targets.alertPeriodDays);
     if (snapshot.reviewedDirectives > 0) {
       const evaluation = evaluateKpiMetrics(snapshot, targets);
@@ -2217,6 +2255,19 @@ router.patch('/directives/improvement-plans/:id/verify', async (req, res, next) 
         status: evaluation.status,
       },
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/directives/early-warning', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'الإنذار المبكر متاح للمستخدم الإشرافي فقط' });
+    }
+    const requested = Number.parseInt(String(req.query.periodDays || '30'), 10) || 30;
+    const periodDays = Math.min(90, Math.max(14, requested));
+    res.json(await buildEarlyWarningSnapshot(periodDays));
   } catch (error) {
     next(error);
   }
