@@ -60,6 +60,19 @@ const actionSchema = z.object({
   dueDate: nullableText(100),
 });
 
+const workQueueQuickActionSchema = z.object({
+  action: z.enum([
+    'start',
+    'waiting_external',
+    'resume',
+    'needs_follow_up',
+    'submit_completion',
+    'approve_close',
+    'return_to_employee',
+  ]),
+  note: nullableText(3000),
+});
+
 const directiveCreateSchema = z.object({
   directiveType: z.enum(['directive', 'decision']).default('directive'),
   title: z.string().trim().min(2, 'عنوان التوجيه أو القرار مطلوب').max(300),
@@ -1147,6 +1160,40 @@ const computeIndicator = (record) => {
 };
 
 const serialize = (record) => ({ ...record, ...computeIndicator(record) });
+
+const classifyWorkQueueItem = (record, todayNumber) => {
+  if (record.status === 'completed') return 'awaiting_review';
+  if (record.status === 'closed') return 'completed_today';
+  if (!record.currentAssigneeUserId) return 'unassigned';
+
+  const dueKey = record.dueDate ? saudiDayKey(new Date(record.dueDate)) : null;
+  const dueNumber = dueKey ? dayNumberFromKey(dueKey) : null;
+  const daysUntilDue = dueNumber == null ? null : dueNumber - todayNumber;
+
+  if (daysUntilDue != null && daysUntilDue < 0) return 'overdue';
+  if (record.priority === 'urgent' || daysUntilDue === 0) return 'urgent_today';
+  if (daysUntilDue != null && daysUntilDue >= 1 && daysUntilDue <= 3) return 'due_3_days';
+  if (record.status === 'waiting_response') return 'waiting_external';
+  return 'in_progress';
+};
+
+const workQueueActionOptions = (record, supervisor) => {
+  if (record.status === 'closed') return [];
+  if (record.status === 'completed') {
+    return supervisor ? ['approve_close', 'return_to_employee'] : [];
+  }
+  const actions = [];
+  if (['new', 'assigned'].includes(record.status)) actions.push('start');
+  if (record.status === 'waiting_response') actions.push('resume');
+  if (['assigned', 'in_progress', 'needs_follow_up'].includes(record.status)) {
+    actions.push('waiting_external');
+  }
+  if (['assigned', 'in_progress', 'waiting_response'].includes(record.status)) {
+    actions.push('needs_follow_up');
+  }
+  if (record.currentAssigneeUserId) actions.push('submit_completion');
+  return actions;
+};
 
 const serializeDirective = (directive) => {
   const now = new Date();
@@ -5299,6 +5346,260 @@ router.patch('/alerts/:id/read', async (req, res, next) => {
   }
 });
 
+router.get('/work-queue', async (req, res, next) => {
+  try {
+    const supervisor = isSupervisor(req);
+    const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
+    const mine = !supervisor || mineRequested;
+    const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
+
+    const now = new Date();
+    const todayKey = saudiDayKey(now);
+    const todayNumber = dayNumberFromKey(todayKey);
+    const todayStart = new Date(`${todayKey}T00:00:00+03:00`);
+    const tomorrowStart = new Date(todayStart.getTime() + 86400000);
+
+    const rows = await prisma.transactionFollowUp.findMany({
+      where: {
+        ...baseWhere,
+        OR: [
+          { status: { in: OPEN_STATUSES } },
+          { status: 'completed' },
+          {
+            status: 'closed',
+            closedAt: { gte: todayStart, lt: tomorrowStart },
+          },
+        ],
+      },
+      orderBy: [
+        { dueDate: { sort: 'asc', nulls: 'last' } },
+        { priority: 'desc' },
+        { updatedAt: 'desc' },
+      ],
+      take: 500,
+    });
+
+    const bucketOrder = [
+      'overdue',
+      'urgent_today',
+      'due_3_days',
+      'awaiting_review',
+      'waiting_external',
+      'in_progress',
+      'completed_today',
+      'unassigned',
+    ];
+    const buckets = Object.fromEntries(bucketOrder.map((key) => [key, []]));
+    const counts = Object.fromEntries(bucketOrder.map((key) => [key, 0]));
+
+    for (const row of rows) {
+      const bucket = classifyWorkQueueItem(row, todayNumber);
+      if (!buckets[bucket]) continue;
+      counts[bucket] += 1;
+      if (buckets[bucket].length >= 80) continue;
+
+      const serialized = serialize(row);
+      const dueKey = row.dueDate ? saudiDayKey(new Date(row.dueDate)) : null;
+      const dueNumber = dueKey ? dayNumberFromKey(dueKey) : null;
+      const daysUntilDue = dueNumber == null ? null : dueNumber - todayNumber;
+      const ageDays = Math.max(
+        0,
+        todayNumber - dayNumberFromKey(saudiDayKey(new Date(row.createdAt)))
+      );
+
+      buckets[bucket].push({
+        ...serialized,
+        queueBucket: bucket,
+        daysUntilDue,
+        overdueDays: daysUntilDue != null && daysUntilDue < 0 ? Math.abs(daysUntilDue) : 0,
+        ageDays,
+        quickActions: workQueueActionOptions(row, supervisor),
+      });
+    }
+
+    const priorityBuckets = [
+      'overdue',
+      'urgent_today',
+      'due_3_days',
+      'awaiting_review',
+      'waiting_external',
+      'in_progress',
+      'completed_today',
+    ];
+    const focusBucket = priorityBuckets.find((key) => counts[key] > 0) || 'in_progress';
+
+    res.json({
+      generatedAt: now,
+      scope: mine ? 'mine' : 'all',
+      supervisor,
+      focusBucket,
+      counts,
+      buckets,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/:id/work-queue-action', async (req, res, next) => {
+  try {
+    const input = workQueueQuickActionSchema.parse(req.body);
+    const current = await prisma.transactionFollowUp.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (!canActOnRecord(req, current)) return denyRecordAccess(res);
+
+    const supervisor = isSupervisor(req);
+    const supervisorOnly = ['approve_close', 'return_to_employee'];
+    if (supervisorOnly.includes(input.action) && !supervisor) {
+      return res.status(403).json({ message: 'مراجعة إنجاز المعاملة وإقفالها متاحة للمستخدم الإشرافي فقط' });
+    }
+    if (current.status === 'closed') {
+      return res.status(409).json({ message: 'المعاملة مغلقة ولا تقبل إجراءً سريعًا جديدًا' });
+    }
+    if (current.status === 'completed' && !supervisorOnly.includes(input.action)) {
+      return res.status(409).json({ message: 'المعاملة بانتظار المراجعة الإشرافية' });
+    }
+
+    const actionConfig = {
+      start: {
+        status: 'in_progress',
+        eventType: 'work_started',
+        text: 'بدء تنفيذ المعاملة',
+      },
+      waiting_external: {
+        status: 'waiting_response',
+        eventType: 'waiting_external',
+        text: 'تحويل المعاملة إلى انتظار رد من جهة أخرى',
+      },
+      resume: {
+        status: 'in_progress',
+        eventType: 'work_resumed',
+        text: 'استئناف العمل على المعاملة',
+      },
+      needs_follow_up: {
+        status: 'needs_follow_up',
+        eventType: 'follow_up_required',
+        text: 'تحديد المعاملة كحالة تحتاج متابعة',
+      },
+      submit_completion: {
+        status: 'completed',
+        eventType: 'completion_submitted',
+        text: 'رفع المعاملة للمراجعة بعد اكتمال التنفيذ',
+      },
+      approve_close: {
+        status: 'closed',
+        eventType: 'completion_approved',
+        text: 'اعتماد إنجاز المعاملة وإقفالها',
+      },
+      return_to_employee: {
+        status: 'in_progress',
+        eventType: 'completion_returned',
+        text: 'إعادة المعاملة للموظف لاستكمال المطلوب',
+      },
+    }[input.action];
+
+    if (!actionConfig) return res.status(400).json({ message: 'الإجراء السريع غير مدعوم' });
+
+    if (input.action === 'submit_completion' && !current.currentAssigneeUserId) {
+      return res.status(409).json({ message: 'يجب إسناد المعاملة قبل رفعها كمكتملة' });
+    }
+    if (['approve_close', 'return_to_employee'].includes(input.action) && current.status !== 'completed') {
+      return res.status(409).json({ message: 'هذا الإجراء متاح فقط للمعاملات المكتملة بانتظار المراجعة' });
+    }
+
+    if (['submit_completion', 'approve_close'].includes(input.action)) {
+      const openDirectives = await prisma.transactionFollowUpDirective.count({
+        where: {
+          transactionId: current.id,
+          status: { in: ['pending', 'in_progress', 'awaiting_approval', 'returned'] },
+        },
+      });
+      if (openDirectives > 0) {
+        return res.status(409).json({
+          message: `لا يمكن إنهاء المعاملة قبل معالجة ${openDirectives} من التوجيهات أو القرارات المفتوحة`,
+        });
+      }
+    }
+
+    const changedBy = actor(req);
+    const changedAt = new Date();
+    const completedAt =
+      input.action === 'submit_completion'
+        ? changedAt
+        : input.action === 'return_to_employee'
+          ? null
+          : current.completedAt;
+    const closedAt = input.action === 'approve_close' ? changedAt : current.closedAt;
+
+    const updated = await prisma.transactionFollowUp.update({
+      where: { id: current.id },
+      data: {
+        status: actionConfig.status,
+        completedAt,
+        closedAt,
+        lastActionAt: changedAt,
+        lastActionByUserId: changedBy.id,
+        lastActionByName: changedBy.name,
+        events: {
+          create: {
+            eventType: actionConfig.eventType,
+            fromStatus: current.status,
+            toStatus: actionConfig.status,
+            fromAssigneeUserId: current.currentAssigneeUserId,
+            fromAssigneeName: current.currentAssigneeName,
+            toAssigneeUserId: current.currentAssigneeUserId,
+            toAssigneeName: current.currentAssigneeName,
+            actionText: actionConfig.text,
+            note: input.note || null,
+            createdById: changedBy.id,
+            createdByName: changedBy.name,
+          },
+        },
+      },
+    });
+
+    if (input.action === 'submit_completion') {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      for (const userId of supervisorIds) {
+        if (userId === changedBy.id) continue;
+        await createFollowUpAlert({
+          alertKey: `transaction:${current.id}:completion_submitted:${changedAt.toISOString()}:${userId}`,
+          transactionId: current.id,
+          userId,
+          kind: 'transaction_completion_submitted',
+          severity: 'info',
+          title: 'معاملة مكتملة بانتظار المراجعة',
+          message: `${current.transactionNumber} — ${current.subject}. رفعها ${changedBy.name} للمراجعة والإقفال.`,
+        });
+      }
+    }
+
+    if (['approve_close', 'return_to_employee'].includes(input.action) && current.currentAssigneeUserId) {
+      await createFollowUpAlert({
+        alertKey: `transaction:${current.id}:${input.action}:${changedAt.toISOString()}:${current.currentAssigneeUserId}`,
+        transactionId: current.id,
+        userId: current.currentAssigneeUserId,
+        kind: input.action === 'approve_close'
+          ? 'transaction_completion_approved'
+          : 'transaction_completion_returned',
+        severity: input.action === 'approve_close' ? 'info' : 'warning',
+        title: input.action === 'approve_close'
+          ? 'تم اعتماد إنجاز المعاملة'
+          : 'أعيدت المعاملة لاستكمال المطلوب',
+        message: input.action === 'approve_close'
+          ? `${current.transactionNumber} — تم اعتماد الإنجاز وإقفال المعاملة.`
+          : `${current.transactionNumber} — أعيدت المعاملة للاستكمال${input.note ? `: ${input.note}` : '.'}`,
+      });
+    }
+
+    res.json(serialize(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/executive-inbox', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
@@ -6935,6 +7236,17 @@ router.patch('/:id/action', async (req, res, next) => {
     const now = new Date();
     const nextStatus = input.status || (current.status === 'new' || current.status === 'assigned' ? 'in_progress' : current.status);
 
+    if (nextStatus === 'closed' && !isSupervisor(req)) {
+      return res.status(403).json({
+        message: 'إقفال المعاملة بعد الإنجاز يتطلب مراجعة واعتماد مستخدم إشرافي',
+      });
+    }
+    if (current.status === 'completed' && nextStatus !== 'completed' && !isSupervisor(req)) {
+      return res.status(409).json({
+        message: 'المعاملة مكتملة وبانتظار المراجعة الإشرافية ولا يمكن تعديل حالتها من الموظف',
+      });
+    }
+
     if (FINAL_STATUSES.includes(nextStatus)) {
       const openDirectives = await prisma.transactionFollowUpDirective.count({
         where: {
@@ -6980,6 +7292,22 @@ router.patch('/:id/action', async (req, res, next) => {
         },
       },
     });
+
+    if (nextStatus === 'completed' && current.status !== 'completed') {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      for (const userId of supervisorIds) {
+        if (userId === changedBy.id) continue;
+        await createFollowUpAlert({
+          alertKey: `transaction:${current.id}:completion_submitted:${now.toISOString()}:${userId}`,
+          transactionId: current.id,
+          userId,
+          kind: 'transaction_completion_submitted',
+          severity: 'info',
+          title: 'معاملة مكتملة بانتظار المراجعة',
+          message: `${current.transactionNumber} — ${current.subject}. تم رفعها للمراجعة والإقفال.`,
+        });
+      }
+    }
 
     res.json(serialize(updated));
   } catch (error) {
