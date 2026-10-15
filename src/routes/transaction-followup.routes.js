@@ -705,6 +705,149 @@ router.get('/directives/dashboard', async (req, res, next) => {
   }
 });
 
+router.get('/directives/approval-center', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'مركز اعتماد الإنجازات متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const search = String(req.query.search || '').trim();
+    const priority = String(req.query.priority || '').trim();
+    const assigneeUserId = String(req.query.assigneeUserId || '').trim();
+
+    const where = {
+      status: 'awaiting_approval',
+      ...(assigneeUserId ? { assigneeUserId } : {}),
+      ...(['normal', 'high', 'urgent'].includes(priority) ? { priority } : {}),
+      ...(search
+        ? {
+            OR: [
+              { title: { contains: search, mode: 'insensitive' } },
+              { instruction: { contains: search, mode: 'insensitive' } },
+              { completionResponse: { contains: search, mode: 'insensitive' } },
+              { assigneeName: { contains: search, mode: 'insensitive' } },
+              { transaction: { transactionNumber: { contains: search, mode: 'insensitive' } } },
+              { transaction: { subject: { contains: search, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+
+    const rows = await prisma.transactionFollowUpDirective.findMany({
+      where,
+      include: {
+        transaction: {
+          select: {
+            id: true,
+            transactionNumber: true,
+            trackingNumber: true,
+            transactionDate: true,
+            subject: true,
+            priority: true,
+            status: true,
+            currentAssigneeName: true,
+          },
+        },
+      },
+      orderBy: [
+        { completionSubmittedAt: { sort: 'asc', nulls: 'last' } },
+        { dueDate: { sort: 'asc', nulls: 'last' } },
+        { issuedAt: 'asc' },
+      ],
+      take: 100,
+    });
+
+    const directiveIds = rows.map((row) => row.id);
+    const evidence = directiveIds.length
+      ? await prisma.attachment.findMany({
+          where: {
+            entityType: 'transaction_follow_up_directive',
+            entityId: { in: directiveIds },
+          },
+          orderBy: { createdAt: 'desc' },
+        })
+      : [];
+
+    const evidenceByDirective = new Map();
+    evidence.forEach((item) => {
+      const items = evidenceByDirective.get(item.entityId) || [];
+      items.push(item);
+      evidenceByDirective.set(item.entityId, items);
+    });
+
+    const now = new Date();
+    const todayNumber = dayNumberFromKey(saudiDayKey(now));
+    const summary = {
+      awaitingApproval: rows.length,
+      urgent: 0,
+      overdue: 0,
+      withoutEvidence: 0,
+      waitingOver2Days: 0,
+    };
+    const employeeMap = new Map();
+
+    const items = rows
+      .map((row) => {
+        const serialized = serializeDirective(row);
+        const submittedAt = row.completionSubmittedAt || row.updatedAt || row.issuedAt;
+        const submittedDay = dayNumberFromKey(saudiDayKey(new Date(submittedAt)));
+        const waitingDays = Math.max(0, todayNumber - submittedDay);
+        const attachments = evidenceByDirective.get(row.id) || [];
+
+        if (row.priority === 'urgent') summary.urgent += 1;
+        if (serialized.isOverdue) summary.overdue += 1;
+        if (!attachments.length) summary.withoutEvidence += 1;
+        if (waitingDays >= 2) summary.waitingOver2Days += 1;
+
+        const employee = employeeMap.get(row.assigneeUserId) || {
+          userId: row.assigneeUserId,
+          username: row.assigneeName,
+          awaitingApproval: 0,
+          urgent: 0,
+          withoutEvidence: 0,
+          maxWaitingDays: 0,
+        };
+        employee.awaitingApproval += 1;
+        if (row.priority === 'urgent') employee.urgent += 1;
+        if (!attachments.length) employee.withoutEvidence += 1;
+        employee.maxWaitingDays = Math.max(employee.maxWaitingDays, waitingDays);
+        employeeMap.set(row.assigneeUserId, employee);
+
+        return {
+          ...serialized,
+          waitingDays,
+          evidence: attachments,
+          transaction: row.transaction,
+        };
+      })
+      .sort((a, b) => {
+        const priorityRank = { urgent: 3, high: 2, normal: 1 };
+        return (
+          (priorityRank[b.priority] - priorityRank[a.priority]) ||
+          (b.waitingDays - a.waitingDays) ||
+          (Number(b.isOverdue) - Number(a.isOverdue))
+        );
+      });
+
+    const employees = [...employeeMap.values()]
+      .sort((a, b) =>
+        (b.awaitingApproval - a.awaitingApproval) ||
+        (b.urgent - a.urgent) ||
+        (b.maxWaitingDays - a.maxWaitingDays)
+      );
+
+    res.json({
+      generatedAt: now,
+      summary,
+      employees,
+      items,
+      totalItems: items.length,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/alerts', async (req, res, next) => {
   try {
     await syncTransactionFollowUpAlerts();
