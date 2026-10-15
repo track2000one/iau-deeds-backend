@@ -1413,13 +1413,22 @@ router.get('/directives/kpi', async (req, res, next) => {
       };
     });
 
+    const targets = await getKpiTargets();
+    const evaluation = evaluateKpiMetrics(summary, targets);
+    const employeesWithEvaluation = employees.map((employee) => ({
+      ...employee,
+      evaluation: evaluateKpiMetrics(employee, targets),
+    }));
+
     res.json({
       generatedAt: now,
       periodDays,
       assigneeUserId: assigneeUserId || null,
+      targets,
+      evaluation,
       summary,
       previousSummary,
-      employees,
+      employees: employeesWithEvaluation,
       monthlyTrend,
     });
   } catch (error) {
