@@ -668,8 +668,27 @@ router.get('/directives/dashboard', async (req, res, next) => {
         (b.completed - a.completed)
       );
 
+    const dashboardDirectiveIds = itemRows.map((row) => row.id);
+    const dashboardEvidence = dashboardDirectiveIds.length
+      ? await prisma.attachment.findMany({
+          where: {
+            entityType: 'transaction_follow_up_directive',
+            entityId: { in: dashboardDirectiveIds },
+          },
+          select: { id: true, entityId: true },
+        })
+      : [];
+    const evidenceCountByDirective = new Map();
+    dashboardEvidence.forEach((item) => {
+      evidenceCountByDirective.set(
+        item.entityId,
+        (evidenceCountByDirective.get(item.entityId) || 0) + 1,
+      );
+    });
+
     const items = itemRows.map((row) => ({
       ...serializeDirective(row),
+      evidenceCount: evidenceCountByDirective.get(row.id) || 0,
       transaction: row.transaction,
     }));
 
