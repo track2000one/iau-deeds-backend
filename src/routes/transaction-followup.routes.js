@@ -199,9 +199,20 @@ const riskRegisterUpdateSchema = z.object({
   residualProbability: z.coerce.number().int().min(1).max(5).optional(),
   residualImpact: z.coerce.number().int().min(1).max(5).optional(),
   reviewDate: nullableText(100),
-  status: z.enum(['open', 'monitoring', 'controlled', 'accepted', 'closed']).optional(),
+  status: z.enum(['open', 'monitoring', 'controlled', 'closed']).optional(),
   recurrenceCount: z.coerce.number().int().min(0).max(100000).optional(),
   notes: nullableText(5000),
+});
+
+const riskAcceptanceRequestSchema = z.object({
+  justification: z.string().trim().min(10, 'مبررات قبول الخطر مطلوبة').max(5000),
+  compensatingControls: z.array(z.string().trim().min(1).max(1500)).max(20).optional().default([]),
+  requestedUntil: z.string().trim().min(1, 'تاريخ انتهاء قبول الخطر مطلوب'),
+});
+
+const riskAcceptanceDecisionSchema = z.object({
+  decision: z.enum(['approved', 'rejected']),
+  reviewComment: z.string().trim().min(3, 'ملاحظة قرار الاعتماد مطلوبة').max(5000),
 });
 
 const improvementPlanCreateSchema = z.object({
