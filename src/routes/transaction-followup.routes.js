@@ -137,6 +137,73 @@ const preventiveActionLinkCapaSchema = z.object({
   improvementPlanId: z.string().trim().min(1, 'خطة CAPA مطلوبة'),
 });
 
+const riskRegisterCreateSchema = z.object({
+  title: z.string().trim().min(2, 'عنوان الخطر مطلوب').max(500),
+  description: z.string().trim().min(2, 'وصف الخطر مطلوب').max(5000),
+  category: z.enum([
+    'operational',
+    'process',
+    'workload',
+    'compliance',
+    'technology',
+    'data',
+    'financial',
+    'reputational',
+    'other',
+  ]).default('operational'),
+  sourceType: z.enum(['manual', 'early_warning', 'preventive_action', 'capa']).default('manual'),
+  metricKey: z.enum([
+    'firstPassRate',
+    'onTimeRate',
+    'reworkRate',
+    'avgExecutionHours',
+    'avgApprovalHours',
+  ]).optional().nullable(),
+  scopeType: z.enum(['global', 'employee']).default('global'),
+  assigneeUserId: nullableText(100),
+  ownerUserId: z.string().trim().min(1, 'مالك الخطر مطلوب'),
+  probability: z.coerce.number().int().min(1).max(5),
+  impact: z.coerce.number().int().min(1).max(5),
+  controls: z.array(z.string().trim().min(1).max(1500)).max(20).optional().default([]),
+  treatmentStrategy: z.enum(['reduce', 'avoid', 'transfer', 'accept']).default('reduce'),
+  treatmentPlan: nullableText(5000),
+  residualProbability: z.coerce.number().int().min(1).max(5).optional(),
+  residualImpact: z.coerce.number().int().min(1).max(5).optional(),
+  reviewDate: nullableText(100),
+  sourcePreventiveActionId: nullableText(100),
+  sourceImprovementPlanId: nullableText(100),
+  recurrenceCount: z.coerce.number().int().min(0).max(100000).optional().default(0),
+  notes: nullableText(5000),
+});
+
+const riskRegisterUpdateSchema = z.object({
+  title: z.string().trim().min(2).max(500).optional(),
+  description: z.string().trim().min(2).max(5000).optional(),
+  category: z.enum([
+    'operational',
+    'process',
+    'workload',
+    'compliance',
+    'technology',
+    'data',
+    'financial',
+    'reputational',
+    'other',
+  ]).optional(),
+  ownerUserId: nullableText(100),
+  probability: z.coerce.number().int().min(1).max(5).optional(),
+  impact: z.coerce.number().int().min(1).max(5).optional(),
+  controls: z.array(z.string().trim().min(1).max(1500)).max(20).optional(),
+  treatmentStrategy: z.enum(['reduce', 'avoid', 'transfer', 'accept']).optional(),
+  treatmentPlan: nullableText(5000),
+  residualProbability: z.coerce.number().int().min(1).max(5).optional(),
+  residualImpact: z.coerce.number().int().min(1).max(5).optional(),
+  reviewDate: nullableText(100),
+  status: z.enum(['open', 'monitoring', 'controlled', 'accepted', 'closed']).optional(),
+  recurrenceCount: z.coerce.number().int().min(0).max(100000).optional(),
+  notes: nullableText(5000),
+});
+
 const improvementPlanCreateSchema = z.object({
   metricKey: z.enum([
     'firstPassRate',
@@ -250,6 +317,38 @@ const KPI_METRIC_LABELS = {
   reworkRate: 'معدل إعادة العمل',
   avgExecutionHours: 'متوسط زمن التنفيذ',
   avgApprovalHours: 'متوسط زمن الاعتماد',
+};
+
+const riskLevelFromScore = (score) => {
+  if (score >= 17) return 'critical';
+  if (score >= 10) return 'high';
+  if (score >= 5) return 'medium';
+  return 'low';
+};
+
+const riskScore = (probability, impact) => Number(probability) * Number(impact);
+
+const nextRiskNumber = async () => {
+  const year = new Date().getFullYear();
+  const prefix = `RISK-${year}-`;
+  const latest = await prisma.transactionFollowUpRiskRegister.findFirst({
+    where: { riskNumber: { startsWith: prefix } },
+    orderBy: { riskNumber: 'desc' },
+    select: { riskNumber: true },
+  });
+  const last = Number(latest?.riskNumber?.slice(prefix.length) || 0);
+  return `${prefix}${String(last + 1).padStart(4, '0')}`;
+};
+
+const serializeRisk = (risk) => {
+  const now = new Date();
+  const active = !['closed'].includes(risk.status);
+  const reviewOverdue = Boolean(
+    active &&
+    risk.reviewDate &&
+    new Date(risk.reviewDate).getTime() < now.getTime()
+  );
+  return { ...risk, isReviewOverdue: reviewOverdue };
 };
 
 const evaluateKpiMetrics = (metrics, targets) => ({
@@ -937,7 +1036,7 @@ const alertCopy = (record, indicator, escalated = false) => {
 };
 
 export const syncTransactionFollowUpAlerts = async () => {
-  const [rows, directives, improvementPlans, preventiveActions] = await Promise.all([
+  const [rows, directives, improvementPlans, preventiveActions, risks] = await Promise.all([
     prisma.transactionFollowUp.findMany({
       where: { status: { in: OPEN_STATUSES } },
       select: {
@@ -991,6 +1090,22 @@ export const syncTransactionFollowUpAlerts = async () => {
         ownerUserId: true,
         ownerName: true,
         dueDate: true,
+        status: true,
+      },
+    }),
+    prisma.transactionFollowUpRiskRegister.findMany({
+      where: {
+        status: { in: ['open', 'monitoring', 'accepted'] },
+        reviewDate: { not: null },
+      },
+      select: {
+        id: true,
+        riskNumber: true,
+        title: true,
+        ownerUserId: true,
+        ownerName: true,
+        residualLevel: true,
+        reviewDate: true,
         status: true,
       },
     }),
@@ -1145,6 +1260,36 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
+  for (const risk of risks) {
+    const reviewKey = risk.reviewDate ? saudiDayKey(new Date(risk.reviewDate)) : null;
+    if (!reviewKey) continue;
+    const reviewNumber = dayNumberFromKey(reviewKey);
+    const daysOverdue = Math.max(0, todayNumber - reviewNumber);
+    const dueToday = reviewKey === todayKey;
+    if (!daysOverdue && !dueToday) continue;
+
+    const kind = daysOverdue ? 'risk_review_overdue' : 'risk_review_due_today';
+    const severity = ['critical', 'high'].includes(risk.residualLevel) || daysOverdue ? 'danger' : 'warning';
+    const title = daysOverdue ? 'مراجعة خطر تشغيلي متأخرة' : 'مراجعة خطر تشغيلي مستحقة اليوم';
+    const message = daysOverdue
+      ? `${risk.riskNumber} — ${risk.title}. مراجعة الخطر متأخرة ${daysOverdue} يوم.`
+      : `${risk.riskNumber} — ${risk.title}. حان موعد إعادة تقييم الخطر المتبقي.`;
+
+    const recipients = new Set([risk.ownerUserId, ...supervisorIds].filter(Boolean));
+    for (const userId of recipients) {
+      await createFollowUpAlert({
+        alertKey: `risk:${risk.id}:${kind}:${todayKey}:${userId}`,
+        transactionId: null,
+        userId,
+        kind,
+        severity,
+        title,
+        message,
+      });
+      alerts += 1;
+    }
+  }
+
   const targets = await getKpiTargets();
   if (targets.alertsEnabled && supervisorIds.length) {
     const earlyWarning = await buildEarlyWarningSnapshot(targets.alertPeriodDays, targets);
@@ -1221,7 +1366,7 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
-  return { scanned: rows.length + directives.length + improvementPlans.length + preventiveActions.length, alerts };
+  return { scanned: rows.length + directives.length + improvementPlans.length + preventiveActions.length + risks.length, alerts };
 };
 
 router.get('/assignees', async (_req, res, next) => {
@@ -2077,6 +2222,399 @@ router.get('/directives/improvement-plans/effectiveness', async (req, res, next)
       owners,
       monthlyTrend,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/directives/risks', async (req, res, next) => {
+  try {
+    const status = String(req.query.status || '').trim();
+    const level = String(req.query.level || '').trim();
+    const category = String(req.query.category || '').trim();
+    const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const pageSize = Math.min(50, Math.max(10, Number.parseInt(String(req.query.pageSize || '20'), 10) || 20));
+    const supervisor = isSupervisor(req);
+    const currentUserId = req.authUser?.id;
+    const visibility = supervisor
+      ? {}
+      : {
+          OR: [
+            { ownerUserId: currentUserId },
+            { assigneeUserId: currentUserId },
+          ],
+        };
+    const filters = {
+      ...visibility,
+      ...(['open', 'monitoring', 'controlled', 'accepted', 'closed'].includes(status) ? { status } : {}),
+      ...(['low', 'medium', 'high', 'critical'].includes(level) ? { residualLevel: level } : {}),
+      ...(category ? { category } : {}),
+    };
+    const activeVisibility = {
+      ...visibility,
+      status: { not: 'closed' },
+    };
+    const now = new Date();
+
+    const [
+      total,
+      items,
+      active,
+      highCritical,
+      controlled,
+      overdueReview,
+      riskRows,
+      categories,
+    ] = await Promise.all([
+      prisma.transactionFollowUpRiskRegister.count({ where: filters }),
+      prisma.transactionFollowUpRiskRegister.findMany({
+        where: filters,
+        include: { events: { orderBy: { createdAt: 'desc' }, take: 10 } },
+        orderBy: [{ residualScore: 'desc' }, { reviewDate: 'asc' }, { createdAt: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.transactionFollowUpRiskRegister.count({ where: activeVisibility }),
+      prisma.transactionFollowUpRiskRegister.count({
+        where: { ...activeVisibility, residualLevel: { in: ['high', 'critical'] } },
+      }),
+      prisma.transactionFollowUpRiskRegister.count({
+        where: { ...visibility, status: 'controlled' },
+      }),
+      prisma.transactionFollowUpRiskRegister.count({
+        where: {
+          ...activeVisibility,
+          reviewDate: { lt: now },
+        },
+      }),
+      prisma.transactionFollowUpRiskRegister.findMany({
+        where: activeVisibility,
+        select: { residualScore: true, residualLevel: true, residualProbability: true, residualImpact: true },
+      }),
+      prisma.transactionFollowUpRiskRegister.groupBy({
+        by: ['category'],
+        where: activeVisibility,
+        _count: { _all: true },
+        orderBy: { _count: { category: 'desc' } },
+      }),
+    ]);
+
+    const averageResidualScore = riskRows.length
+      ? Math.round((riskRows.reduce((sum, row) => sum + row.residualScore, 0) / riskRows.length) * 10) / 10
+      : null;
+    const levels = ['low', 'medium', 'high', 'critical'].map((riskLevel) => ({
+      level: riskLevel,
+      count: riskRows.filter((row) => row.residualLevel === riskLevel).length,
+    }));
+    const matrix = [];
+    for (let impact = 5; impact >= 1; impact -= 1) {
+      for (let probability = 1; probability <= 5; probability += 1) {
+        matrix.push({
+          probability,
+          impact,
+          count: riskRows.filter(
+            (row) => row.residualProbability === probability && row.residualImpact === impact
+          ).length,
+        });
+      }
+    }
+
+    res.json({
+      generatedAt: now,
+      supervisor,
+      summary: {
+        active,
+        highCritical,
+        controlled,
+        overdueReview,
+        averageResidualScore,
+      },
+      levels,
+      matrix,
+      categories: categories.map((row) => ({ category: row.category, count: row._count._all })),
+      items: items.map(serializeRisk),
+      total,
+      page,
+      pageSize,
+      totalPages: total ? Math.ceil(total / pageSize) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/directives/risks', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'إنشاء سجل المخاطر متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = riskRegisterCreateSchema.parse(req.body);
+    const owner = await resolveAssignee(input.ownerUserId);
+    let assignee = input.assigneeUserId ? await resolveAssignee(input.assigneeUserId) : null;
+    let preventiveAction = null;
+
+    if (input.sourcePreventiveActionId) {
+      preventiveAction = await prisma.transactionFollowUpPreventiveAction.findUnique({
+        where: { id: input.sourcePreventiveActionId },
+      });
+      if (!preventiveAction) {
+        return res.status(404).json({ message: 'التدخل الوقائي المرتبط غير موجود' });
+      }
+      if (preventiveAction.riskRegisterId) {
+        return res.status(409).json({ message: 'تم تسجيل هذا التدخل الوقائي مسبقًا في سجل المخاطر' });
+      }
+      if (!assignee && preventiveAction.assigneeUserId) {
+        assignee = await resolveAssignee(preventiveAction.assigneeUserId);
+      }
+    }
+
+    const probability = input.probability;
+    const impact = input.impact;
+    const residualProbability = input.residualProbability ?? probability;
+    const residualImpact = input.residualImpact ?? impact;
+    const inherentScore = riskScore(probability, impact);
+    const residualScore = riskScore(residualProbability, residualImpact);
+    const createdBy = actor(req);
+    const riskNumber = await nextRiskNumber();
+    const metricKey = input.metricKey || preventiveAction?.metricKey || null;
+    const metricLabel = metricKey ? KPI_METRIC_LABELS[metricKey] : preventiveAction?.metricLabel || null;
+    const sourceImprovementPlanId =
+      input.sourceImprovementPlanId || preventiveAction?.improvementPlanId || null;
+
+    const risk = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpRiskRegister.create({
+        data: {
+          riskNumber,
+          title: input.title,
+          description: input.description,
+          category: input.category,
+          sourceType: input.sourceType,
+          metricKey,
+          metricLabel,
+          scopeType: input.scopeType,
+          assigneeUserId: assignee?.id || null,
+          assigneeName: assignee?.username || null,
+          ownerUserId: owner.id,
+          ownerName: owner.username,
+          probability,
+          impact,
+          inherentScore,
+          inherentLevel: riskLevelFromScore(inherentScore),
+          controls: input.controls || [],
+          treatmentStrategy: input.treatmentStrategy,
+          treatmentPlan: input.treatmentPlan || null,
+          residualProbability,
+          residualImpact,
+          residualScore,
+          residualLevel: riskLevelFromScore(residualScore),
+          reviewDate: input.reviewDate ? toDate(input.reviewDate, 'تاريخ المراجعة') : null,
+          sourcePreventiveActionId: preventiveAction?.id || null,
+          sourceImprovementPlanId,
+          recurrenceCount: input.recurrenceCount || 0,
+          lastOccurrenceAt: input.recurrenceCount ? new Date() : null,
+          notes: input.notes || null,
+          createdById: createdBy.id,
+          createdByName: createdBy.name,
+          updatedById: createdBy.id,
+          updatedByName: createdBy.name,
+          events: {
+            create: {
+              action: 'created',
+              toStatus: 'open',
+              probability,
+              impact,
+              residualProbability,
+              residualImpact,
+              residualScore,
+              residualLevel: riskLevelFromScore(residualScore),
+              note: preventiveAction
+                ? 'إنشاء سجل خطر من تدخل وقائي'
+                : 'إنشاء سجل خطر',
+              changedById: createdBy.id,
+              changedByName: createdBy.name,
+            },
+          },
+        },
+        include: { events: { orderBy: { createdAt: 'desc' } } },
+      });
+
+      if (preventiveAction) {
+        await tx.transactionFollowUpPreventiveAction.update({
+          where: { id: preventiveAction.id },
+          data: {
+            riskRegisterId: row.id,
+            riskRegisteredAt: new Date(),
+          },
+        });
+        await tx.transactionFollowUpPreventiveActionEvent.create({
+          data: {
+            actionId: preventiveAction.id,
+            action: 'risk_registered',
+            fromStatus: preventiveAction.status,
+            toStatus: preventiveAction.status,
+            note: `تم تسجيل الخطر ${riskNumber} في سجل المخاطر التشغيلية`,
+            changedById: createdBy.id,
+            changedByName: createdBy.name,
+          },
+        });
+      }
+
+      return row;
+    });
+
+    if (['high', 'critical'].includes(risk.residualLevel)) {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      const recipients = new Set([risk.ownerUserId, ...supervisorIds].filter(Boolean));
+      for (const userId of recipients) {
+        await createFollowUpAlert({
+          alertKey: `risk:${risk.id}:registered:${userId}`,
+          transactionId: null,
+          userId,
+          kind: 'risk_registered_high',
+          severity: risk.residualLevel === 'critical' ? 'danger' : 'warning',
+          title: risk.residualLevel === 'critical' ? 'خطر تشغيلي حرج مسجل' : 'خطر تشغيلي مرتفع مسجل',
+          message: `${risk.riskNumber} — ${risk.title}. درجة الخطر المتبقي ${risk.residualScore}/25.`,
+        });
+      }
+    }
+
+    res.status(201).json(serializeRisk(risk));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/risks/:id', async (req, res, next) => {
+  try {
+    const input = riskRegisterUpdateSchema.parse(req.body);
+    const current = await prisma.transactionFollowUpRiskRegister.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'سجل الخطر غير موجود' });
+
+    const supervisor = isSupervisor(req);
+    const ownsRisk = current.ownerUserId === req.authUser?.id;
+    if (!supervisor && !ownsRisk) {
+      return res.status(403).json({ message: 'لا يمكنك تحديث هذا الخطر' });
+    }
+    if (current.status === 'closed' && !supervisor) {
+      return res.status(409).json({ message: 'لا يمكن تعديل خطر مغلق' });
+    }
+    if (!supervisor && (
+      input.ownerUserId !== undefined ||
+      input.title !== undefined ||
+      input.description !== undefined ||
+      input.category !== undefined ||
+      input.probability !== undefined ||
+      input.impact !== undefined ||
+      input.status === 'closed' ||
+      input.status === 'accepted'
+    )) {
+      return res.status(403).json({ message: 'تعديل بيانات الخطر الأساسية أو الإغلاق متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const owner = supervisor && input.ownerUserId !== undefined
+      ? (input.ownerUserId ? await resolveAssignee(input.ownerUserId) : null)
+      : undefined;
+    if (supervisor && input.ownerUserId !== undefined && !owner) {
+      return res.status(400).json({ message: 'مالك الخطر مطلوب' });
+    }
+
+    const probability = input.probability ?? current.probability;
+    const impact = input.impact ?? current.impact;
+    const residualProbability = input.residualProbability ?? current.residualProbability;
+    const residualImpact = input.residualImpact ?? current.residualImpact;
+    const inherentScore = riskScore(probability, impact);
+    const residualScore = riskScore(residualProbability, residualImpact);
+    const residualLevel = riskLevelFromScore(residualScore);
+    const changedBy = actor(req);
+    const nextStatus = input.status || current.status;
+    const recurrenceCount = input.recurrenceCount ?? current.recurrenceCount;
+    const residualChanged =
+      residualProbability !== current.residualProbability ||
+      residualImpact !== current.residualImpact;
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpRiskRegister.update({
+        where: { id: current.id },
+        data: {
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.category !== undefined ? { category: input.category } : {}),
+          ...(owner !== undefined ? { ownerUserId: owner.id, ownerName: owner.username } : {}),
+          probability,
+          impact,
+          inherentScore,
+          inherentLevel: riskLevelFromScore(inherentScore),
+          ...(input.controls !== undefined ? { controls: input.controls } : {}),
+          ...(input.treatmentStrategy !== undefined ? { treatmentStrategy: input.treatmentStrategy } : {}),
+          ...(input.treatmentPlan !== undefined ? { treatmentPlan: input.treatmentPlan || null } : {}),
+          residualProbability,
+          residualImpact,
+          residualScore,
+          residualLevel,
+          ...(input.reviewDate !== undefined
+            ? { reviewDate: input.reviewDate ? toDate(input.reviewDate, 'تاريخ المراجعة') : null }
+            : {}),
+          ...(input.status !== undefined
+            ? {
+                status: input.status,
+                closedAt: input.status === 'closed' ? new Date() : current.closedAt,
+              }
+            : {}),
+          recurrenceCount,
+          ...(recurrenceCount > current.recurrenceCount ? { lastOccurrenceAt: new Date() } : {}),
+          ...(input.notes !== undefined ? { notes: input.notes || null } : {}),
+          updatedById: changedBy.id,
+          updatedByName: changedBy.name,
+        },
+      });
+
+      await tx.transactionFollowUpRiskRegisterEvent.create({
+        data: {
+          riskId: current.id,
+          action: residualChanged
+            ? 'reassessed'
+            : nextStatus !== current.status
+              ? 'status_changed'
+              : 'updated',
+          fromStatus: current.status,
+          toStatus: nextStatus,
+          probability,
+          impact,
+          residualProbability,
+          residualImpact,
+          residualScore,
+          residualLevel,
+          note: input.notes || null,
+          changedById: changedBy.id,
+          changedByName: changedBy.name,
+        },
+      });
+
+      return row;
+    });
+
+    if (['high', 'critical'].includes(updated.residualLevel) && (
+      updated.residualLevel !== current.residualLevel || residualChanged
+    )) {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      const recipients = new Set([updated.ownerUserId, ...supervisorIds].filter(Boolean));
+      for (const userId of recipients) {
+        await createFollowUpAlert({
+          alertKey: `risk:${updated.id}:reassessed:${saudiDayKey()}:${userId}`,
+          transactionId: null,
+          userId,
+          kind: 'risk_reassessed_high',
+          severity: updated.residualLevel === 'critical' ? 'danger' : 'warning',
+          title: 'تحديث تقييم خطر تشغيلي',
+          message: `${updated.riskNumber} — ${updated.title}. الخطر المتبقي ${updated.residualScore}/25 (${updated.residualLevel}).`,
+        });
+      }
+    }
+
+    res.json(serializeRisk(updated));
   } catch (error) {
     next(error);
   }
