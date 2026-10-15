@@ -83,6 +83,29 @@ const extensionRequestDecisionSchema = z.object({
   reviewNote: nullableText(3000),
 });
 
+const externalWaitCreateSchema = z.object({
+  externalEntity: z.string().trim().min(2, 'الجهة المنتظر منها الرد مطلوبة').max(300),
+  outboundReferenceNumber: nullableText(200),
+  sentAt: z.string().trim().min(1, 'تاريخ إرسال الطلب مطلوب'),
+  nextFollowUpDate: z.string().trim().min(1, 'تاريخ المتابعة القادمة مطلوب'),
+  notes: nullableText(3000),
+});
+
+const externalWaitFollowUpSchema = z.object({
+  nextFollowUpDate: z.string().trim().min(1, 'تاريخ المتابعة القادمة مطلوب'),
+  note: z.string().trim().min(2, 'نتيجة المتابعة مطلوبة').max(3000),
+});
+
+const externalWaitResponseSchema = z.object({
+  responseReceivedAt: z.string().trim().min(1, 'تاريخ ورود الرد مطلوب'),
+  responseReferenceNumber: nullableText(200),
+  responseNote: z.string().trim().min(2, 'ملخص الرد مطلوب').max(3000),
+});
+
+const externalWaitCancelSchema = z.object({
+  note: z.string().trim().min(2, 'سبب إلغاء الانتظار مطلوب').max(3000),
+});
+
 const directiveCreateSchema = z.object({
   directiveType: z.enum(['directive', 'decision']).default('directive'),
   title: z.string().trim().min(2, 'عنوان التوجيه أو القرار مطلوب').max(300),
