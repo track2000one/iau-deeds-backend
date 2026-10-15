@@ -69,9 +69,14 @@ const directiveCreateSchema = z.object({
 });
 
 const directiveUpdateSchema = z.object({
-  status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']),
+  status: z.enum(['pending', 'in_progress', 'awaiting_approval', 'cancelled']),
   completionResponse: nullableText(5000),
   completionNote: nullableText(3000),
+});
+
+const directiveReviewSchema = z.object({
+  decision: z.enum(['approved', 'return_for_completion', 'request_modification']),
+  reviewNote: nullableText(3000),
 });
 
 const reportArchiveSchema = z.object({
@@ -382,7 +387,7 @@ export const syncTransactionFollowUpAlerts = async () => {
     }),
     prisma.transactionFollowUpDirective.findMany({
       where: {
-        status: { in: ['pending', 'in_progress'] },
+        status: { in: ['pending', 'in_progress', 'returned'] },
         dueDate: { not: null },
       },
       include: {
@@ -516,7 +521,7 @@ router.get('/directives/dashboard', async (req, res, next) => {
 
     const itemWhere = {
       ...baseWhere,
-      ...(['pending', 'in_progress', 'completed', 'cancelled'].includes(status) ? { status } : {}),
+      ...(['pending', 'in_progress', 'awaiting_approval', 'returned', 'completed', 'cancelled'].includes(status) ? { status } : {}),
       ...(['normal', 'high', 'urgent'].includes(priority) ? { priority } : {}),
       ...(search
         ? {
@@ -581,6 +586,8 @@ router.get('/directives/dashboard', async (req, res, next) => {
       open: 0,
       pending: 0,
       inProgress: 0,
+      awaitingApproval: 0,
+      returned: 0,
       overdue: 0,
       dueToday: 0,
       dueSoon: 0,
@@ -595,10 +602,12 @@ router.get('/directives/dashboard', async (req, res, next) => {
 
     for (const row of allRows) {
       const serialized = serializeDirective(row);
-      const open = ['pending', 'in_progress'].includes(row.status);
+      const open = ['pending', 'in_progress', 'awaiting_approval', 'returned'].includes(row.status);
       if (open) summary.open += 1;
       if (row.status === 'pending') summary.pending += 1;
       if (row.status === 'in_progress') summary.inProgress += 1;
+      if (row.status === 'awaiting_approval') summary.awaitingApproval += 1;
+      if (row.status === 'returned') summary.returned += 1;
       if (serialized.isOverdue) summary.overdue += 1;
       if (serialized.isDueToday) summary.dueToday += 1;
       if (
@@ -625,6 +634,8 @@ router.get('/directives/dashboard', async (req, res, next) => {
         open: 0,
         pending: 0,
         inProgress: 0,
+        awaitingApproval: 0,
+        returned: 0,
         overdue: 0,
         completed: 0,
         urgent: 0,
@@ -632,6 +643,8 @@ router.get('/directives/dashboard', async (req, res, next) => {
       if (open) employee.open += 1;
       if (row.status === 'pending') employee.pending += 1;
       if (row.status === 'in_progress') employee.inProgress += 1;
+      if (row.status === 'awaiting_approval') employee.awaitingApproval += 1;
+      if (row.status === 'returned') employee.returned += 1;
       if (serialized.isOverdue) employee.overdue += 1;
       if (row.status === 'completed') employee.completed += 1;
       if (open && row.priority === 'urgent') employee.urgent += 1;
@@ -1819,22 +1832,44 @@ router.patch('/:id/directives/:directiveId', async (req, res, next) => {
     if (input.status === 'cancelled' && !supervisor) {
       return res.status(403).json({ message: 'إلغاء التوجيه متاح للمستخدم الإشرافي فقط' });
     }
-    if (input.status === 'completed' && !input.completionResponse?.trim()) {
-      return res.status(400).json({ message: 'اكتب نتيجة تنفيذ التوجيه قبل اعتماده كمنجز' });
+    if (input.status === 'awaiting_approval' && !input.completionResponse?.trim()) {
+      return res.status(400).json({ message: 'اكتب نتيجة التنفيذ قبل رفعها للاعتماد' });
+    }
+    if (
+      input.status === 'awaiting_approval' &&
+      !['pending', 'in_progress', 'returned'].includes(directive.status)
+    ) {
+      return res.status(409).json({ message: 'حالة التوجيه الحالية لا تسمح برفع الإنجاز للاعتماد' });
+    }
+    if (input.status === 'in_progress' && !['pending', 'returned', 'in_progress'].includes(directive.status)) {
+      return res.status(409).json({ message: 'حالة التوجيه الحالية لا تسمح ببدء أو استكمال التنفيذ' });
     }
 
     const changedBy = actor(req);
     const now = new Date();
+    const submitting = input.status === 'awaiting_approval';
     const updated = await prisma.transactionFollowUpDirective.update({
       where: { id: directive.id },
       data: {
         status: input.status,
-        completionResponse: input.completionResponse || null,
-        completionNote: input.completionNote || null,
+        ...(input.completionResponse !== undefined
+          ? { completionResponse: input.completionResponse || null }
+          : {}),
+        ...(input.completionNote !== undefined
+          ? { completionNote: input.completionNote || null }
+          : {}),
         startedAt: input.status === 'in_progress'
           ? (directive.startedAt || now)
           : directive.startedAt,
-        completedAt: input.status === 'completed' ? now : null,
+        completionSubmittedAt: submitting ? now : directive.completionSubmittedAt,
+        completionSubmittedById: submitting ? changedBy.id : directive.completionSubmittedById,
+        completionSubmittedByName: submitting ? changedBy.name : directive.completionSubmittedByName,
+        reviewDecision: submitting ? null : directive.reviewDecision,
+        reviewNote: submitting ? null : directive.reviewNote,
+        reviewedAt: submitting ? null : directive.reviewedAt,
+        reviewedById: submitting ? null : directive.reviewedById,
+        reviewedByName: submitting ? null : directive.reviewedByName,
+        completedAt: null,
         lastUpdatedById: changedBy.id,
         lastUpdatedByName: changedBy.name,
       },
@@ -1842,9 +1877,9 @@ router.patch('/:id/directives/:directiveId', async (req, res, next) => {
 
     const actionLabel =
       input.status === 'in_progress'
-        ? 'بدء تنفيذ التوجيه'
-        : input.status === 'completed'
-          ? 'إنجاز التوجيه'
+        ? (directive.status === 'returned' ? 'استكمال تنفيذ التوجيه بعد إعادته' : 'بدء تنفيذ التوجيه')
+        : input.status === 'awaiting_approval'
+          ? 'رفع نتيجة تنفيذ التوجيه لاعتماد الإدارة'
           : input.status === 'cancelled'
             ? 'إلغاء التوجيه'
             : 'إعادة التوجيه إلى قائمة الانتظار';
@@ -1852,7 +1887,7 @@ router.patch('/:id/directives/:directiveId', async (req, res, next) => {
     await prisma.transactionFollowUpEvent.create({
       data: {
         transactionId: directive.transactionId,
-        eventType: 'directive_updated',
+        eventType: input.status === 'awaiting_approval' ? 'directive_submitted_for_approval' : 'directive_updated',
         fromAssigneeUserId: directive.assigneeUserId,
         fromAssigneeName: directive.assigneeName,
         toAssigneeUserId: directive.assigneeUserId,
@@ -1864,21 +1899,102 @@ router.patch('/:id/directives/:directiveId', async (req, res, next) => {
       },
     });
 
-    if (input.status === 'completed') {
+    if (submitting) {
       const supervisorIds = await getFollowUpSupervisorIds();
       for (const supervisorId of supervisorIds) {
         if (supervisorId === req.authUser.id) continue;
         await createFollowUpAlert({
-          alertKey: `directive:${directive.id}:completed:${supervisorId}`,
+          alertKey: `directive:${directive.id}:awaiting_approval:${now.toISOString()}:${supervisorId}`,
           transactionId: directive.transactionId,
           userId: supervisorId,
-          kind: 'directive_completed',
-          severity: 'info',
-          title: 'تم إنجاز توجيه إداري',
+          kind: 'directive_awaiting_approval',
+          severity: directive.priority === 'urgent' ? 'danger' : 'info',
+          title: 'إنجاز توجيه بانتظار اعتماد الإدارة',
           message: `${directive.title} — المعاملة ${directive.transaction.transactionNumber}. المنفذ: ${directive.assigneeName}.`,
         });
       }
     }
+
+    res.json(serializeDirective(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/:id/directives/:directiveId/review', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'اعتماد نتائج التوجيهات متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = directiveReviewSchema.parse(req.body);
+    const directive = await prisma.transactionFollowUpDirective.findFirst({
+      where: { id: req.params.directiveId, transactionId: req.params.id },
+      include: {
+        transaction: { select: { id: true, transactionNumber: true, subject: true } },
+      },
+    });
+    if (!directive) return res.status(404).json({ message: 'التوجيه أو القرار غير موجود' });
+    if (directive.status !== 'awaiting_approval') {
+      return res.status(409).json({ message: 'هذا التوجيه ليس بانتظار اعتماد نتيجة التنفيذ' });
+    }
+    if (input.decision !== 'approved' && !input.reviewNote?.trim()) {
+      return res.status(400).json({ message: 'اكتب ملاحظة الإدارة عند إعادة التوجيه أو طلب التعديل' });
+    }
+
+    const reviewer = actor(req);
+    const now = new Date();
+    const approved = input.decision === 'approved';
+    const nextStatus = approved ? 'completed' : 'returned';
+
+    const updated = await prisma.transactionFollowUpDirective.update({
+      where: { id: directive.id },
+      data: {
+        status: nextStatus,
+        completedAt: approved ? now : null,
+        reviewDecision: input.decision,
+        reviewNote: input.reviewNote || null,
+        reviewedAt: now,
+        reviewedById: reviewer.id,
+        reviewedByName: reviewer.name,
+        lastUpdatedById: reviewer.id,
+        lastUpdatedByName: reviewer.name,
+      },
+    });
+
+    const decisionLabel =
+      input.decision === 'approved'
+        ? 'اعتماد نتيجة تنفيذ التوجيه'
+        : input.decision === 'return_for_completion'
+          ? 'إعادة التوجيه للاستكمال'
+          : 'طلب تعديل على نتيجة التنفيذ';
+
+    await prisma.transactionFollowUpEvent.create({
+      data: {
+        transactionId: directive.transactionId,
+        eventType: 'directive_reviewed',
+        fromAssigneeUserId: directive.assigneeUserId,
+        fromAssigneeName: directive.assigneeName,
+        toAssigneeUserId: directive.assigneeUserId,
+        toAssigneeName: directive.assigneeName,
+        actionText: `${decisionLabel}: ${directive.title}`,
+        note: input.reviewNote || null,
+        createdById: reviewer.id,
+        createdByName: reviewer.name,
+      },
+    });
+
+    await createFollowUpAlert({
+      alertKey: `directive:${directive.id}:review:${input.decision}:${now.toISOString()}:${directive.assigneeUserId}`,
+      transactionId: directive.transactionId,
+      userId: directive.assigneeUserId,
+      kind: approved ? 'directive_approved' : 'directive_returned',
+      severity: approved ? 'info' : 'warning',
+      title: approved ? 'تم اعتماد إنجاز التوجيه' : 'أعيد التوجيه للاستكمال',
+      message: approved
+        ? `${directive.title} — تم اعتماد نتيجة التنفيذ من الإدارة.`
+        : `${directive.title} — ${input.decision === 'request_modification' ? 'طلبت الإدارة تعديل نتيجة التنفيذ.' : 'أعيد للاستكمال.'} ${input.reviewNote || ''}`,
+    });
 
     res.json(serializeDirective(updated));
   } catch (error) {
@@ -2090,7 +2206,7 @@ router.patch('/:id/action', async (req, res, next) => {
       const openDirectives = await prisma.transactionFollowUpDirective.count({
         where: {
           transactionId: current.id,
-          status: { in: ['pending', 'in_progress'] },
+          status: { in: ['pending', 'in_progress', 'awaiting_approval', 'returned'] },
         },
       });
       if (openDirectives > 0) {
