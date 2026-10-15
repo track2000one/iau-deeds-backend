@@ -99,6 +99,44 @@ const kpiTargetSchema = z.object({
   alertsEnabled: z.boolean(),
 });
 
+const preventiveActionCreateSchema = z.object({
+  sourceType: z.enum(['metric', 'employee']).default('metric'),
+  metricKey: z.enum([
+    'firstPassRate',
+    'onTimeRate',
+    'reworkRate',
+    'avgExecutionHours',
+    'avgApprovalHours',
+  ]).optional().nullable(),
+  scopeType: z.enum(['global', 'employee']).default('global'),
+  assigneeUserId: nullableText(100),
+  ownerUserId: z.string().trim().min(1, 'مسؤول التنفيذ مطلوب'),
+  actionText: z.string().trim().min(2, 'الإجراء الوقائي مطلوب').max(5000),
+  expectedOutcome: nullableText(3000),
+  periodDays: z.coerce.number().int().min(7).max(365).default(30),
+  baselineValue: z.coerce.number().optional().nullable(),
+  projectedValue: z.coerce.number().optional().nullable(),
+  targetValue: z.coerce.number().optional().nullable(),
+  direction: z.enum(['min', 'max']).optional().nullable(),
+  sourceRiskScore: z.coerce.number().int().min(0).max(100).optional().nullable(),
+  sourceRiskLevel: z.enum(['low', 'medium', 'high', 'critical']).optional().nullable(),
+  sourceReasons: z.array(z.string().trim().min(1).max(1000)).max(10).optional().default([]),
+  dueDate: z.string().trim().min(1, 'تاريخ الاستحقاق مطلوب'),
+});
+
+const preventiveActionUpdateSchema = z.object({
+  status: z.enum(['open', 'in_progress', 'monitoring', 'cancelled']).optional(),
+  ownerUserId: nullableText(100),
+  actionText: z.string().trim().min(2).max(5000).optional(),
+  expectedOutcome: nullableText(3000),
+  dueDate: z.string().trim().optional(),
+  progressNote: nullableText(5000),
+});
+
+const preventiveActionLinkCapaSchema = z.object({
+  improvementPlanId: z.string().trim().min(1, 'خطة CAPA مطلوبة'),
+});
+
 const improvementPlanCreateSchema = z.object({
   metricKey: z.enum([
     'firstPassRate',
@@ -899,7 +937,7 @@ const alertCopy = (record, indicator, escalated = false) => {
 };
 
 export const syncTransactionFollowUpAlerts = async () => {
-  const [rows, directives, improvementPlans] = await Promise.all([
+  const [rows, directives, improvementPlans, preventiveActions] = await Promise.all([
     prisma.transactionFollowUp.findMany({
       where: { status: { in: OPEN_STATUSES } },
       select: {
@@ -935,6 +973,22 @@ export const syncTransactionFollowUpAlerts = async () => {
         metricLabel: true,
         scopeType: true,
         assigneeName: true,
+        ownerName: true,
+        dueDate: true,
+        status: true,
+      },
+    }),
+    prisma.transactionFollowUpPreventiveAction.findMany({
+      where: {
+        status: { in: ['open', 'in_progress', 'monitoring'] },
+      },
+      select: {
+        id: true,
+        sourceType: true,
+        metricLabel: true,
+        scopeType: true,
+        assigneeName: true,
+        ownerUserId: true,
         ownerName: true,
         dueDate: true,
         status: true,
@@ -1057,6 +1111,40 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
+  for (const action of preventiveActions) {
+    const dueKey = saudiDayKey(new Date(action.dueDate));
+    const dueNumber = dayNumberFromKey(dueKey);
+    const daysOverdue = Math.max(0, todayNumber - dueNumber);
+    const dueToday = dueKey === todayKey;
+    if (!daysOverdue && !dueToday) continue;
+
+    const subject = action.metricLabel
+      ? `مؤشر «${action.metricLabel}»`
+      : action.assigneeName
+        ? `المخاطر التشغيلية للموظف ${action.assigneeName}`
+        : 'المخاطر التشغيلية';
+    const kind = daysOverdue ? 'preventive_action_overdue' : 'preventive_action_due_today';
+    const severity = daysOverdue ? 'danger' : 'warning';
+    const title = daysOverdue ? 'إجراء وقائي متأخر' : 'حان موعد قياس أثر إجراء وقائي';
+    const message = daysOverdue
+      ? `${subject} — الإجراء الوقائي متأخر ${daysOverdue} يوم، ويلزم تحديث التنفيذ وقياس الأثر.`
+      : `${subject} — الإجراء الوقائي مستحق اليوم، ويلزم قياس أثره قبل الانتقال إلى CAPA.`;
+
+    const recipients = new Set([action.ownerUserId, ...supervisorIds].filter(Boolean));
+    for (const userId of recipients) {
+      await createFollowUpAlert({
+        alertKey: `preventive:${action.id}:${kind}:${todayKey}:${userId}`,
+        transactionId: null,
+        userId,
+        kind,
+        severity,
+        title,
+        message,
+      });
+      alerts += 1;
+    }
+  }
+
   const targets = await getKpiTargets();
   if (targets.alertsEnabled && supervisorIds.length) {
     const earlyWarning = await buildEarlyWarningSnapshot(targets.alertPeriodDays, targets);
@@ -1133,7 +1221,7 @@ export const syncTransactionFollowUpAlerts = async () => {
     }
   }
 
-  return { scanned: rows.length + directives.length + improvementPlans.length, alerts };
+  return { scanned: rows.length + directives.length + improvementPlans.length + preventiveActions.length, alerts };
 };
 
 router.get('/assignees', async (_req, res, next) => {
@@ -1989,6 +2077,398 @@ router.get('/directives/improvement-plans/effectiveness', async (req, res, next)
       owners,
       monthlyTrend,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/directives/preventive-actions', async (req, res, next) => {
+  try {
+    const status = String(req.query.status || '').trim();
+    const metricKey = String(req.query.metricKey || '').trim();
+    const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const pageSize = Math.min(50, Math.max(10, Number.parseInt(String(req.query.pageSize || '20'), 10) || 20));
+    const supervisor = isSupervisor(req);
+    const currentUserId = req.authUser?.id;
+    const visibility = supervisor
+      ? {}
+      : {
+          OR: [
+            { ownerUserId: currentUserId },
+            { assigneeUserId: currentUserId },
+          ],
+        };
+    const filters = {
+      ...visibility,
+      ...(['open', 'in_progress', 'monitoring', 'effective', 'failed', 'cancelled'].includes(status) ? { status } : {}),
+      ...(Object.keys(KPI_METRIC_LABELS).includes(metricKey) ? { metricKey } : {}),
+    };
+    const now = new Date();
+
+    const [total, items, openCount, overdueCount, monitoringCount, effective30d, failedCount] = await Promise.all([
+      prisma.transactionFollowUpPreventiveAction.count({ where: filters }),
+      prisma.transactionFollowUpPreventiveAction.findMany({
+        where: filters,
+        include: { events: { orderBy: { createdAt: 'desc' }, take: 12 } },
+        orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.transactionFollowUpPreventiveAction.count({
+        where: { ...visibility, status: { in: ['open', 'in_progress', 'monitoring'] } },
+      }),
+      prisma.transactionFollowUpPreventiveAction.count({
+        where: {
+          ...visibility,
+          status: { in: ['open', 'in_progress', 'monitoring'] },
+          dueDate: { lt: now },
+        },
+      }),
+      prisma.transactionFollowUpPreventiveAction.count({ where: { ...visibility, status: 'monitoring' } }),
+      prisma.transactionFollowUpPreventiveAction.count({
+        where: {
+          ...visibility,
+          status: 'effective',
+          completedAt: { gte: new Date(now.getTime() - 30 * 86400000) },
+        },
+      }),
+      prisma.transactionFollowUpPreventiveAction.count({ where: { ...visibility, status: 'failed' } }),
+    ]);
+
+    res.json({
+      generatedAt: now,
+      supervisor,
+      summary: {
+        open: openCount,
+        overdue: overdueCount,
+        monitoring: monitoringCount,
+        effective30d,
+        failed: failedCount,
+      },
+      items: items.map((item) => ({
+        ...item,
+        isOverdue:
+          ['open', 'in_progress', 'monitoring'].includes(item.status) &&
+          new Date(item.dueDate).getTime() < now.getTime(),
+      })),
+      total,
+      page,
+      pageSize,
+      totalPages: total ? Math.ceil(total / pageSize) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/directives/preventive-actions', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'إنشاء التدخلات الوقائية متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = preventiveActionCreateSchema.parse(req.body);
+    if (input.sourceType === 'metric' && !input.metricKey) {
+      return res.status(400).json({ message: 'حدد المؤشر المرتبط بالإنذار المبكر' });
+    }
+    if (input.scopeType === 'employee' && !input.assigneeUserId) {
+      return res.status(400).json({ message: 'حدد الموظف المرتبط بالتدخل الوقائي' });
+    }
+
+    const assignee = input.assigneeUserId ? await resolveAssignee(input.assigneeUserId) : null;
+    const owner = await resolveAssignee(input.ownerUserId);
+    const dueDate = toDate(input.dueDate, 'تاريخ الاستحقاق');
+    const createdBy = actor(req);
+    const metricLabel = input.metricKey ? KPI_METRIC_LABELS[input.metricKey] : null;
+
+    const action = await prisma.transactionFollowUpPreventiveAction.create({
+      data: {
+        sourceType: input.sourceType,
+        metricKey: input.metricKey || null,
+        metricLabel,
+        scopeType: input.scopeType,
+        assigneeUserId: assignee?.id || null,
+        assigneeName: assignee?.username || null,
+        ownerUserId: owner.id,
+        ownerName: owner.username,
+        actionText: input.actionText,
+        expectedOutcome: input.expectedOutcome || null,
+        periodDays: input.periodDays,
+        baselineValue: input.baselineValue ?? null,
+        projectedValue: input.projectedValue ?? null,
+        targetValue: input.targetValue ?? null,
+        direction: input.direction || null,
+        sourceRiskScore: input.sourceRiskScore ?? null,
+        sourceRiskLevel: input.sourceRiskLevel || null,
+        sourceReasons: input.sourceReasons || [],
+        dueDate,
+        createdById: createdBy.id,
+        createdByName: createdBy.name,
+        events: {
+          create: {
+            action: 'created',
+            toStatus: 'open',
+            note: 'إنشاء تدخل وقائي من شاشة الإنذار المبكر',
+            changedById: createdBy.id,
+            changedByName: createdBy.name,
+          },
+        },
+      },
+      include: { events: { orderBy: { createdAt: 'desc' } } },
+    });
+
+    await createFollowUpAlert({
+      alertKey: `preventive:${action.id}:assigned:${owner.id}`,
+      transactionId: null,
+      userId: owner.id,
+      kind: 'preventive_action_assigned',
+      severity: 'warning',
+      title: 'تكليف بإجراء وقائي',
+      message: `${metricLabel ? `مؤشر «${metricLabel}»` : assignee?.username ? `مخاطر تشغيلية مرتبطة بـ ${assignee.username}` : 'تدخل وقائي'} — الاستحقاق ${saudiDayKey(dueDate)}.`,
+    });
+
+    res.status(201).json(action);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/preventive-actions/:id', async (req, res, next) => {
+  try {
+    const input = preventiveActionUpdateSchema.parse(req.body);
+    const current = await prisma.transactionFollowUpPreventiveAction.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'التدخل الوقائي غير موجود' });
+
+    const supervisor = isSupervisor(req);
+    const ownsAction = current.ownerUserId === req.authUser?.id;
+    if (!supervisor && !ownsAction) {
+      return res.status(403).json({ message: 'لا يمكنك تحديث هذا التدخل الوقائي' });
+    }
+    if (['effective', 'failed', 'cancelled'].includes(current.status)) {
+      return res.status(409).json({ message: 'لا يمكن تعديل تدخل وقائي مغلق' });
+    }
+
+    if (!supervisor && (
+      input.ownerUserId !== undefined ||
+      input.actionText !== undefined ||
+      input.expectedOutcome !== undefined ||
+      input.dueDate !== undefined ||
+      input.status === 'cancelled'
+    )) {
+      return res.status(403).json({ message: 'يمكن لمسؤول التنفيذ تحديث حالة التنفيذ والملاحظات فقط' });
+    }
+
+    const owner = supervisor && input.ownerUserId !== undefined
+      ? (input.ownerUserId ? await resolveAssignee(input.ownerUserId) : null)
+      : undefined;
+    if (supervisor && input.ownerUserId !== undefined && !owner) {
+      return res.status(400).json({ message: 'مسؤول التنفيذ مطلوب' });
+    }
+
+    const changedBy = actor(req);
+    const nextStatus = input.status || current.status;
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpPreventiveAction.update({
+        where: { id: current.id },
+        data: {
+          ...(input.progressNote !== undefined ? { progressNote: input.progressNote || null } : {}),
+          ...(input.actionText !== undefined ? { actionText: input.actionText } : {}),
+          ...(input.expectedOutcome !== undefined ? { expectedOutcome: input.expectedOutcome || null } : {}),
+          ...(input.dueDate !== undefined ? { dueDate: toDate(input.dueDate, 'تاريخ الاستحقاق') } : {}),
+          ...(owner !== undefined ? { ownerUserId: owner.id, ownerName: owner.username } : {}),
+          ...(input.status ? {
+            status: input.status,
+            cancelledAt: input.status === 'cancelled' ? new Date() : current.cancelledAt,
+          } : {}),
+        },
+      });
+      await tx.transactionFollowUpPreventiveActionEvent.create({
+        data: {
+          actionId: current.id,
+          action: nextStatus !== current.status ? 'status_changed' : 'updated',
+          fromStatus: current.status,
+          toStatus: nextStatus,
+          note: input.progressNote || null,
+          changedById: changedBy.id,
+          changedByName: changedBy.name,
+        },
+      });
+      return row;
+    });
+
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/directives/preventive-actions/:id/verify', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'قياس أثر التدخل الوقائي متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const current = await prisma.transactionFollowUpPreventiveAction.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'التدخل الوقائي غير موجود' });
+    if (current.status === 'cancelled') {
+      return res.status(409).json({ message: 'لا يمكن قياس تدخل وقائي ملغى' });
+    }
+    if (current.status === 'effective') {
+      return res.json({ ...current, verification: { effective: true, capaRecommended: false } });
+    }
+
+    const now = new Date();
+    const dueReached = new Date(current.dueDate).getTime() <= now.getTime();
+    const changedBy = actor(req);
+    let resultValue = null;
+    let resultRiskScore = null;
+    let resultStatus = null;
+    let metTarget = false;
+
+    if (current.metricKey) {
+      if (current.targetValue == null || !current.direction) {
+        return res.status(409).json({ message: 'بيانات المستهدف غير مكتملة لهذا التدخل الوقائي' });
+      }
+      const snapshot = await calculateCurrentKpiSnapshot(
+        current.periodDays,
+        current.scopeType === 'employee' ? current.assigneeUserId : null,
+      );
+      resultValue = snapshot[current.metricKey];
+      if (resultValue == null) {
+        return res.status(409).json({ message: 'لا توجد بيانات كافية لقياس أثر التدخل الوقائي' });
+      }
+      const evaluation = evaluateMetric(resultValue, current.targetValue, current.direction, 0);
+      resultStatus = evaluation.status;
+      metTarget = evaluation.met === true;
+    } else if (current.scopeType === 'employee' && current.assigneeUserId) {
+      const warning = await buildEarlyWarningSnapshot(current.periodDays);
+      const employee = warning.employees.find((item) => item.userId === current.assigneeUserId);
+      resultRiskScore = employee?.riskScore ?? 0;
+      resultStatus = employee?.riskLevel || 'low';
+      metTarget = !employee || !['critical', 'high'].includes(employee.riskLevel);
+    } else {
+      return res.status(409).json({ message: 'لا توجد آلية قياس محددة لهذا التدخل الوقائي' });
+    }
+
+    const nextStatus = metTarget ? 'effective' : dueReached ? 'failed' : 'monitoring';
+    const note = metTarget
+      ? 'حقق التدخل الوقائي الأثر المطلوب قبل الحاجة إلى CAPA'
+      : nextStatus === 'failed'
+        ? 'لم يحقق التدخل الوقائي الأثر المطلوب عند الاستحقاق ويوصى بفتح CAPA'
+        : 'تم القياس وما زال التدخل الوقائي تحت المراقبة حتى موعد الاستحقاق';
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpPreventiveAction.update({
+        where: { id: current.id },
+        data: {
+          status: nextStatus,
+          progressNote: note,
+          resultValue,
+          resultRiskScore,
+          resultStatus,
+          resultMetTarget: metTarget,
+          verifiedAt: now,
+          verifiedById: changedBy.id,
+          verifiedByName: changedBy.name,
+          completedAt: metTarget ? now : null,
+          failedAt: nextStatus === 'failed' ? now : null,
+        },
+      });
+      await tx.transactionFollowUpPreventiveActionEvent.create({
+        data: {
+          actionId: current.id,
+          action: 'verified',
+          fromStatus: current.status,
+          toStatus: nextStatus,
+          note,
+          resultValue,
+          resultRiskScore,
+          resultStatus,
+          resultMetTarget: metTarget,
+          changedById: changedBy.id,
+          changedByName: changedBy.name,
+        },
+      });
+      return row;
+    });
+
+    if (nextStatus === 'failed') {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      for (const supervisorId of supervisorIds) {
+        await createFollowUpAlert({
+          alertKey: `preventive:${current.id}:failed:${saudiDayKey(now)}:${supervisorId}`,
+          transactionId: null,
+          userId: supervisorId,
+          kind: 'preventive_action_failed',
+          severity: 'danger',
+          title: 'فشل تدخل وقائي — CAPA مطلوبة',
+          message: `${current.metricLabel ? `مؤشر «${current.metricLabel}»` : current.assigneeName || 'التدخل الوقائي'} لم يحقق الأثر المطلوب عند الاستحقاق.`,
+        });
+      }
+    }
+
+    res.json({
+      ...updated,
+      verification: {
+        resultValue,
+        resultRiskScore,
+        resultStatus,
+        metTarget,
+        effective: metTarget,
+        capaRecommended: nextStatus === 'failed' && !updated.improvementPlanId,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/directives/preventive-actions/:id/link-capa', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'ربط CAPA متاح للمستخدم الإشرافي فقط' });
+    }
+    const input = preventiveActionLinkCapaSchema.parse(req.body);
+    const current = await prisma.transactionFollowUpPreventiveAction.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'التدخل الوقائي غير موجود' });
+    if (current.status !== 'failed') {
+      return res.status(409).json({ message: 'لا يتم إنشاء CAPA إلا بعد فشل التدخل الوقائي' });
+    }
+
+    const plan = await prisma.transactionFollowUpImprovementPlan.findUnique({
+      where: { id: input.improvementPlanId },
+      select: { id: true },
+    });
+    if (!plan) return res.status(404).json({ message: 'خطة CAPA غير موجودة' });
+
+    const changedBy = actor(req);
+    const now = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUpPreventiveAction.update({
+        where: { id: current.id },
+        data: { improvementPlanId: plan.id, escalatedAt: now },
+      });
+      await tx.transactionFollowUpPreventiveActionEvent.create({
+        data: {
+          actionId: current.id,
+          action: 'capa_linked',
+          fromStatus: current.status,
+          toStatus: current.status,
+          note: 'تم تصعيد التدخل الوقائي الفاشل إلى خطة CAPA',
+          changedById: changedBy.id,
+          changedByName: changedBy.name,
+        },
+      });
+      return row;
+    });
+
+    res.json(updated);
   } catch (error) {
     next(error);
   }
