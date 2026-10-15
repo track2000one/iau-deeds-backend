@@ -1574,14 +1574,170 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+router.post('/:id/directives', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'إصدار التوجيهات والقرارات متاح للمستخدم الإشرافي فقط' });
+    }
+
+    const input = directiveCreateSchema.parse(req.body);
+    const transaction = await prisma.transactionFollowUp.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, transactionNumber: true, subject: true },
+    });
+    if (!transaction) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+
+    const assignee = await resolveAssignee(input.assigneeUserId);
+    const issuedBy = actor(req);
+    const dueDate = toDate(input.dueDate, 'تاريخ استحقاق التوجيه');
+    const now = new Date();
+
+    const directive = await prisma.transactionFollowUpDirective.create({
+      data: {
+        transactionId: transaction.id,
+        directiveType: input.directiveType,
+        title: input.title,
+        instruction: input.instruction,
+        priority: input.priority,
+        status: 'pending',
+        assigneeUserId: assignee.id,
+        assigneeName: assignee.username,
+        dueDate,
+        issuedById: issuedBy.id,
+        issuedByName: issuedBy.name,
+        lastUpdatedById: issuedBy.id,
+        lastUpdatedByName: issuedBy.name,
+      },
+    });
+
+    await prisma.transactionFollowUpEvent.create({
+      data: {
+        transactionId: transaction.id,
+        eventType: 'directive_created',
+        toAssigneeUserId: assignee.id,
+        toAssigneeName: assignee.username,
+        actionText: `${input.directiveType === 'decision' ? 'إصدار قرار' : 'إصدار توجيه'}: ${input.title}`,
+        note: input.instruction,
+        createdById: issuedBy.id,
+        createdByName: issuedBy.name,
+      },
+    });
+
+    await createFollowUpAlert({
+      alertKey: `directive:${directive.id}:assigned:${assignee.id}`,
+      transactionId: transaction.id,
+      userId: assignee.id,
+      kind: 'directive_assigned',
+      severity: input.priority === 'urgent' ? 'danger' : input.priority === 'high' ? 'warning' : 'info',
+      title: input.directiveType === 'decision' ? 'تم إسناد قرار إداري إليك' : 'تم إسناد توجيه إداري إليك',
+      message: `${input.title} — المعاملة ${transaction.transactionNumber}. ${dueDate ? `الاستحقاق: ${saudiDayKey(dueDate)}.` : ''}`,
+    });
+
+    res.status(201).json(serializeDirective(directive));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/:id/directives/:directiveId', async (req, res, next) => {
+  try {
+    const input = directiveUpdateSchema.parse(req.body);
+    const directive = await prisma.transactionFollowUpDirective.findFirst({
+      where: { id: req.params.directiveId, transactionId: req.params.id },
+      include: {
+        transaction: { select: { id: true, transactionNumber: true, subject: true } },
+      },
+    });
+    if (!directive) return res.status(404).json({ message: 'التوجيه أو القرار غير موجود' });
+
+    const supervisor = isSupervisor(req);
+    if (!supervisor && directive.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'هذا التوجيه غير مسند إلى حسابك' });
+    }
+    if (input.status === 'cancelled' && !supervisor) {
+      return res.status(403).json({ message: 'إلغاء التوجيه متاح للمستخدم الإشرافي فقط' });
+    }
+    if (input.status === 'completed' && !input.completionResponse?.trim()) {
+      return res.status(400).json({ message: 'اكتب نتيجة تنفيذ التوجيه قبل اعتماده كمنجز' });
+    }
+
+    const changedBy = actor(req);
+    const now = new Date();
+    const updated = await prisma.transactionFollowUpDirective.update({
+      where: { id: directive.id },
+      data: {
+        status: input.status,
+        completionResponse: input.completionResponse || null,
+        completionNote: input.completionNote || null,
+        startedAt: input.status === 'in_progress'
+          ? (directive.startedAt || now)
+          : directive.startedAt,
+        completedAt: input.status === 'completed' ? now : null,
+        lastUpdatedById: changedBy.id,
+        lastUpdatedByName: changedBy.name,
+      },
+    });
+
+    const actionLabel =
+      input.status === 'in_progress'
+        ? 'بدء تنفيذ التوجيه'
+        : input.status === 'completed'
+          ? 'إنجاز التوجيه'
+          : input.status === 'cancelled'
+            ? 'إلغاء التوجيه'
+            : 'إعادة التوجيه إلى قائمة الانتظار';
+
+    await prisma.transactionFollowUpEvent.create({
+      data: {
+        transactionId: directive.transactionId,
+        eventType: 'directive_updated',
+        fromAssigneeUserId: directive.assigneeUserId,
+        fromAssigneeName: directive.assigneeName,
+        toAssigneeUserId: directive.assigneeUserId,
+        toAssigneeName: directive.assigneeName,
+        actionText: `${actionLabel}: ${directive.title}`,
+        note: input.completionResponse || input.completionNote || null,
+        createdById: changedBy.id,
+        createdByName: changedBy.name,
+      },
+    });
+
+    if (input.status === 'completed') {
+      const supervisorIds = await getFollowUpSupervisorIds();
+      for (const supervisorId of supervisorIds) {
+        if (supervisorId === req.authUser.id) continue;
+        await createFollowUpAlert({
+          alertKey: `directive:${directive.id}:completed:${supervisorId}`,
+          transactionId: directive.transactionId,
+          userId: supervisorId,
+          kind: 'directive_completed',
+          severity: 'info',
+          title: 'تم إنجاز توجيه إداري',
+          message: `${directive.title} — المعاملة ${directive.transaction.transactionNumber}. المنفذ: ${directive.assigneeName}.`,
+        });
+      }
+    }
+
+    res.json(serializeDirective(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/:id', async (req, res, next) => {
   try {
     const row = await prisma.transactionFollowUp.findUnique({
       where: { id: req.params.id },
-      include: { events: { orderBy: { createdAt: 'desc' } } },
+      include: {
+        events: { orderBy: { createdAt: 'desc' } },
+        directives: { orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }] },
+      },
     });
     if (!row) return res.status(404).json({ message: 'المعاملة غير موجودة' });
-    res.json(serialize(row));
+    res.json({
+      ...serialize(row),
+      directives: (row.directives || []).map(serializeDirective),
+    });
   } catch (error) {
     next(error);
   }
