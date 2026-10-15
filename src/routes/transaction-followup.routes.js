@@ -359,7 +359,21 @@ const serializeRisk = (risk) => {
     risk.reviewDate &&
     new Date(risk.reviewDate).getTime() < now.getTime()
   );
-  return { ...risk, isReviewOverdue: reviewOverdue };
+  const latestAcceptance = Array.isArray(risk.acceptanceRequests)
+    ? risk.acceptanceRequests[0] || null
+    : null;
+  const acceptanceExpiresSoon = Boolean(
+    risk.status === 'accepted' &&
+    risk.acceptanceExpiresAt &&
+    new Date(risk.acceptanceExpiresAt).getTime() > now.getTime() &&
+    new Date(risk.acceptanceExpiresAt).getTime() <= now.getTime() + 7 * 86400000
+  );
+  return {
+    ...risk,
+    latestAcceptance,
+    isReviewOverdue: reviewOverdue,
+    acceptanceExpiresSoon,
+  };
 };
 
 const evaluateKpiMetrics = (metrics, targets) => ({
