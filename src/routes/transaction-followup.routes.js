@@ -6014,6 +6014,11 @@ router.get('/work-queue', async (req, res, next) => {
           orderBy: { createdAt: 'desc' },
           take: 1,
         },
+        externalWaits: {
+          where: { status: 'active' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
       },
       orderBy: [
         { dueDate: { sort: 'asc', nulls: 'last' } },
@@ -6027,6 +6032,7 @@ router.get('/work-queue', async (req, res, next) => {
       'overdue',
       'urgent_today',
       'extension_requests',
+      'external_follow_up_due',
       'due_3_days',
       'awaiting_review',
       'waiting_external',
@@ -6053,9 +6059,24 @@ router.get('/work-queue', async (req, res, next) => {
       );
 
       const pendingExtension = row.extensionRequests?.[0] || null;
+      const activeExternalWait = row.externalWaits?.[0] || null;
+      const externalSentNumber = activeExternalWait
+        ? dayNumberFromKey(saudiDayKey(new Date(activeExternalWait.sentAt)))
+        : null;
+      const externalFollowUpNumber = activeExternalWait
+        ? dayNumberFromKey(saudiDayKey(new Date(activeExternalWait.nextFollowUpDate)))
+        : null;
       const queueItem = {
         ...serialized,
         pendingExtension,
+        activeExternalWait: activeExternalWait
+          ? {
+              ...activeExternalWait,
+              waitingDays: Math.max(0, todayNumber - externalSentNumber),
+              daysUntilFollowUp: externalFollowUpNumber - todayNumber,
+              followUpDue: externalFollowUpNumber <= todayNumber,
+            }
+          : null,
         queueBucket: bucket,
         daysUntilDue,
         overdueDays: daysUntilDue != null && daysUntilDue < 0 ? Math.abs(daysUntilDue) : 0,
@@ -6073,12 +6094,23 @@ router.get('/work-queue', async (req, res, next) => {
           });
         }
       }
+
+      if (activeExternalWait && externalFollowUpNumber <= todayNumber) {
+        counts.external_follow_up_due += 1;
+        if (buckets.external_follow_up_due.length < 80) {
+          buckets.external_follow_up_due.push({
+            ...queueItem,
+            queueBucket: 'external_follow_up_due',
+          });
+        }
+      }
     }
 
     const priorityBuckets = [
       'overdue',
       'urgent_today',
       'extension_requests',
+      'external_follow_up_due',
       'due_3_days',
       'awaiting_review',
       'waiting_external',
