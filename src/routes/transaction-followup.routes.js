@@ -2343,6 +2343,380 @@ router.get('/directives/risks', async (req, res, next) => {
   }
 });
 
+router.get('/directives/risk-dashboard', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'لوحة المخاطر التنفيذية متاحة للمستخدم الإشرافي فقط' });
+    }
+
+    const now = new Date();
+    const appetiteMaxScore = 9;
+    const trendStart = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    const preventiveStart = new Date(now.getTime() - 90 * 86400000);
+
+    const [
+      activeRisks,
+      riskEvents,
+      preventiveActions,
+      improvementPlans,
+      earlyWarning,
+    ] = await Promise.all([
+      prisma.transactionFollowUpRiskRegister.findMany({
+        where: { status: { not: 'closed' } },
+        orderBy: [{ residualScore: 'desc' }, { reviewDate: 'asc' }, { createdAt: 'desc' }],
+      }),
+      prisma.transactionFollowUpRiskRegisterEvent.findMany({
+        where: { createdAt: { gte: trendStart } },
+        select: {
+          action: true,
+          toStatus: true,
+          residualScore: true,
+          residualLevel: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.transactionFollowUpPreventiveAction.findMany({
+        where: { createdAt: { gte: preventiveStart } },
+        select: {
+          id: true,
+          status: true,
+          dueDate: true,
+          createdAt: true,
+        },
+      }),
+      prisma.transactionFollowUpImprovementPlan.findMany({
+        where: {
+          status: { in: ['open', 'in_progress', 'monitoring'] },
+        },
+        select: {
+          id: true,
+          status: true,
+          dueDate: true,
+          resultMetTarget: true,
+          verifiedAt: true,
+        },
+      }),
+      (async () => {
+        const targets = await getKpiTargets();
+        return buildEarlyWarningSnapshot(targets.alertPeriodDays, targets);
+      })(),
+    ]);
+
+    const round = (value, digits = 1) =>
+      value == null || Number.isNaN(Number(value))
+        ? null
+        : Number(Number(value).toFixed(digits));
+    const averageOf = (values) =>
+      values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    const percent = (part, total) => total ? round((part / total) * 100) : 0;
+    const monthKey = (date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+    const critical = activeRisks.filter((risk) => risk.residualLevel === 'critical').length;
+    const high = activeRisks.filter((risk) => risk.residualLevel === 'high').length;
+    const medium = activeRisks.filter((risk) => risk.residualLevel === 'medium').length;
+    const low = activeRisks.filter((risk) => risk.residualLevel === 'low').length;
+    const outsideAppetite = activeRisks.filter((risk) => risk.residualScore > appetiteMaxScore).length;
+    const overdueReview = activeRisks.filter(
+      (risk) => risk.reviewDate && new Date(risk.reviewDate).getTime() < now.getTime()
+    ).length;
+    const recurring = activeRisks.filter((risk) => risk.recurrenceCount > 0).length;
+    const accepted = activeRisks.filter((risk) => risk.status === 'accepted').length;
+    const controlled = activeRisks.filter((risk) => risk.status === 'controlled').length;
+
+    const inherentScores = activeRisks.map((risk) => risk.inherentScore);
+    const residualScores = activeRisks.map((risk) => risk.residualScore);
+    const reductions = activeRisks
+      .filter((risk) => risk.inherentScore > 0)
+      .map((risk) => ((risk.inherentScore - risk.residualScore) / risk.inherentScore) * 100);
+    const treated = activeRisks.filter((risk) => {
+      const controls = Array.isArray(risk.controls) ? risk.controls.filter(Boolean) : [];
+      return Boolean(risk.treatmentPlan?.trim()) || controls.length > 0;
+    }).length;
+
+    const outsideAppetiteRate = percent(outsideAppetite, activeRisks.length);
+    const overdueReviewRate = percent(overdueReview, activeRisks.length);
+    const recurringRiskRate = percent(recurring, activeRisks.length);
+    const avgRiskReductionPercent = round(averageOf(reductions));
+
+    const preventiveFailed = preventiveActions.filter((item) => item.status === 'failed').length;
+    const preventiveEffective = preventiveActions.filter((item) => item.status === 'effective').length;
+    const preventiveVerified = preventiveFailed + preventiveEffective;
+    const preventiveFailureRate = percent(preventiveFailed, preventiveVerified);
+    const preventiveOverdue = preventiveActions.filter(
+      (item) =>
+        ['open', 'in_progress', 'monitoring'].includes(item.status) &&
+        item.dueDate &&
+        new Date(item.dueDate).getTime() < now.getTime()
+    ).length;
+
+    const capaOverdue = improvementPlans.filter(
+      (plan) => plan.dueDate && new Date(plan.dueDate).getTime() < now.getTime()
+    ).length;
+
+    const riskAppetiteStatus =
+      critical > 0 || outsideAppetiteRate >= 25
+        ? 'breached'
+        : outsideAppetiteRate >= 10
+          ? 'watch'
+          : 'within';
+
+    const kriStatusMax = (value, warning, danger) =>
+      value >= danger ? 'red' : value >= warning ? 'yellow' : 'green';
+    const kriStatusMin = (value, warning, danger) =>
+      value == null ? 'neutral' : value <= danger ? 'red' : value <= warning ? 'yellow' : 'green';
+
+    const kri = [
+      {
+        key: 'outsideAppetiteRate',
+        label: 'المخاطر خارج شهية المخاطر',
+        value: outsideAppetiteRate,
+        unit: '%',
+        status: kriStatusMax(outsideAppetiteRate, 10, 25),
+        target: '≤ 10%',
+        description: 'نسبة المخاطر النشطة التي تجاوز خطرها المتبقي الدرجة 9 من 25.',
+      },
+      {
+        key: 'criticalRisks',
+        label: 'المخاطر الحرجة',
+        value: critical,
+        unit: 'خطر',
+        status: kriStatusMax(critical, 1, 3),
+        target: '0',
+        description: 'عدد المخاطر النشطة المصنفة حرجة بعد تطبيق الضوابط.',
+      },
+      {
+        key: 'overdueReviewRate',
+        label: 'تأخر مراجعة المخاطر',
+        value: overdueReviewRate,
+        unit: '%',
+        status: kriStatusMax(overdueReviewRate, 10, 20),
+        target: '< 10%',
+        description: 'نسبة المخاطر النشطة التي تجاوزت تاريخ المراجعة المحدد.',
+      },
+      {
+        key: 'recurringRiskRate',
+        label: 'تكرار المخاطر',
+        value: recurringRiskRate,
+        unit: '%',
+        status: kriStatusMax(recurringRiskRate, 10, 20),
+        target: '< 10%',
+        description: 'نسبة المخاطر النشطة التي تم تسجيل تكرار لها مرة واحدة على الأقل.',
+      },
+      {
+        key: 'riskReduction',
+        label: 'فعالية خفض المخاطر',
+        value: avgRiskReductionPercent,
+        unit: '%',
+        status: kriStatusMin(avgRiskReductionPercent, 30, 15),
+        target: '≥ 30%',
+        description: 'متوسط الانخفاض من الخطر الكامن إلى الخطر المتبقي.',
+      },
+      {
+        key: 'preventiveFailureRate',
+        label: 'فشل التدخلات الوقائية',
+        value: preventiveFailureRate,
+        unit: '%',
+        status: kriStatusMax(preventiveFailureRate, 15, 30),
+        target: '< 15%',
+        description: 'نسبة التدخلات الوقائية غير الفعالة من التدخلات التي تم التحقق من أثرها خلال آخر 90 يومًا.',
+      },
+      {
+        key: 'predictedBreaches',
+        label: 'تجاوزات KPI المتوقعة',
+        value: earlyWarning.summary.predictedMetricBreaches,
+        unit: 'مؤشر',
+        status: kriStatusMax(earlyWarning.summary.predictedMetricBreaches, 1, 2),
+        target: '0',
+        description: 'عدد مؤشرات الأداء المتوقع انتقالها إلى المستوى الأحمر إذا استمر الاتجاه الحالي.',
+      },
+      {
+        key: 'capaOverdue',
+        label: 'خطط CAPA المتأخرة',
+        value: capaOverdue,
+        unit: 'خطة',
+        status: kriStatusMax(capaOverdue, 1, 3),
+        target: '0',
+        description: 'عدد خطط التحسين المفتوحة التي تجاوزت تاريخ الاستحقاق.',
+      },
+    ];
+
+    const ownerMap = new Map();
+    const categoryMap = new Map();
+    const statusMap = new Map();
+    const treatmentMap = new Map();
+
+    for (const risk of activeRisks) {
+      const ownerKey = risk.ownerUserId || risk.ownerName || 'unknown';
+      if (!ownerMap.has(ownerKey)) {
+        ownerMap.set(ownerKey, {
+          ownerUserId: risk.ownerUserId || null,
+          ownerName: risk.ownerName || 'غير محدد',
+          active: 0,
+          outsideAppetite: 0,
+          overdueReview: 0,
+          totalResidualScore: 0,
+          totalReduction: 0,
+          reductionSamples: 0,
+        });
+      }
+      const owner = ownerMap.get(ownerKey);
+      owner.active += 1;
+      owner.totalResidualScore += risk.residualScore;
+      if (risk.residualScore > appetiteMaxScore) owner.outsideAppetite += 1;
+      if (risk.reviewDate && new Date(risk.reviewDate).getTime() < now.getTime()) owner.overdueReview += 1;
+      if (risk.inherentScore > 0) {
+        owner.totalReduction += ((risk.inherentScore - risk.residualScore) / risk.inherentScore) * 100;
+        owner.reductionSamples += 1;
+      }
+
+      const category = categoryMap.get(risk.category) || {
+        category: risk.category,
+        active: 0,
+        outsideAppetite: 0,
+        totalResidualScore: 0,
+      };
+      category.active += 1;
+      category.totalResidualScore += risk.residualScore;
+      if (risk.residualScore > appetiteMaxScore) category.outsideAppetite += 1;
+      categoryMap.set(risk.category, category);
+
+      statusMap.set(risk.status, (statusMap.get(risk.status) || 0) + 1);
+      treatmentMap.set(
+        risk.treatmentStrategy,
+        (treatmentMap.get(risk.treatmentStrategy) || 0) + 1
+      );
+    }
+
+    const owners = Array.from(ownerMap.values())
+      .map((owner) => ({
+        ownerUserId: owner.ownerUserId,
+        ownerName: owner.ownerName,
+        active: owner.active,
+        outsideAppetite: owner.outsideAppetite,
+        overdueReview: owner.overdueReview,
+        averageResidualScore: round(owner.totalResidualScore / owner.active),
+        riskReductionPercent: owner.reductionSamples
+          ? round(owner.totalReduction / owner.reductionSamples)
+          : null,
+      }))
+      .sort((a, b) =>
+        (b.outsideAppetite - a.outsideAppetite) ||
+        (b.averageResidualScore - a.averageResidualScore) ||
+        (b.active - a.active)
+      );
+
+    const categories = Array.from(categoryMap.values())
+      .map((item) => ({
+        category: item.category,
+        active: item.active,
+        outsideAppetite: item.outsideAppetite,
+        averageResidualScore: round(item.totalResidualScore / item.active),
+      }))
+      .sort((a, b) => (b.outsideAppetite - a.outsideAppetite) || (b.active - a.active));
+
+    const trend = [];
+    for (let offset = 5; offset >= 0; offset -= 1) {
+      const monthStart = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+      const key = monthKey(monthStart);
+      const monthEvents = riskEvents.filter((event) => monthKey(new Date(event.createdAt)) === key);
+      trend.push({
+        key,
+        year: monthStart.getFullYear(),
+        month: monthStart.getMonth() + 1,
+        created: monthEvents.filter((event) => event.action === 'created').length,
+        closed: monthEvents.filter(
+          (event) => event.action === 'status_changed' && event.toStatus === 'closed'
+        ).length,
+        reassessed: monthEvents.filter((event) => event.action === 'reassessed').length,
+        highCriticalAssessments: monthEvents.filter(
+          (event) => ['high', 'critical'].includes(event.residualLevel)
+        ).length,
+      });
+    }
+
+    const topRisks = activeRisks.slice(0, 10).map((risk) => ({
+      id: risk.id,
+      riskNumber: risk.riskNumber,
+      title: risk.title,
+      category: risk.category,
+      ownerUserId: risk.ownerUserId,
+      ownerName: risk.ownerName,
+      status: risk.status,
+      inherentScore: risk.inherentScore,
+      residualScore: risk.residualScore,
+      residualLevel: risk.residualLevel,
+      recurrenceCount: risk.recurrenceCount,
+      reviewDate: risk.reviewDate,
+      isReviewOverdue: Boolean(
+        risk.reviewDate && new Date(risk.reviewDate).getTime() < now.getTime()
+      ),
+      treatmentStrategy: risk.treatmentStrategy,
+    }));
+
+    res.json({
+      generatedAt: now,
+      appetite: {
+        maxResidualScore: appetiteMaxScore,
+        level: 'medium',
+        status: riskAppetiteStatus,
+        withinCount: Math.max(0, activeRisks.length - outsideAppetite),
+        outsideCount: outsideAppetite,
+        outsideRate: outsideAppetiteRate,
+        statement: 'الحد المقبول للخطر المتبقي هو 9 من 25؛ وما فوق ذلك يتطلب معالجة أو قبولًا إشرافيًا موثقًا.',
+      },
+      summary: {
+        active: activeRisks.length,
+        critical,
+        high,
+        medium,
+        low,
+        outsideAppetite,
+        overdueReview,
+        recurring,
+        accepted,
+        controlled,
+        averageInherentScore: round(averageOf(inherentScores)),
+        averageResidualScore: round(averageOf(residualScores)),
+        averageRiskReductionPercent: avgRiskReductionPercent,
+        treatmentCoveragePercent: percent(treated, activeRisks.length),
+      },
+      kri,
+      topRisks,
+      owners: owners.slice(0, 12),
+      categories,
+      statuses: Array.from(statusMap.entries()).map(([status, count]) => ({ status, count })),
+      treatmentStrategies: Array.from(treatmentMap.entries()).map(([strategy, count]) => ({ strategy, count })),
+      trend,
+      earlyWarning: {
+        summary: earlyWarning.summary,
+        metrics: earlyWarning.metrics
+          .filter((metric) => ['yellow', 'red'].includes(metric.currentStatus) || ['yellow', 'red'].includes(metric.projectedStatus))
+          .slice(0, 5),
+        employees: earlyWarning.employees
+          .filter((employee) => ['high', 'critical'].includes(employee.riskLevel))
+          .slice(0, 5),
+      },
+      preventive: {
+        periodDays: 90,
+        total: preventiveActions.length,
+        verified: preventiveVerified,
+        effective: preventiveEffective,
+        failed: preventiveFailed,
+        overdue: preventiveOverdue,
+        failureRate: preventiveFailureRate,
+      },
+      capa: {
+        open: improvementPlans.length,
+        overdue: capaOverdue,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/directives/risks', async (req, res, next) => {
   try {
     if (!isSupervisor(req)) {
