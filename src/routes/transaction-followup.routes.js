@@ -1057,16 +1057,37 @@ const buildEarlyWarningSnapshot = async (periodDays = 30, suppliedTargets = null
   };
 };
 
+const hasFollowUpPermission = (req, action) =>
+  req.authUser?.role === 'admin' || Boolean(modulePermission(req)?.[action]);
+
 const canActOnRecord = (req, record) =>
-  isSupervisor(req) ||
-  record.createdById === req.authUser?.id ||
-  record.currentAssigneeUserId === req.authUser?.id;
+  hasFollowUpPermission(req, 'canEdit') &&
+  (
+    req.authUser?.role === 'admin' ||
+    isSupervisor(req) ||
+    record.createdById === req.authUser?.id ||
+    record.currentAssigneeUserId === req.authUser?.id
+  );
 
 const canEditRecordMaster = (req, record) =>
-  isSupervisor(req) || record.createdById === req.authUser?.id;
+  hasFollowUpPermission(req, 'canEdit') &&
+  (
+    req.authUser?.role === 'admin' ||
+    isSupervisor(req) ||
+    record.createdById === req.authUser?.id ||
+    record.currentAssigneeUserId === req.authUser?.id
+  );
 
-const denyRecordAccess = (res) =>
-  res.status(403).json({ message: 'لا يمكنك تعديل هذه المعاملة لأنها ليست مسندة لك ولم تقم بإنشائها' });
+const canDeleteRecord = (req) =>
+  hasFollowUpPermission(req, 'canDelete');
+
+const denyRecordAccess = (res, action = 'edit') => {
+  const message =
+    action === 'delete'
+      ? 'لا تملك صلاحية حذف المعاملات في نظام المتابعة'
+      : 'لا تملك صلاحية تعديل هذه المعاملة، أو أنها ليست ضمن نطاق عملك';
+  return res.status(403).json({ message });
+};
 
 const assigneeSelect = {
   id: true,
@@ -8109,11 +8130,18 @@ router.patch('/:id/action', async (req, res, next) => {
 
 router.delete('/:id', async (req, res, next) => {
   try {
+    if (!canDeleteRecord(req)) return denyRecordAccess(res, 'delete');
+
     const current = await prisma.transactionFollowUp.findUnique({
       where: { id: req.params.id },
-      select: { id: true },
+      select: {
+        id: true,
+        transactionNumber: true,
+        subject: true,
+      },
     });
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+
     await prisma.transactionFollowUp.delete({ where: { id: current.id } });
     res.status(204).end();
   } catch (error) {
