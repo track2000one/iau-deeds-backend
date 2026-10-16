@@ -128,6 +128,7 @@ model UserPermission {
   canAdd          Boolean @default(false)
   canEdit         Boolean @default(false)
   canDelete       Boolean @default(false)
+  canReopen       Boolean @default(false)
   canPrint        Boolean @default(false)
   canCreateUser   Boolean @default(false)
   canCreateCycle  Boolean @default(false)

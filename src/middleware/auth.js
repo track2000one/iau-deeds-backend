@@ -100,6 +100,16 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canView';
   }
 
+  // Reopening a completed/closed follow-up transaction is a dedicated high-impact permission.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'PATCH' &&
+    /\/work-queue-action\/?(?:\?|$)/.test(requestPath) &&
+    req.body?.action === 'reopen'
+  ) {
+    action = 'canReopen';
+  }
+
   // Reviewing directive completion is a supervisory action.
   if (
     moduleName === 'transaction_follow_up' &&

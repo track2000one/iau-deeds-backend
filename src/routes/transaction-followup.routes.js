@@ -69,6 +69,7 @@ const workQueueQuickActionSchema = z.object({
     'submit_completion',
     'approve_close',
     'return_to_employee',
+    'reopen',
   ]),
   note: nullableText(3000),
 });
@@ -1081,6 +1082,9 @@ const canEditRecordMaster = (req, record) =>
 const canDeleteRecord = (req) =>
   hasFollowUpPermission(req, 'canDelete');
 
+const canReopenRecord = (req) =>
+  hasFollowUpPermission(req, 'canReopen');
+
 const denyRecordAccess = (res, action = 'edit') => {
   const message =
     action === 'delete'
@@ -1231,10 +1235,12 @@ const classifyWorkQueueItem = (record, todayNumber) => {
   return 'in_progress';
 };
 
-const workQueueActionOptions = (record, supervisor) => {
-  if (record.status === 'closed') return [];
+const workQueueActionOptions = (record, supervisor, canReopen) => {
+  if (record.status === 'closed') return canReopen ? ['reopen'] : [];
   if (record.status === 'completed') {
-    return supervisor ? ['approve_close', 'return_to_employee'] : [];
+    const actions = supervisor ? ['approve_close', 'return_to_employee'] : [];
+    if (canReopen) actions.push('reopen');
+    return actions;
   }
   const actions = [];
   if (['new', 'assigned'].includes(record.status)) actions.push('start');
@@ -5815,7 +5821,9 @@ router.post('/:id/extension-requests', async (req, res, next) => {
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
     if (!canActOnRecord(req, current)) return denyRecordAccess(res);
     if (FINAL_STATUSES.includes(current.status)) {
-      return res.status(409).json({ message: 'لا يمكن طلب تمديد لمعاملة منجزة أو مغلقة' });
+      return res.status(409).json({
+        message: 'المعاملة منجزة أو مغلقة. يجب على مستخدم يملك صلاحية «إعادة فتح المعاملة» فتحها أولًا ثم تقديم طلب التمديد.',
+      });
     }
     if (!current.dueDate) {
       return res.status(409).json({ message: 'لا يوجد تاريخ استحقاق حالي للمعاملة حتى يتم تمديده' });
@@ -6057,6 +6065,7 @@ router.patch('/extension-requests/:id/cancel', async (req, res, next) => {
 router.get('/work-queue', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
+    const reopenAllowed = canReopenRecord(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
     const mine = !supervisor || mineRequested;
     const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
@@ -6152,7 +6161,7 @@ router.get('/work-queue', async (req, res, next) => {
         daysUntilDue,
         overdueDays: daysUntilDue != null && daysUntilDue < 0 ? Math.abs(daysUntilDue) : 0,
         ageDays,
-        quickActions: workQueueActionOptions(row, supervisor),
+        quickActions: workQueueActionOptions(row, supervisor, reopenAllowed),
       };
       buckets[bucket].push(queueItem);
 
@@ -6204,6 +6213,7 @@ router.get('/work-queue', async (req, res, next) => {
       generatedAt: now,
       scope: mine ? 'mine' : 'all',
       supervisor,
+      canReopen: reopenAllowed,
       focusBucket,
       counts,
       buckets,
@@ -6220,14 +6230,28 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
       where: { id: req.params.id },
     });
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
-    if (!canActOnRecord(req, current)) return denyRecordAccess(res);
+
+    const reopening = input.action === 'reopen';
+    if (reopening) {
+      if (!canReopenRecord(req)) {
+        return res.status(403).json({ message: 'لا تملك صلاحية إعادة فتح المعاملات المنجزة أو المغلقة' });
+      }
+      if (!['completed', 'closed'].includes(current.status)) {
+        return res.status(409).json({ message: 'إعادة الفتح متاحة فقط للمعاملات المنجزة أو المغلقة' });
+      }
+      if (!input.note?.trim() || input.note.trim().length < 5) {
+        return res.status(400).json({ message: 'سبب إعادة فتح المعاملة مطلوب ويجب توضيحه' });
+      }
+    } else if (!canActOnRecord(req, current)) {
+      return denyRecordAccess(res);
+    }
 
     const supervisor = isSupervisor(req);
     const supervisorOnly = ['approve_close', 'return_to_employee'];
     if (supervisorOnly.includes(input.action) && !supervisor) {
       return res.status(403).json({ message: 'مراجعة إنجاز المعاملة وإقفالها متاحة للمستخدم الإشرافي فقط' });
     }
-    if (current.status === 'closed') {
+    if (current.status === 'closed' && !reopening) {
       return res.status(409).json({ message: 'المعاملة مغلقة ولا تقبل إجراءً سريعًا جديدًا' });
     }
     if (input.action === 'waiting_external') {
@@ -6246,7 +6270,7 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
         });
       }
     }
-    if (current.status === 'completed' && !supervisorOnly.includes(input.action)) {
+    if (current.status === 'completed' && !supervisorOnly.includes(input.action) && !reopening) {
       return res.status(409).json({ message: 'المعاملة بانتظار المراجعة الإشرافية' });
     }
 
@@ -6286,6 +6310,11 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
         eventType: 'completion_returned',
         text: 'إعادة المعاملة للموظف لاستكمال المطلوب',
       },
+      reopen: {
+        status: current.currentAssigneeUserId ? 'in_progress' : 'new',
+        eventType: 'transaction_reopened',
+        text: 'إعادة فتح المعاملة بعد الإنجاز أو الإغلاق',
+      },
     }[input.action];
 
     if (!actionConfig) return res.status(400).json({ message: 'الإجراء السريع غير مدعوم' });
@@ -6316,10 +6345,15 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
     const completedAt =
       input.action === 'submit_completion'
         ? changedAt
-        : input.action === 'return_to_employee'
+        : ['return_to_employee', 'reopen'].includes(input.action)
           ? null
           : current.completedAt;
-    const closedAt = input.action === 'approve_close' ? changedAt : current.closedAt;
+    const closedAt =
+      input.action === 'approve_close'
+        ? changedAt
+        : input.action === 'reopen'
+          ? null
+          : current.closedAt;
 
     const updated = await prisma.transactionFollowUp.update({
       where: { id: current.id },
@@ -6379,6 +6413,18 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
         message: input.action === 'approve_close'
           ? `${current.transactionNumber} — تم اعتماد الإنجاز وإقفال المعاملة.`
           : `${current.transactionNumber} — أعيدت المعاملة للاستكمال${input.note ? `: ${input.note}` : '.'}`,
+      });
+    }
+
+    if (input.action === 'reopen' && current.currentAssigneeUserId && current.currentAssigneeUserId !== changedBy.id) {
+      await createFollowUpAlert({
+        alertKey: `transaction:${current.id}:reopened:${changedAt.toISOString()}:${current.currentAssigneeUserId}`,
+        transactionId: current.id,
+        userId: current.currentAssigneeUserId,
+        kind: 'transaction_reopened',
+        severity: 'warning',
+        title: 'تمت إعادة فتح معاملة منجزة',
+        message: `${current.transactionNumber} — أعاد ${changedBy.name} فتح المعاملة. السبب: ${input.note.trim()}`,
       });
     }
 
