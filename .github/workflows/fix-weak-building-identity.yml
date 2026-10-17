@@ -1,0 +1,47 @@
+name: Fix Weak Building Identity
+on:
+  push:
+    branches: [agent/accounting-cross-template-identity]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/accounting-cross-template-identity
+      - name: Protect weak building identities
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('src/services/accountingCycles.service.js')
+          s = p.read_text()
+          pattern = re.compile(
+              r"  const buildingEntity = key\.match\(/\^building:entity:\(\[\^:\]\+\):\(\[\^:\]\+\):\(\.\+\)\$/\);\n"
+              r"  if \(buildingEntity && looksLikeStrongEntityAssetIdentity\(buildingEntity\[2\]\)\) \{\n"
+              r"    return `asset:entity:\$\{buildingEntity\[1\]\}:\$\{buildingEntity\[2\]\}`;\n"
+              r"  \}"
+          )
+          replacement = '''  const buildingEntity = key.match(/^building:entity:([^:]+):([^:]+):(.+)$/);
+          if (buildingEntity) {
+            if (looksLikeStrongEntityAssetIdentity(buildingEntity[2])) {
+              return `asset:entity:${buildingEntity[1]}:${buildingEntity[2]}`;
+            }
+            return key;
+          }'''.replace('          ', '')
+          updated, count = pattern.subn(replacement, s, count=1)
+          if count != 1:
+              raise SystemExit(f'expected one canonical building block, found {count}')
+          p.write_text(updated)
+          PY
+          node --check src/services/accountingCycles.service.js
+      - name: Commit
+        run: |
+          git config user.name "openai-codex"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/services/accountingCycles.service.js
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "fix: preserve weak legacy building identities"
+          git push origin HEAD:agent/accounting-cross-template-identity
