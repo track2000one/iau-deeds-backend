@@ -190,6 +190,39 @@ router.post('/transactions/:id', async (req, res, next) => {
   }
 });
 
+router.delete('/transactions/:id', async (req, res, next) => {
+  try {
+    const current = await prisma.transactionFollowUp.findFirst({
+      where: { id: req.params.id, archivedAt: { not: null } },
+      select: {
+        id: true,
+        transactionNumber: true,
+      },
+    });
+
+    if (!current) {
+      return res.status(404).json({ message: 'المعاملة المؤرشفة غير موجودة' });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.attachment.deleteMany({
+        where: {
+          entityType: 'transaction_follow_up',
+          entityId: current.id,
+        },
+      });
+
+      await tx.transactionFollowUp.delete({
+        where: { id: current.id },
+      });
+    });
+
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.patch('/transactions/:id/restore', async (req, res, next) => {
   try {
     const current = await prisma.transactionFollowUp.findUnique({
