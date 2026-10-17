@@ -1397,7 +1397,6 @@ const workQueueActionOptions = (record, supervisor, canReopen) => {
     return actions;
   }
   const actions = [];
-  if (['new', 'assigned'].includes(record.status)) actions.push('start');
   if (record.status === 'waiting_response') actions.push('resume');
   if (['assigned', 'in_progress', 'needs_follow_up'].includes(record.status)) {
     actions.push('waiting_external');
@@ -8217,7 +8216,7 @@ router.post('/', async (req, res, next) => {
             subject: input.subject,
             sourceEntity: input.sourceEntity || null,
             priority: input.priority,
-            status: user ? 'assigned' : 'new',
+            status: user ? 'in_progress' : 'new',
             currentAssigneeUserId: user?.id || null,
             currentAssigneeName: user?.username || null,
             assignedAt: user ? now : null,
@@ -8237,7 +8236,7 @@ router.post('/', async (req, res, next) => {
               create: [
                 {
                   eventType: 'created',
-                  toStatus: user ? 'assigned' : 'new',
+                  toStatus: user ? 'in_progress' : 'new',
                   toAssigneeUserId: user?.id || null,
                   toAssigneeName: user?.username || null,
                   actionText: 'تسجيل المعاملة في نظام المتابعة',
@@ -8404,6 +8403,7 @@ router.patch('/:id/assign', async (req, res, next) => {
     const changedBy = actor(req);
     const now = new Date();
     const eventType = current.currentAssigneeUserId ? 'transferred' : 'assigned';
+    const nextStatus = current.status === 'waiting_response' ? 'waiting_response' : 'in_progress';
 
     const updated = await prisma.transactionFollowUp.update({
       where: { id: current.id },
@@ -8411,7 +8411,7 @@ router.patch('/:id/assign', async (req, res, next) => {
         currentAssigneeUserId: target.id,
         currentAssigneeName: target.username,
         assignedAt: now,
-        status: current.status === 'new' ? 'assigned' : current.status,
+        status: nextStatus,
         lastActionAt: now,
         lastActionByUserId: changedBy.id,
         lastActionByName: changedBy.name,
@@ -8419,12 +8419,14 @@ router.patch('/:id/assign', async (req, res, next) => {
           create: {
             eventType,
             fromStatus: current.status,
-            toStatus: current.status === 'new' ? 'assigned' : current.status,
+            toStatus: nextStatus,
             fromAssigneeUserId: current.currentAssigneeUserId,
             fromAssigneeName: current.currentAssigneeName,
             toAssigneeUserId: target.id,
             toAssigneeName: target.username,
-            actionText: eventType === 'transferred' ? 'تحويل المعاملة إلى موظف آخر' : 'إسناد المعاملة',
+            actionText: eventType === 'transferred'
+              ? 'تحويل المعاملة إلى موظف آخر وبدء معالجتها'
+              : 'إسناد المعاملة وبدء معالجتها',
             note: input.note || null,
             createdById: changedBy.id,
             createdByName: changedBy.name,
@@ -8440,7 +8442,7 @@ router.patch('/:id/assign', async (req, res, next) => {
       kind: eventType,
       severity: 'info',
       title: eventType === 'transferred' ? 'تم تحويل معاملة إليك' : 'تم إسناد معاملة إليك',
-      message: `${updated.transactionNumber} — ${updated.subject}. المطلوب: ${updated.requiredAction || 'مراجعة المعاملة واتخاذ الإجراء المناسب'}.`,
+      message: `${updated.transactionNumber} — ${updated.subject}. بدأت المعالجة تلقائيًا عند التحويل. المطلوب: ${updated.requiredAction || 'مراجعة المعاملة واتخاذ الإجراء المناسب'}.`,
     });
 
     res.json(serialize(updated));
