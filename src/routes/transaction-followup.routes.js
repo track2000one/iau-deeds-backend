@@ -541,6 +541,41 @@ const modulePermission = (req) =>
 const isSupervisor = (req) =>
   req.authUser?.role === 'admin' || Boolean(modulePermission(req)?.canDelete);
 
+const hasModuleViewPermission = (req, moduleName) =>
+  req.authUser?.role === 'admin' ||
+  Boolean(
+    req.authUser?.permissions?.find((item) => item.module === moduleName)?.canView,
+  );
+
+const riskModuleForPath = (path = '') => {
+  if (/^\/directives\/risk-policy(?:\/|$)/.test(path)) {
+    return 'transaction_risk_policy';
+  }
+  if (/^\/directives\/risk-dashboard(?:\/|$)/.test(path)) {
+    return 'transaction_risk_executive';
+  }
+  if (
+    /^\/directives\/risk-acceptances(?:\/|$)/.test(path) ||
+    /^\/directives\/risks\/[^/]+\/acceptance-requests(?:\/|$)/.test(path)
+  ) {
+    return 'transaction_risk_acceptance';
+  }
+  if (/^\/directives\/risks(?:\/|$)/.test(path)) {
+    return 'transaction_risk_register';
+  }
+  return null;
+};
+
+router.use((req, res, next) => {
+  const moduleName = riskModuleForPath(req.path);
+  if (!moduleName) return next();
+  if (hasModuleViewPermission(req, moduleName)) return next();
+
+  return res.status(403).json({
+    message: 'هذه الصفحة متاحة للمسؤول فقط أو للمستخدم الذي منحه المسؤول صلاحية الاطلاع عليها.',
+  });
+});
+
 const RISK_CATEGORY_KEYS = [
   'operational',
   'process',
