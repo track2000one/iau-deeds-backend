@@ -1650,6 +1650,10 @@ model TransactionFollowUp {
   relatedEntityLabel    String?
   completedAt           DateTime?
   closedAt              DateTime?
+  archivedAt            DateTime?
+  archivedById          String?
+  archivedByName        String?
+  archiveNote           String?
   createdById           String?
   createdByName         String?
   createdAt             DateTime @default(now())
@@ -1670,6 +1674,7 @@ model TransactionFollowUp {
   @@index([currentAssigneeUserId])
   @@index([dueDate])
   @@index([lastActionAt])
+  @@index([archivedAt])
   @@index([createdAt])
 }
 
