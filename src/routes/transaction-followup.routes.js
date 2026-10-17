@@ -8183,6 +8183,12 @@ router.get('/:id', async (req, res, next) => {
 
 router.post('/', async (req, res, next) => {
   try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({
+        message: 'إنشاء المعاملات متاح للمستخدم الإشرافي فقط. المستخدم العادي يتعامل مع المعاملات المسندة إليه.',
+      });
+    }
+
     const input = createSchema.parse(req.body);
     const user = await resolveAssignee(input.currentAssigneeUserId);
     const createdBy = actor(req);
