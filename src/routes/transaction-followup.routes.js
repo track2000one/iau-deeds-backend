@@ -6440,8 +6440,9 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
 router.get('/executive-inbox', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
+    const transferScope = canTransferRecord(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
-    const mine = !supervisor || mineRequested;
+    const mine = !(supervisor || transferScope) || mineRequested;
     const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
     const now = new Date();
     const todayKey = saudiDayKey(now);
@@ -6616,8 +6617,9 @@ router.get('/executive-inbox', async (req, res, next) => {
 router.get('/dashboard', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
+    const transferScope = canTransferRecord(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
-    const mine = !supervisor || mineRequested;
+    const mine = !(supervisor || transferScope) || mineRequested;
     const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
     const now = new Date();
 
@@ -7169,8 +7171,9 @@ router.get('/reports/executive', async (req, res, next) => {
 router.get('/analytics', async (req, res, next) => {
   try {
     const supervisor = isSupervisor(req);
+    const transferScope = canTransferRecord(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
-    const mine = !supervisor || mineRequested;
+    const mine = !(supervisor || transferScope) || mineRequested;
     const periodDaysRaw = String(req.query.periodDays || '90');
     const periodDays = periodDaysRaw === 'all'
       ? null
@@ -7409,8 +7412,9 @@ router.get('/', async (req, res, next) => {
     const priority = String(req.query.priority || '').trim();
     const assigneeUserId = String(req.query.assigneeUserId || '').trim();
     const supervisor = isSupervisor(req);
+    const transferScope = canTransferRecord(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
-    const mine = !supervisor || mineRequested;
+    const mine = !(supervisor || transferScope) || mineRequested;
 
     const where = {
       ...(search
@@ -8029,12 +8033,7 @@ router.patch('/:id/assign', async (req, res, next) => {
     if (!supervisor) {
       if (!current.currentAssigneeUserId) {
         return res.status(403).json({
-          message: 'إسناد المعاملة غير المسندة متاح للمستخدم الإشرافي؛ صلاحية التحويل للموظف العادي تخص المعاملات المسندة إليه.',
-        });
-      }
-      if (current.currentAssigneeUserId !== req.authUser?.id) {
-        return res.status(403).json({
-          message: 'يمكنك تحويل المعاملات المسندة إليك فقط.',
+          message: 'إسناد المعاملة غير المسندة متاح للمستخدم الإشرافي فقط؛ صلاحية «تحويل» تطبق على المعاملات المسندة حاليًا.',
         });
       }
       if (!input.note?.trim() || input.note.trim().length < 3) {
