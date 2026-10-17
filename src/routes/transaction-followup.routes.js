@@ -136,6 +136,14 @@ const directiveEvidenceSchema = z.object({
   notes: nullableText(1000),
 });
 
+const transactionAttachmentSchema = z.object({
+  title: z.string().trim().min(1, 'اسم المرفق مطلوب').max(300),
+  driveUrl: z.string().url('رابط الملف غير صحيح'),
+  driveFileId: nullableText(300),
+  mimeType: nullableText(300),
+  notes: nullableText(1000),
+});
+
 const kpiTargetSchema = z.object({
   firstPassRateMin: z.coerce.number().min(0).max(100),
   onTimeRateMin: z.coerce.number().min(0).max(100),
@@ -7889,6 +7897,122 @@ router.patch('/:id/directives/:directiveId/review', async (req, res, next) => {
   }
 });
 
+router.post('/:id/attachments', async (req, res, next) => {
+  try {
+    const input = transactionAttachmentSchema.parse(req.body);
+    const transaction = await prisma.transactionFollowUp.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!transaction) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+
+    const supervisor = isSupervisor(req);
+    const assignedEditor =
+      hasFollowUpPermission(req, 'canEdit') &&
+      transaction.currentAssigneeUserId === req.authUser?.id;
+
+    if (!(supervisor || assignedEditor)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية إضافة مرفقات لهذه المعاملة' });
+    }
+    if (!supervisor && FINAL_STATUSES.includes(transaction.status)) {
+      return res.status(409).json({ message: 'لا يمكن إضافة مرفقات إلى معاملة منجزة أو مغلقة' });
+    }
+
+    const changedBy = actor(req);
+    const attachment = await prisma.attachment.create({
+      data: {
+        entityType: 'transaction_follow_up',
+        entityId: transaction.id,
+        attachmentType: 'other',
+        title: input.title,
+        driveUrl: input.driveUrl,
+        driveFileId: input.driveFileId || null,
+        mimeType: input.mimeType || null,
+        notes: input.notes || null,
+        createdBy: changedBy.name,
+      },
+    });
+
+    await prisma.transactionFollowUpEvent.create({
+      data: {
+        transactionId: transaction.id,
+        eventType: 'attachment_added',
+        fromAssigneeUserId: transaction.currentAssigneeUserId,
+        fromAssigneeName: transaction.currentAssigneeName,
+        toAssigneeUserId: transaction.currentAssigneeUserId,
+        toAssigneeName: transaction.currentAssigneeName,
+        actionText: 'إضافة مرفق للمعاملة',
+        note: attachment.title,
+        createdById: changedBy.id,
+        createdByName: changedBy.name,
+      },
+    });
+
+    res.status(201).json(attachment);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/:id/attachments/:attachmentId', async (req, res, next) => {
+  try {
+    const transaction = await prisma.transactionFollowUp.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!transaction) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+
+    const supervisor = isSupervisor(req);
+    const assignedEditor =
+      hasFollowUpPermission(req, 'canEdit') &&
+      transaction.currentAssigneeUserId === req.authUser?.id;
+
+    if (!(supervisor || assignedEditor)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية حذف مرفقات هذه المعاملة' });
+    }
+    if (!supervisor && FINAL_STATUSES.includes(transaction.status)) {
+      return res.status(409).json({ message: 'لا يمكن حذف مرفقات معاملة منجزة أو مغلقة' });
+    }
+
+    const attachment = await prisma.attachment.findFirst({
+      where: {
+        id: req.params.attachmentId,
+        entityType: 'transaction_follow_up',
+        entityId: transaction.id,
+      },
+    });
+    if (!attachment) return res.status(404).json({ message: 'المرفق غير موجود' });
+
+    if (attachment.driveFileId) {
+      try {
+        await deleteGoogleDriveFile(attachment.driveFileId);
+      } catch (error) {
+        console.warn('Unable to delete transaction attachment from Google Drive:', error?.message || error);
+      }
+    }
+
+    await prisma.attachment.delete({ where: { id: attachment.id } });
+
+    const changedBy = actor(req);
+    await prisma.transactionFollowUpEvent.create({
+      data: {
+        transactionId: transaction.id,
+        eventType: 'attachment_removed',
+        fromAssigneeUserId: transaction.currentAssigneeUserId,
+        fromAssigneeName: transaction.currentAssigneeName,
+        toAssigneeUserId: transaction.currentAssigneeUserId,
+        toAssigneeName: transaction.currentAssigneeName,
+        actionText: 'حذف مرفق من المعاملة',
+        note: attachment.title,
+        createdById: changedBy.id,
+        createdByName: changedBy.name,
+      },
+    });
+
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/:id/directives/:directiveId/evidence', async (req, res, next) => {
   try {
     const input = directiveEvidenceSchema.parse(req.body);
@@ -8018,6 +8142,14 @@ router.get('/:id', async (req, res, next) => {
     if (!row) return res.status(404).json({ message: 'المعاملة غير موجودة' });
     if (!canActOnRecord(req, row)) return denyRecordAccess(res);
 
+    const attachments = await prisma.attachment.findMany({
+      where: {
+        entityType: 'transaction_follow_up',
+        entityId: row.id,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
     const directiveIds = (row.directives || []).map((item) => item.id);
     const evidence = directiveIds.length
       ? await prisma.attachment.findMany({
@@ -8038,6 +8170,7 @@ router.get('/:id', async (req, res, next) => {
 
     res.json({
       ...serialize(row),
+      attachments,
       directives: (row.directives || []).map((directive) => ({
         ...serializeDirective(directive),
         evidence: evidenceByDirective.get(directive.id) || [],
