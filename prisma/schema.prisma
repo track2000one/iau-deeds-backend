@@ -1626,6 +1626,9 @@ model TransactionFollowUp {
   trackingNumber        String   @unique
   transactionNumber     String
   transactionDate       DateTime
+  transactionDateType   String   @default("gregorian")
+  transactionDateInput  String?
+  transactionYear       Int?
   transactionType       String   @default("incoming")
   subject               String
   sourceEntity          String?
@@ -1657,7 +1660,9 @@ model TransactionFollowUp {
   extensionRequests       TransactionFollowUpExtensionRequest[]
   externalWaits           TransactionFollowUpExternalWait[]
 
+  @@unique([transactionNumber, transactionYear], map: "transaction_follow_up_number_year_key")
   @@index([transactionNumber])
+  @@index([transactionYear])
   @@index([transactionDate])
   @@index([status])
   @@index([priority])
