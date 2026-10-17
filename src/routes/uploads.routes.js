@@ -52,6 +52,7 @@ const uploadSchema = z.object({
       'leased_building_in',
       'investment_site',
       'investment_area',
+      'transaction_follow_up',
     ])
     .optional(),
   entityId: z.string().optional(),
