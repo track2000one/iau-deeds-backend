@@ -31,6 +31,7 @@ const nullableText = (max = 5000) => z.string().trim().max(max).optional().nulla
 const createSchema = z.object({
   transactionNumber: z.string().trim().min(1, 'رقم المعاملة مطلوب').max(150),
   transactionDate: z.string().trim().min(1, 'تاريخ المعاملة مطلوب'),
+  transactionDateType: z.enum(['gregorian', 'hijri']).default('gregorian'),
   transactionType: transactionTypeSchema.default('incoming'),
   subject: z.string().trim().min(2, 'موضوع المعاملة مطلوب').max(1000),
   sourceEntity: nullableText(300),
@@ -373,6 +374,152 @@ const toDate = (value, fieldName) => {
     throw error;
   }
   return parsed;
+};
+
+const normalizeArabicDigits = (value = '') =>
+  String(value)
+    .replace(/[٠-٩]/g, (digit) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+    .replace(/[۰-۹]/g, (digit) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)));
+
+const normalizeTransactionNumber = (value) =>
+  normalizeArabicDigits(value).trim();
+
+const invalidTransactionDate = (message = 'تاريخ المعاملة غير صحيح') => {
+  const error = new Error(message);
+  error.status = 400;
+  throw error;
+};
+
+const parseGregorianTransactionDate = (value) => {
+  const normalized = normalizeArabicDigits(value).trim();
+  const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!match) invalidTransactionDate('أدخل التاريخ الميلادي بصيغة صحيحة');
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    invalidTransactionDate('التاريخ الميلادي المدخل غير صحيح');
+  }
+
+  const input = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  return { transactionDate: date, transactionDateType: 'gregorian', transactionDateInput: input, transactionYear: year };
+};
+
+const parseHijriTransactionDate = (value) => {
+  const normalized = normalizeArabicDigits(value).trim().replaceAll('-', '/');
+  const match = normalized.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (!match) invalidTransactionDate('أدخل التاريخ الهجري بصيغة صحيحة مثل 1448/05/10');
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1200 || year > 1700 || month < 1 || month > 12 || day < 1 || day > 30) {
+    invalidTransactionDate('التاريخ الهجري المدخل غير صحيح');
+  }
+
+  let formatter;
+  try {
+    formatter = new Intl.DateTimeFormat('en-US-u-ca-islamic-umalqura-nu-latn', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+    });
+  } catch {
+    invalidTransactionDate('تعذر تهيئة تقويم أم القرى للتحقق من التاريخ الهجري');
+  }
+
+  const estimatedGregorianYear = Math.floor((year * 0.970224) + 621.5774);
+  const start = Date.UTC(estimatedGregorianYear - 1, 0, 1);
+  const end = Date.UTC(estimatedGregorianYear + 1, 11, 31);
+  let transactionDate = null;
+
+  for (let cursor = start; cursor <= end; cursor += 86400000) {
+    const parts = formatter.formatToParts(new Date(cursor));
+    const values = {};
+    parts.forEach((part) => {
+      if (part.type === 'year' || part.type === 'month' || part.type === 'day') {
+        values[part.type] = Number(part.value);
+      }
+    });
+    if (values.year === year && values.month === month && values.day === day) {
+      transactionDate = new Date(cursor);
+      break;
+    }
+  }
+
+  if (!transactionDate) {
+    invalidTransactionDate('التاريخ الهجري المدخل غير موجود في تقويم أم القرى');
+  }
+
+  const input = `${year}/${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}`;
+  return { transactionDate, transactionDateType: 'hijri', transactionDateInput: input, transactionYear: year };
+};
+
+const parseTransactionDate = (value, type = 'gregorian') =>
+  type === 'hijri'
+    ? parseHijriTransactionDate(value)
+    : parseGregorianTransactionDate(value);
+
+const effectiveTransactionYear = (record) => {
+  if (Number.isInteger(record?.transactionYear)) return record.transactionYear;
+  if (record?.transactionDateType === 'hijri' && record?.transactionDateInput) {
+    const match = normalizeArabicDigits(record.transactionDateInput).match(/^(\d{4})[\/-]/);
+    if (match) return Number(match[1]);
+  }
+  const date = record?.transactionDate ? new Date(record.transactionDate) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.getUTCFullYear() : null;
+};
+
+const duplicateTransactionError = (transactionNumber, transactionYear) => {
+  const error = new Error(
+    `يوجد معاملة مسجلة مسبقًا برقم (${transactionNumber}) في عام (${transactionYear}). يمكن تكرار الرقم فقط إذا اختلف العام.`,
+  );
+  error.status = 409;
+  return error;
+};
+
+const assertUniqueTransactionNumberYear = async ({
+  transactionNumber,
+  transactionYear,
+  excludeId = null,
+}) => {
+  const rows = await prisma.transactionFollowUp.findMany({
+    where: {
+      transactionNumber,
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: {
+      id: true,
+      transactionNumber: true,
+      transactionDate: true,
+      transactionDateType: true,
+      transactionDateInput: true,
+      transactionYear: true,
+    },
+  });
+
+  if (rows.some((row) => effectiveTransactionYear(row) === transactionYear)) {
+    throw duplicateTransactionError(transactionNumber, transactionYear);
+  }
+};
+
+const isTransactionNumberYearConstraint = (error) => {
+  if (error?.code !== 'P2002') return false;
+  const target = Array.isArray(error?.meta?.target)
+    ? error.meta.target.join(',')
+    : String(error?.meta?.target || '');
+  return (
+    target.includes('transactionNumber') ||
+    target.includes('transactionYear') ||
+    target.includes('transaction_follow_up_number_year_key')
+  );
 };
 
 const actor = (req) => ({
@@ -7906,7 +8053,12 @@ router.post('/', async (req, res, next) => {
     const input = createSchema.parse(req.body);
     const user = await resolveAssignee(input.currentAssigneeUserId);
     const createdBy = actor(req);
-    const transactionDate = toDate(input.transactionDate, 'تاريخ المعاملة');
+    const transactionNumber = normalizeTransactionNumber(input.transactionNumber);
+    const transactionDateMeta = parseTransactionDate(input.transactionDate, input.transactionDateType);
+    await assertUniqueTransactionNumberYear({
+      transactionNumber,
+      transactionYear: transactionDateMeta.transactionYear,
+    });
     const dueDate = toDate(input.dueDate, 'تاريخ الاستحقاق');
     const now = new Date();
 
@@ -7917,8 +8069,11 @@ router.post('/', async (req, res, next) => {
         row = await prisma.transactionFollowUp.create({
           data: {
             trackingNumber,
-            transactionNumber: input.transactionNumber,
-            transactionDate,
+            transactionNumber,
+            transactionDate: transactionDateMeta.transactionDate,
+            transactionDateType: transactionDateMeta.transactionDateType,
+            transactionDateInput: transactionDateMeta.transactionDateInput,
+            transactionYear: transactionDateMeta.transactionYear,
             transactionType: input.transactionType,
             subject: input.subject,
             sourceEntity: input.sourceEntity || null,
@@ -7957,6 +8112,9 @@ router.post('/', async (req, res, next) => {
         });
         break;
       } catch (error) {
+        if (isTransactionNumberYearConstraint(error)) {
+          throw duplicateTransactionError(transactionNumber, transactionDateMeta.transactionYear);
+        }
         if (error?.code !== 'P2002' || attempt === 2) throw error;
         trackingNumber = await nextTrackingNumber();
       }
@@ -7987,12 +8145,60 @@ router.patch('/:id', async (req, res, next) => {
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
     if (!canEditRecordMaster(req, current)) return denyRecordAccess(res);
 
-    const updated = await prisma.transactionFollowUp.update({
-      where: { id: current.id },
-      data: {
-        ...(input.transactionNumber !== undefined ? { transactionNumber: input.transactionNumber } : {}),
-        ...(input.transactionDate !== undefined ? { transactionDate: toDate(input.transactionDate, 'تاريخ المعاملة') } : {}),
-        ...(input.transactionType !== undefined ? { transactionType: input.transactionType } : {}),
+    if (
+      input.transactionDateType !== undefined &&
+      input.transactionDateType !== (current.transactionDateType || 'gregorian') &&
+      input.transactionDate === undefined
+    ) {
+      const error = new Error('حدد تاريخ المعاملة بعد تغيير نوع التاريخ إلى هجري أو ميلادي');
+      error.status = 400;
+      throw error;
+    }
+
+    const shouldRefreshDateIdentity =
+      input.transactionNumber !== undefined ||
+      input.transactionDate !== undefined ||
+      input.transactionDateType !== undefined ||
+      !Number.isInteger(current.transactionYear);
+
+    const transactionNumber = normalizeTransactionNumber(
+      input.transactionNumber !== undefined ? input.transactionNumber : current.transactionNumber,
+    );
+    const dateType =
+      input.transactionDateType !== undefined
+        ? input.transactionDateType
+        : (current.transactionDateType || 'gregorian');
+    const dateInput =
+      input.transactionDate !== undefined
+        ? input.transactionDate
+        : (current.transactionDateInput || current.transactionDate.toISOString().slice(0, 10));
+    const transactionDateMeta = shouldRefreshDateIdentity
+      ? parseTransactionDate(dateInput, dateType)
+      : null;
+
+    if (transactionDateMeta) {
+      await assertUniqueTransactionNumberYear({
+        transactionNumber,
+        transactionYear: transactionDateMeta.transactionYear,
+        excludeId: current.id,
+      });
+    }
+
+    let updated;
+    try {
+      updated = await prisma.transactionFollowUp.update({
+        where: { id: current.id },
+        data: {
+          ...(input.transactionNumber !== undefined ? { transactionNumber } : {}),
+          ...(transactionDateMeta
+            ? {
+                transactionDate: transactionDateMeta.transactionDate,
+                transactionDateType: transactionDateMeta.transactionDateType,
+                transactionDateInput: transactionDateMeta.transactionDateInput,
+                transactionYear: transactionDateMeta.transactionYear,
+              }
+            : {}),
+          ...(input.transactionType !== undefined ? { transactionType: input.transactionType } : {}),
         ...(input.subject !== undefined ? { subject: input.subject } : {}),
         ...(input.sourceEntity !== undefined ? { sourceEntity: input.sourceEntity || null } : {}),
         ...(input.priority !== undefined ? { priority: input.priority } : {}),
@@ -8002,9 +8208,16 @@ router.patch('/:id', async (req, res, next) => {
         ...(input.notes !== undefined ? { notes: input.notes || null } : {}),
         ...(input.relatedModule !== undefined ? { relatedModule: input.relatedModule || null } : {}),
         ...(input.relatedEntityId !== undefined ? { relatedEntityId: input.relatedEntityId || null } : {}),
-        ...(input.relatedEntityLabel !== undefined ? { relatedEntityLabel: input.relatedEntityLabel || null } : {}),
-      },
-    });
+          ...(input.relatedEntityLabel !== undefined ? { relatedEntityLabel: input.relatedEntityLabel || null } : {}),
+        },
+      });
+    } catch (error) {
+      if (isTransactionNumberYearConstraint(error)) {
+        const year = transactionDateMeta?.transactionYear || effectiveTransactionYear(current);
+        throw duplicateTransactionError(transactionNumber, year);
+      }
+      throw error;
+    }
 
     res.json(serialize(updated));
   } catch (error) {
