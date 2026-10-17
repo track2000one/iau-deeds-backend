@@ -61,6 +61,10 @@ const actionSchema = z.object({
   dueDate: nullableText(100),
 });
 
+const archiveActionSchema = z.object({
+  note: nullableText(3000),
+});
+
 const workQueueQuickActionSchema = z.object({
   action: z.enum([
     'start',
@@ -538,8 +542,20 @@ const actor = (req) => ({
 const modulePermission = (req) =>
   req.authUser?.permissions?.find((item) => item.module === 'transaction_follow_up');
 
+const archiveModulePermission = (req) =>
+  req.authUser?.permissions?.find((item) => item.module === 'archive');
+
 const isSupervisor = (req) =>
   req.authUser?.role === 'admin' || Boolean(modulePermission(req)?.canDelete);
+
+const canViewTransactionArchive = (req) =>
+  req.authUser?.role === 'admin' || Boolean(archiveModulePermission(req)?.canView);
+
+const canArchiveTransaction = (req) =>
+  req.authUser?.role === 'admin' || Boolean(archiveModulePermission(req)?.canAdd);
+
+const canRestoreTransactionArchive = (req) =>
+  req.authUser?.role === 'admin' || Boolean(archiveModulePermission(req)?.canEdit);
 
 const hasModuleViewPermission = (req, moduleName) =>
   req.authUser?.role === 'admin' ||
@@ -6256,7 +6272,10 @@ router.get('/work-queue', async (req, res, next) => {
     const reopenAllowed = canReopenRecord(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
     const mine = !supervisor || mineRequested;
-    const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
+    const baseWhere = {
+      archivedAt: null,
+      ...(mine ? { currentAssigneeUserId: req.authUser.id } : {}),
+    };
 
     const now = new Date();
     const todayKey = saudiDayKey(now);
@@ -6418,6 +6437,11 @@ router.patch('/:id/work-queue-action', async (req, res, next) => {
       where: { id: req.params.id },
     });
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (current.archivedAt) {
+      return res.status(409).json({
+        message: 'المعاملة مؤرشفة. استعدها من الأرشفة أولًا قبل تنفيذ أي إجراء عليها.',
+      });
+    }
 
     const reopening = input.action === 'reopen';
     if (reopening) {
@@ -6627,7 +6651,10 @@ router.get('/executive-inbox', async (req, res, next) => {
     const supervisor = isSupervisor(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
     const mine = !supervisor || mineRequested;
-    const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
+    const baseWhere = {
+      archivedAt: null,
+      ...(mine ? { currentAssigneeUserId: req.authUser.id } : {}),
+    };
     const now = new Date();
     const todayKey = saudiDayKey(now);
     const todayNumber = dayNumberFromKey(todayKey);
@@ -6803,7 +6830,10 @@ router.get('/dashboard', async (req, res, next) => {
     const supervisor = isSupervisor(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
     const mine = !supervisor || mineRequested;
-    const baseWhere = mine ? { currentAssigneeUserId: req.authUser.id } : {};
+    const baseWhere = {
+      archivedAt: null,
+      ...(mine ? { currentAssigneeUserId: req.authUser.id } : {}),
+    };
     const now = new Date();
 
     const [total, open, waiting, overdue, completed, unassigned, openRows] = await Promise.all([
@@ -7585,6 +7615,200 @@ router.get('/analytics', async (req, res, next) => {
   }
 });
 
+router.get('/archived', async (req, res, next) => {
+  try {
+    if (!canViewTransactionArchive(req)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية الاطلاع على المعاملات المؤرشفة' });
+    }
+
+    const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const pageSize = Math.min(100, Math.max(10, Number.parseInt(String(req.query.pageSize || '30'), 10) || 30));
+    const search = String(req.query.search || '').trim();
+
+    const where = {
+      archivedAt: { not: null },
+      ...(search
+        ? {
+            OR: [
+              { trackingNumber: { contains: search, mode: 'insensitive' } },
+              { transactionNumber: { contains: search, mode: 'insensitive' } },
+              { subject: { contains: search, mode: 'insensitive' } },
+              { sourceEntity: { contains: search, mode: 'insensitive' } },
+              { currentAssigneeName: { contains: search, mode: 'insensitive' } },
+              { archivedByName: { contains: search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const [total, rows] = await Promise.all([
+      prisma.transactionFollowUp.count({ where }),
+      prisma.transactionFollowUp.findMany({
+        where,
+        orderBy: [{ archivedAt: 'desc' }, { updatedAt: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ]);
+
+    res.json({
+      items: rows.map(serialize),
+      total,
+      page,
+      pageSize,
+      totalPages: total ? Math.ceil(total / pageSize) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/archived/:id', async (req, res, next) => {
+  try {
+    if (!canViewTransactionArchive(req)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية الاطلاع على المعاملات المؤرشفة' });
+    }
+
+    const row = await prisma.transactionFollowUp.findFirst({
+      where: { id: req.params.id, archivedAt: { not: null } },
+      include: {
+        events: { orderBy: { createdAt: 'desc' } },
+        directives: {
+          include: { reviews: { orderBy: { reviewedAt: 'desc' } } },
+          orderBy: [{ status: 'asc' }, { dueDate: 'asc' }, { createdAt: 'desc' }],
+        },
+        extensionRequests: { orderBy: { createdAt: 'desc' } },
+        externalWaits: { orderBy: { createdAt: 'desc' } },
+      },
+    });
+    if (!row) return res.status(404).json({ message: 'المعاملة المؤرشفة غير موجودة' });
+
+    const attachments = await prisma.attachment.findMany({
+      where: {
+        entityType: 'transaction_follow_up',
+        entityId: row.id,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    res.json({ ...serialize(row), attachments });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/:id/archive', async (req, res, next) => {
+  try {
+    if (!canArchiveTransaction(req)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية ترحيل المعاملات إلى الأرشفة' });
+    }
+
+    const input = archiveActionSchema.parse(req.body || {});
+    const current = await prisma.transactionFollowUp.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (current.archivedAt) {
+      return res.status(409).json({ message: 'المعاملة مؤرشفة مسبقًا' });
+    }
+    if (current.status !== 'closed') {
+      return res.status(409).json({
+        message: 'لا يمكن ترحيل المعاملة إلى الأرشفة إلا بعد اعتماد إنجازها وإقفالها.',
+      });
+    }
+
+    const changedBy = actor(req);
+    const archivedAt = new Date();
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUp.update({
+        where: { id: current.id },
+        data: {
+          archivedAt,
+          archivedById: changedBy.id,
+          archivedByName: changedBy.name,
+          archiveNote: input.note || null,
+        },
+      });
+
+      await tx.transactionFollowUpEvent.create({
+        data: {
+          transactionId: current.id,
+          eventType: 'archived',
+          fromStatus: current.status,
+          toStatus: current.status,
+          fromAssigneeUserId: current.currentAssigneeUserId,
+          fromAssigneeName: current.currentAssigneeName,
+          toAssigneeUserId: current.currentAssigneeUserId,
+          toAssigneeName: current.currentAssigneeName,
+          actionText: 'ترحيل المعاملة إلى الأرشفة',
+          note: input.note || null,
+          createdById: changedBy.id,
+          createdByName: changedBy.name,
+        },
+      });
+
+      return row;
+    });
+
+    res.json(serialize(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/archived/:id/restore', async (req, res, next) => {
+  try {
+    if (!canRestoreTransactionArchive(req)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية استعادة المعاملات من الأرشفة' });
+    }
+
+    const input = archiveActionSchema.parse(req.body || {});
+    const current = await prisma.transactionFollowUp.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
+    if (!current.archivedAt) {
+      return res.status(409).json({ message: 'المعاملة غير موجودة في الأرشفة' });
+    }
+
+    const changedBy = actor(req);
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.transactionFollowUp.update({
+        where: { id: current.id },
+        data: {
+          archivedAt: null,
+          archivedById: null,
+          archivedByName: null,
+          archiveNote: null,
+        },
+      });
+
+      await tx.transactionFollowUpEvent.create({
+        data: {
+          transactionId: current.id,
+          eventType: 'archive_restored',
+          fromStatus: current.status,
+          toStatus: current.status,
+          fromAssigneeUserId: current.currentAssigneeUserId,
+          fromAssigneeName: current.currentAssigneeName,
+          toAssigneeUserId: current.currentAssigneeUserId,
+          toAssigneeName: current.currentAssigneeName,
+          actionText: 'استعادة المعاملة من الأرشفة',
+          note: input.note || null,
+          createdById: changedBy.id,
+          createdByName: changedBy.name,
+        },
+      });
+
+      return row;
+    });
+
+    res.json(serialize(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/', async (req, res, next) => {
   try {
     const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
@@ -7598,6 +7822,7 @@ router.get('/', async (req, res, next) => {
     const mine = !supervisor || mineRequested;
 
     const where = {
+      archivedAt: null,
       ...(search
         ? {
             OR: [
