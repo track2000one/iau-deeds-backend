@@ -49,6 +49,7 @@ const permissionSchema = z.object({
   canEdit: z.boolean().default(false),
   canDelete: z.boolean().default(false),
   canReopen: z.boolean().default(false),
+  canTransfer: z.boolean().default(false),
   canPrint: z.boolean().default(false),
   canCreateUser: z.boolean().default(false),
   canCreateCycle: z.boolean().default(false),
@@ -86,6 +87,7 @@ const normalizePermissionRows = (permissions = {}) =>
       Boolean(value.canEdit) ||
       Boolean(value.canDelete) ||
       Boolean(value.canReopen) ||
+      Boolean(value.canTransfer) ||
       Boolean(value.canPrint) ||
       Boolean(value.canCreateUser) ||
       Boolean(value.canCreateCycle) ||
@@ -94,6 +96,7 @@ const normalizePermissionRows = (permissions = {}) =>
     canEdit: Boolean(value.canEdit),
     canDelete: Boolean(value.canDelete),
     canReopen: Boolean(value.canReopen),
+    canTransfer: Boolean(value.canTransfer),
     canPrint: Boolean(value.canPrint),
     canCreateUser: Boolean(value.canCreateUser),
     canCreateCycle: Boolean(value.canCreateCycle),

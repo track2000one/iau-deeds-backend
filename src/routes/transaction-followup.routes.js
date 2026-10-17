@@ -1085,6 +1085,9 @@ const canDeleteRecord = (req) =>
 const canReopenRecord = (req) =>
   hasFollowUpPermission(req, 'canReopen');
 
+const canTransferRecord = (req) =>
+  isSupervisor(req) || hasFollowUpPermission(req, 'canTransfer');
+
 const denyRecordAccess = (res, action = 'edit') => {
   const message =
     action === 'delete'
@@ -8018,12 +8021,38 @@ router.patch('/:id/assign', async (req, res, next) => {
     const input = assignSchema.parse(req.body);
     const current = await prisma.transactionFollowUp.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
-    if (!canActOnRecord(req, current)) return denyRecordAccess(res);
+    if (!canTransferRecord(req)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية تحويل المعاملات في نظام المتابعة' });
+    }
+
+    const supervisor = isSupervisor(req);
+    if (!supervisor) {
+      if (!current.currentAssigneeUserId) {
+        return res.status(403).json({
+          message: 'إسناد المعاملة غير المسندة متاح للمستخدم الإشرافي؛ صلاحية التحويل للموظف العادي تخص المعاملات المسندة إليه.',
+        });
+      }
+      if (current.currentAssigneeUserId !== req.authUser?.id) {
+        return res.status(403).json({
+          message: 'يمكنك تحويل المعاملات المسندة إليك فقط.',
+        });
+      }
+      if (!input.note?.trim() || input.note.trim().length < 3) {
+        return res.status(400).json({
+          message: 'سبب تحويل المعاملة مطلوب للمستخدم العادي.',
+        });
+      }
+    }
+
     if (FINAL_STATUSES.includes(current.status)) {
       return res.status(409).json({ message: 'المعاملة منجزة أو مغلقة. أعد فتحها قبل إعادة الإسناد.' });
     }
 
     const target = await resolveAssignee(input.assigneeUserId);
+    if (target.id === current.currentAssigneeUserId) {
+      return res.status(409).json({ message: 'المعاملة مسندة بالفعل إلى الموظف المحدد' });
+    }
+
     const changedBy = actor(req);
     const now = new Date();
     const eventType = current.currentAssigneeUserId ? 'transferred' : 'assigned';

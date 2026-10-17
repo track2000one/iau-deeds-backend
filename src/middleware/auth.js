@@ -110,6 +110,15 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canReopen';
   }
 
+  // Transferring a follow-up transaction is a dedicated permission.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'PATCH' &&
+    /\/assign\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canTransfer';
+  }
+
   // Reviewing directive completion is a supervisory action.
   if (
     moduleName === 'transaction_follow_up' &&
@@ -192,7 +201,12 @@ export const requirePermission = (moduleName) => (req, res, next) => {
 
   const permission = findPermission(req.authUser, moduleName);
 
-  if (!action || !permission?.[action]) {
+  const allowedBySupervisorCompatibility =
+    moduleName === 'transaction_follow_up' &&
+    action === 'canTransfer' &&
+    permission?.canDelete;
+
+  if (!action || (!permission?.[action] && !allowedBySupervisorCompatibility)) {
     return res.status(403).json({
       message: 'لا تملك صلاحية تنفيذ هذه العملية',
     });
