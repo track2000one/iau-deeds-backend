@@ -54,6 +54,8 @@ const permissionMap = (permissions = []) =>
       canAdd: item.canAdd,
       canEdit: item.canEdit,
       canDelete: item.canDelete,
+      canReopen: item.canReopen,
+      canTransfer: item.canTransfer,
       canPrint: item.canPrint,
       canCreateUser: item.canCreateUser,
       canCreateCycle: item.canCreateCycle,
