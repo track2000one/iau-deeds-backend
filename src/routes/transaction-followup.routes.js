@@ -2398,6 +2398,7 @@ router.get('/directives/approval-center', async (req, res, next) => {
 
     const search = String(req.query.search || '').trim();
     const priority = String(req.query.priority || '').trim();
+    const organizationalUnit = String(req.query.organizationalUnit || '').trim();
     const assigneeUserId = String(req.query.assigneeUserId || '').trim();
 
     const where = {
@@ -8127,6 +8128,9 @@ router.get('/', async (req, res, next) => {
         : {}),
       ...(ALL_STATUSES.includes(status) ? { status } : {}),
       ...(['low', 'normal', 'high', 'urgent'].includes(priority) ? { priority } : {}),
+      ...(['endowments_properties', 'mosques_prayer_rooms'].includes(organizationalUnit)
+        ? { organizationalUnit }
+        : {}),
       ...(mine
         ? { currentAssigneeUserId: req.authUser.id }
         : supervisor && assigneeUserId
