@@ -11,6 +11,7 @@ import {
   getOrCreateTransactionBackupSchedule,
   runTransactionFollowUpBackup,
   updateTransactionBackupSchedule,
+  verifyTransactionBackupRun,
 } from '../services/transactionBackup.service.js';
 
 const router = Router();
@@ -7247,6 +7248,18 @@ router.post('/reports/backup-schedule/run', async (req, res, next) => {
             ? 'تم إنشاء النسخة الاحتياطية بنجاح'
             : 'تعذر إنشاء النسخة الاحتياطية',
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/backup-runs/:id/verify', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'فحص سلامة النسخ الاحتياطية متاح للمستخدم الإشرافي فقط' });
+    }
+    const run = await verifyTransactionBackupRun(req.params.id);
+    res.json(run);
   } catch (error) {
     next(error);
   }
