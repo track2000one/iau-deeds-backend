@@ -354,6 +354,233 @@ export const verifyTransactionBackupRun = async (runId) => {
   }
 };
 
+export const testTransactionBackupRestore = async (runId) => {
+  const run = await prisma.transactionFollowUpBackupRun.findUnique({
+    where: { id: runId },
+  });
+  if (!run) {
+    const error = new Error('سجل النسخة الاحتياطية غير موجود');
+    error.status = 404;
+    throw error;
+  }
+  if (!run.folderId || !run.manifestFileId || !run.workbookFileId) {
+    const restoreTestMessage = 'لا يمكن اختبار الاستعادة لأن ملفات النسخة الأساسية غير مكتملة.';
+    return prisma.transactionFollowUpBackupRun.update({
+      where: { id: run.id },
+      data: {
+        restoreTestStatus: 'failed',
+        restoreTestMessage,
+        restoreTestTransactions: 0,
+        restoreTestRelations: 0,
+        restoreTestAttachments: 0,
+        restoreTestAt: new Date(),
+      },
+    });
+  }
+
+  try {
+    const [manifestDownload, workbookDownload, files] = await Promise.all([
+      downloadGoogleDriveFile(run.manifestFileId),
+      downloadGoogleDriveFile(run.workbookFileId),
+      listGoogleDriveFolderFilesRecursive(run.folderId),
+    ]);
+
+    const manifest = JSON.parse(manifestDownload.buffer.toString('utf8'));
+    const transactions = Array.isArray(manifest?.data?.transactions)
+      ? manifest.data.transactions
+      : [];
+    const attachments = Array.isArray(manifest?.data?.attachments)
+      ? manifest.data.attachments
+      : [];
+
+    const fatalIssues = [];
+    const warnings = [];
+
+    if (manifest?.backupType !== 'transaction-follow-up-full') {
+      fatalIssues.push('نوع النسخة الاحتياطية غير معروف أو غير مطابق لنظام المتابعة.');
+    }
+    if (!Array.isArray(manifest?.data?.transactions)) {
+      fatalIssues.push('قائمة المعاملات غير موجودة أو غير صالحة.');
+    }
+    if (!Array.isArray(manifest?.data?.attachments)) {
+      fatalIssues.push('قائمة المرفقات غير موجودة أو غير صالحة.');
+    }
+
+    let workbook;
+    try {
+      workbook = XLSX.read(workbookDownload.buffer, { type: 'buffer' });
+    } catch (error) {
+      fatalIssues.push(`تعذر فتح ملف Excel: ${error?.message || error}`);
+    }
+
+    const requiredSheets = [
+      'المعاملات',
+      'سجل الإجراءات',
+      'التوجيهات والقرارات',
+      'مراجعات التوجيهات',
+      'طلبات التمديد',
+      'انتظار الجهات',
+      'المرفقات',
+    ];
+    if (workbook) {
+      for (const sheetName of requiredSheets) {
+        if (!workbook.SheetNames.includes(sheetName)) {
+          fatalIssues.push(`ورقة Excel المطلوبة «${sheetName}» غير موجودة.`);
+        }
+      }
+      const transactionSheet = workbook.Sheets['المعاملات'];
+      if (transactionSheet) {
+        const rows = XLSX.utils.sheet_to_json(transactionSheet, { header: 1, raw: false });
+        const dataRowCount = Math.max(0, rows.length - 1);
+        if (dataRowCount !== transactions.length) {
+          fatalIssues.push(
+            `عدد معاملات Excel لا يطابق ملف البيانات الخام (${dataRowCount} / ${transactions.length}).`,
+          );
+        }
+      }
+    }
+
+    const transactionIds = new Set();
+    const transactionKeys = new Set();
+    const directiveIds = new Set();
+    let relationCount = 0;
+
+    for (const transaction of transactions) {
+      if (!transaction?.id || !transaction?.transactionNumber || !transaction?.subject || !transaction?.transactionDate) {
+        fatalIssues.push(
+          `توجد معاملة ناقصة الحقول الأساسية: ${transaction?.transactionNumber || transaction?.id || 'غير معروفة'}.`,
+        );
+        continue;
+      }
+      if (transactionIds.has(transaction.id)) {
+        fatalIssues.push(`معرف معاملة مكرر داخل النسخة: ${transaction.id}.`);
+      }
+      transactionIds.add(transaction.id);
+
+      const year = transaction.transactionYear ?? '';
+      const uniqueKey = `${String(transaction.transactionNumber).trim()}::${year}`;
+      if (transactionKeys.has(uniqueKey)) {
+        fatalIssues.push(
+          `تكرار رقم المعاملة والسنة داخل النسخة: ${transaction.transactionNumber} / ${year || 'بدون سنة'}.`,
+        );
+      }
+      transactionKeys.add(uniqueKey);
+
+      for (const event of transaction.events || []) {
+        relationCount += 1;
+        if (event?.transactionId && event.transactionId !== transaction.id) {
+          fatalIssues.push(`حدث مرتبط بمعاملة مختلفة داخل النسخة: ${event.id || 'بدون معرف'}.`);
+        }
+      }
+
+      for (const directive of transaction.directives || []) {
+        relationCount += 1;
+        if (!directive?.id) {
+          fatalIssues.push(`توجيه بلا معرف في المعاملة ${transaction.transactionNumber}.`);
+          continue;
+        }
+        if (directiveIds.has(directive.id)) {
+          fatalIssues.push(`معرف توجيه مكرر داخل النسخة: ${directive.id}.`);
+        }
+        directiveIds.add(directive.id);
+        if (directive.transactionId && directive.transactionId !== transaction.id) {
+          fatalIssues.push(`التوجيه ${directive.id} مرتبط بمعاملة مختلفة.`);
+        }
+        for (const review of directive.reviews || []) {
+          relationCount += 1;
+          if (review?.directiveId && review.directiveId !== directive.id) {
+            fatalIssues.push(`مراجعة مرتبطة بتوجيه مختلف: ${review.id || 'بدون معرف'}.`);
+          }
+        }
+      }
+
+      for (const request of transaction.extensionRequests || []) {
+        relationCount += 1;
+        if (request?.transactionId && request.transactionId !== transaction.id) {
+          fatalIssues.push(`طلب تمديد مرتبط بمعاملة مختلفة: ${request.id || 'بدون معرف'}.`);
+        }
+      }
+
+      for (const wait of transaction.externalWaits || []) {
+        relationCount += 1;
+        if (wait?.transactionId && wait.transactionId !== transaction.id) {
+          fatalIssues.push(`سجل انتظار جهة مرتبط بمعاملة مختلفة: ${wait.id || 'بدون معرف'}.`);
+        }
+      }
+    }
+
+    let restorableAttachmentCount = 0;
+    for (const attachment of attachments) {
+      if (attachment?.entityType === 'transaction_follow_up') {
+        if (!transactionIds.has(attachment.entityId)) {
+          fatalIssues.push(`مرفق مرتبط بمعاملة غير موجودة: ${attachment.title || attachment.id}.`);
+        } else {
+          restorableAttachmentCount += 1;
+        }
+      } else if (attachment?.entityType === 'transaction_follow_up_directive') {
+        if (!directiveIds.has(attachment.entityId)) {
+          fatalIssues.push(`دليل مرفق مرتبط بتوجيه غير موجود: ${attachment.title || attachment.id}.`);
+        } else {
+          restorableAttachmentCount += 1;
+        }
+      } else {
+        warnings.push(`نوع مرفق غير متوقع: ${attachment?.entityType || 'غير محدد'}.`);
+      }
+    }
+
+    if (Number(manifest?.totals?.transactions ?? -1) !== transactions.length) {
+      fatalIssues.push('إجمالي المعاملات في manifest لا يطابق البيانات الفعلية.');
+    }
+    if (Number(manifest?.totals?.attachments ?? -1) !== attachments.length) {
+      fatalIssues.push('إجمالي المرفقات في manifest لا يطابق البيانات الفعلية.');
+    }
+
+    const physicalBackupFiles = Math.max(0, files.length - 2);
+    if (manifest?.includeAttachments && physicalBackupFiles < Number(manifest?.totals?.copiedAttachments || 0)) {
+      fatalIssues.push(
+        `عدد الملفات المنسوخة فعليًا أقل من العدد المسجل (${physicalBackupFiles} / ${manifest?.totals?.copiedAttachments || 0}).`,
+      );
+    }
+    if (run.failedAttachmentCount > 0 || Number(manifest?.totals?.failedAttachments || 0) > 0) {
+      warnings.push(
+        `يوجد ${Math.max(run.failedAttachmentCount, Number(manifest?.totals?.failedAttachments || 0))} مرفق سبق أن تعذر نسخه.`,
+      );
+    }
+
+    const restoreTestStatus = fatalIssues.length
+      ? 'failed'
+      : warnings.length
+        ? 'warning'
+        : 'success';
+    const restoreTestMessage = fatalIssues.length
+      ? `فشل اختبار الاستعادة التجريبي: ${fatalIssues.slice(0, 12).join(' ')}`
+      : warnings.length
+        ? `اختبار الاستعادة التجريبي ناجح من ناحية البنية والعلاقات، مع ملاحظات: ${warnings.slice(0, 8).join(' ')}`
+        : 'نجح اختبار الاستعادة التجريبي: أمكن إعادة بناء المعاملات والعلاقات والمرفقات في الذاكرة دون أي كتابة على قاعدة البيانات الحية.';
+
+    return prisma.transactionFollowUpBackupRun.update({
+      where: { id: run.id },
+      data: {
+        restoreTestStatus,
+        restoreTestMessage: restoreTestMessage.slice(0, 5000),
+        restoreTestTransactions: transactions.length,
+        restoreTestRelations: relationCount,
+        restoreTestAttachments: restorableAttachmentCount,
+        restoreTestAt: new Date(),
+      },
+    });
+  } catch (error) {
+    return prisma.transactionFollowUpBackupRun.update({
+      where: { id: run.id },
+      data: {
+        restoreTestStatus: 'failed',
+        restoreTestMessage: String(error?.message || error).slice(0, 5000),
+        restoreTestAt: new Date(),
+      },
+    });
+  }
+};
+
 const pruneBackupRuns = async (schedule) => {
   const retentionCount = Math.min(100, Math.max(1, Number(schedule.retentionCount || 12)));
   const olderRuns = await prisma.transactionFollowUpBackupRun.findMany({
@@ -536,8 +763,9 @@ export const runTransactionFollowUpBackup = async ({
     });
 
     const verified = await verifyTransactionBackupRun(completed.id);
+    const restoreTested = await testTransactionBackupRestore(verified.id);
     await pruneBackupRuns(effectiveSchedule);
-    return { skipped: false, run: verified, copyFailures };
+    return { skipped: false, run: restoreTested, copyFailures };
   } catch (error) {
     const failed = await prisma.transactionFollowUpBackupRun.update({
       where: { id: run.id },
