@@ -7,6 +7,11 @@ import {
   calculateNextTransactionReportRun,
   syncScheduledTransactionReports,
 } from '../services/transactionReports.service.js';
+import {
+  getOrCreateTransactionBackupSchedule,
+  runTransactionFollowUpBackup,
+  updateTransactionBackupSchedule,
+} from '../services/transactionBackup.service.js';
 
 const router = Router();
 
@@ -375,6 +380,16 @@ const reportScheduleSchema = z.object({
   runHour: z.coerce.number().int().min(0).max(23).default(8),
   assigneeUserId: nullableText(100),
   isActive: z.boolean().optional().default(true),
+});
+
+const backupScheduleSchema = z.object({
+  frequency: z.enum(['weekly', 'monthly']),
+  dayOfWeek: z.coerce.number().int().min(0).max(6).optional().nullable(),
+  dayOfMonth: z.coerce.number().int().min(1).max(28).optional().nullable(),
+  runHour: z.coerce.number().int().min(0).max(23).default(2),
+  includeAttachments: z.boolean().default(true),
+  retentionCount: z.coerce.number().int().min(1).max(100).default(12),
+  isActive: z.boolean().default(false),
 });
 
 const toDate = (value, fieldName) => {
@@ -7160,6 +7175,78 @@ router.delete('/reports/schedules/:id', async (req, res, next) => {
     }
     await prisma.transactionFollowUpReportSchedule.delete({ where: { id: schedule.id } });
     res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/reports/backup-schedule', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'إعداد النسخ الاحتياطي الآلي متاح للمستخدم الإشرافي فقط' });
+    }
+    const [schedule, runs] = await Promise.all([
+      getOrCreateTransactionBackupSchedule(),
+      prisma.transactionFollowUpBackupRun.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      }),
+    ]);
+    res.json({ schedule, runs });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/reports/backup-schedule', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'إعداد النسخ الاحتياطي الآلي متاح للمستخدم الإشرافي فقط' });
+    }
+    const input = backupScheduleSchema.parse(req.body);
+    const changedBy = actor(req);
+    const schedule = await updateTransactionBackupSchedule({
+      frequency: input.frequency,
+      dayOfWeek: input.frequency === 'weekly' ? (input.dayOfWeek ?? 0) : null,
+      dayOfMonth: input.frequency === 'monthly' ? (input.dayOfMonth ?? 1) : null,
+      runHour: input.runHour,
+      includeAttachments: input.includeAttachments,
+      retentionCount: input.retentionCount,
+      isActive: input.isActive,
+      updatedById: changedBy.id,
+      updatedByName: changedBy.name,
+    });
+    res.json(schedule);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/backup-schedule/run', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'تشغيل النسخة الاحتياطية متاح للمستخدم الإشرافي فقط' });
+    }
+    const changedBy = actor(req);
+    const schedule = await getOrCreateTransactionBackupSchedule();
+    const result = await runTransactionFollowUpBackup({
+      schedule,
+      triggeredById: changedBy.id,
+      triggeredByName: changedBy.name,
+    });
+    if (result.skipped) {
+      return res.status(409).json({ message: 'توجد نسخة احتياطية قيد التنفيذ بالفعل', run: result.run });
+    }
+    res.status(result.run?.status === 'failed' ? 500 : 201).json({
+      run: result.run,
+      failedAttachments: result.copyFailures || [],
+      message:
+        result.run?.status === 'partial'
+          ? 'تم إنشاء النسخة الاحتياطية مع وجود بعض المرفقات التي تعذر نسخها'
+          : result.run?.status === 'success'
+            ? 'تم إنشاء النسخة الاحتياطية بنجاح'
+            : 'تعذر إنشاء النسخة الاحتياطية',
+    });
   } catch (error) {
     next(error);
   }
