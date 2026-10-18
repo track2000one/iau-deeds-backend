@@ -118,6 +118,23 @@ export const requirePermission = (moduleName) => (req, res, next) => {
   ) {
     action = 'canTransfer';
   }
+  // Transaction attachments are independent from creating/editing the transaction itself.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'POST' &&
+    /\/[^/]+\/attachments\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canUploadAttachments';
+  }
+
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'DELETE' &&
+    /\/[^/]+\/attachments\/[^/]+\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canDeleteAttachments';
+  }
+
 
   // Reviewing directive completion is a supervisory action.
   if (
@@ -203,8 +220,11 @@ export const requirePermission = (moduleName) => (req, res, next) => {
 
   const allowedBySupervisorCompatibility =
     moduleName === 'transaction_follow_up' &&
-    action === 'canTransfer' &&
-    permission?.canDelete;
+    (
+      (action === 'canTransfer' && permission?.canDelete) ||
+      (action === 'canUploadAttachments' && permission?.canDelete) ||
+      (action === 'canDeleteAttachments' && permission?.canDelete)
+    );
 
   if (!action || (!permission?.[action] && !allowedBySupervisorCompatibility)) {
     return res.status(403).json({
@@ -281,9 +301,20 @@ export const requireUploadPermission = (req, res, next) => {
 
   const permission = findPermission(req.authUser, requestedModule);
 
-  if (!permission?.canAdd && !permission?.canEdit) {
+  const canUpload =
+    requestedModule === 'transaction_follow_up'
+      ? Boolean(
+          permission?.canUploadAttachments ||
+          permission?.canDelete
+        )
+      : Boolean(permission?.canAdd || permission?.canEdit);
+
+  if (!canUpload) {
     return res.status(403).json({
-      message: 'لا تملك صلاحية رفع الملفات لهذا القسم',
+      message:
+        requestedModule === 'transaction_follow_up'
+          ? 'لا تملك صلاحية رفع مرفقات المعاملات'
+          : 'لا تملك صلاحية رفع الملفات لهذا القسم',
     });
   }
 
