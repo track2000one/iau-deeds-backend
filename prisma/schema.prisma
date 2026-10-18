@@ -1630,7 +1630,7 @@ model TransactionFollowUp {
   transactionDateType   String   @default("gregorian")
   transactionDateInput  String?
   transactionYear       Int?
-  transactionType       String   @default("incoming")
+  transactionType       String   @default("incoming_external")
   subject               String
   sourceEntity          String?
   priority              String   @default("normal")
