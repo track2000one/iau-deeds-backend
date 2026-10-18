@@ -8472,8 +8472,12 @@ router.post('/:id/attachments', async (req, res, next) => {
     const assignedUploader =
       hasFollowUpPermission(req, 'canUploadAttachments') &&
       transaction.currentAssigneeUserId === req.authUser?.id;
+    const creatorUploader =
+      hasFollowUpPermission(req, 'canUploadAttachments') &&
+      hasFollowUpPermission(req, 'canAdd') &&
+      transaction.createdById === req.authUser?.id;
 
-    if (!(supervisor || assignedUploader)) {
+    if (!(supervisor || assignedUploader || creatorUploader)) {
       return res.status(403).json({
         message: 'لا تملك صلاحية رفع مرفقات لهذه المعاملة، أو أن المعاملة غير مسندة إليك',
       });
