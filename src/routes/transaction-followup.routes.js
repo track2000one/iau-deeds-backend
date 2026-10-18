@@ -8108,6 +8108,7 @@ router.get('/', async (req, res, next) => {
     const search = String(req.query.search || '').trim();
     const status = String(req.query.status || '').trim();
     const priority = String(req.query.priority || '').trim();
+    const organizationalUnit = String(req.query.organizationalUnit || '').trim();
     const assigneeUserId = String(req.query.assigneeUserId || '').trim();
     const supervisor = isSupervisor(req);
     const mineRequested = String(req.query.mine || '').toLowerCase() === 'true';
