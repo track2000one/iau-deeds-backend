@@ -2254,6 +2254,12 @@ model TransactionFollowUpBackupRun {
   integrityMessage        String?
   verifiedFileCount       Int?
   verifiedAt              DateTime?
+  restoreTestStatus       String?
+  restoreTestMessage      String?
+  restoreTestTransactions Int?
+  restoreTestRelations    Int?
+  restoreTestAttachments  Int?
+  restoreTestAt           DateTime?
   startedAt               DateTime @default(now())
   completedAt             DateTime?
   createdAt               DateTime @default(now())
