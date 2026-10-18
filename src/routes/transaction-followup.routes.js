@@ -21,7 +21,17 @@ const OPEN_STATUSES = ['new', 'assigned', 'in_progress', 'waiting_response', 'ne
 const FINAL_STATUSES = ['completed', 'closed'];
 const ALL_STATUSES = [...OPEN_STATUSES, ...FINAL_STATUSES];
 
-const transactionTypeSchema = z.enum(['incoming', 'outgoing', 'internal']);
+const transactionTypeSchema = z.enum([
+  'incoming_internal',
+  'incoming_external',
+  'outgoing_internal',
+  'outgoing_external',
+  'other',
+  // Legacy values accepted for records created before the expanded classification.
+  'incoming',
+  'outgoing',
+  'internal',
+]);
 const prioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
 const statusSchema = z.enum([
   'new',
@@ -39,7 +49,7 @@ const createSchema = z.object({
   transactionNumber: z.string().trim().min(1, 'رقم المعاملة مطلوب').max(150),
   transactionDate: z.string().trim().min(1, 'تاريخ المعاملة مطلوب'),
   transactionDateType: z.enum(['gregorian', 'hijri']).default('gregorian'),
-  transactionType: transactionTypeSchema.default('incoming'),
+  transactionType: transactionTypeSchema.default('incoming_external'),
   subject: z.string().trim().min(2, 'موضوع المعاملة مطلوب').max(1000),
   sourceEntity: nullableText(300),
   priority: prioritySchema.default('normal'),
