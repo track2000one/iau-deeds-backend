@@ -1379,7 +1379,7 @@ const computeIndicator = (record) => {
   if (!record.currentAssigneeUserId) {
     return {
       indicator: 'unassigned',
-      indicatorLabel: 'تحتاج إسناد',
+      indicatorLabel: 'تحتاج تعيين موظف',
       indicatorSeverity: 'danger',
       daysUntilDue,
       daysWithoutAction,
@@ -8901,26 +8901,35 @@ router.patch('/:id/assign', async (req, res, next) => {
     const input = assignSchema.parse(req.body);
     const current = await prisma.transactionFollowUp.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'المعاملة غير موجودة' });
-    if (!canTransferRecord(req)) {
-      return res.status(403).json({ message: 'لا تملك صلاحية تحويل المعاملات في نظام المتابعة' });
-    }
 
     const supervisor = isSupervisor(req);
-    if (!supervisor) {
-      if (!current.currentAssigneeUserId) {
+    const initialAssignment = !current.currentAssigneeUserId;
+    const creatorCanAssign =
+      initialAssignment &&
+      hasFollowUpPermission(req, 'canAdd') &&
+      current.createdById === req.authUser?.id;
+
+    if (initialAssignment) {
+      if (!(supervisor || creatorCanAssign)) {
         return res.status(403).json({
-          message: 'إسناد المعاملة غير المسندة متاح للمستخدم الإشرافي؛ صلاحية التحويل للموظف العادي تخص المعاملات المسندة إليه.',
+          message: 'إسناد المعاملة غير المسندة متاح للمستخدم الإشرافي أو لمن أنشأ المعاملة ولديه صلاحية «إضافة».',
         });
       }
-      if (current.currentAssigneeUserId !== req.authUser?.id) {
-        return res.status(403).json({
-          message: 'يمكنك تحويل المعاملات المسندة إليك فقط.',
-        });
+    } else {
+      if (!canTransferRecord(req)) {
+        return res.status(403).json({ message: 'لا تملك صلاحية تحويل المعاملات في نظام المتابعة' });
       }
-      if (!input.note?.trim() || input.note.trim().length < 3) {
-        return res.status(400).json({
-          message: 'سبب تحويل المعاملة مطلوب للمستخدم العادي.',
-        });
+      if (!supervisor) {
+        if (current.currentAssigneeUserId !== req.authUser?.id) {
+          return res.status(403).json({
+            message: 'يمكنك تحويل المعاملات المسندة إليك فقط.',
+          });
+        }
+        if (!input.note?.trim() || input.note.trim().length < 3) {
+          return res.status(400).json({
+            message: 'سبب تحويل المعاملة مطلوب للمستخدم العادي.',
+          });
+        }
       }
     }
 
