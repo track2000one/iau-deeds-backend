@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
-import { deleteGoogleDriveFile } from '../services/googleDrive.js';
+import { deleteGoogleDriveFile, downloadGoogleDriveFile } from '../services/googleDrive.js';
 import {
   archiveTransactionExecutiveReport,
   calculateNextTransactionReportRun,
@@ -7160,6 +7160,166 @@ router.delete('/reports/schedules/:id', async (req, res, next) => {
     }
     await prisma.transactionFollowUpReportSchedule.delete({ where: { id: schedule.id } });
     res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/reports/backup-data', async (req, res, next) => {
+  try {
+    if (!hasFollowUpPermission(req, 'canPrint')) {
+      return res.status(403).json({ message: 'لا تملك صلاحية تصدير تقارير أو نسخ احتياطية' });
+    }
+
+    const full = String(req.query.full || '').toLowerCase() === 'true';
+    const now = new Date();
+    const defaultFrom = new Date(now.getFullYear(), now.getMonth(), 1);
+    const defaultTo = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const from = full
+      ? null
+      : (req.query.from ? toDate(String(req.query.from), 'بداية فترة التقرير') : defaultFrom);
+    const toRaw = full
+      ? null
+      : (req.query.to ? toDate(String(req.query.to), 'نهاية فترة التقرير') : defaultTo);
+    const to = toRaw ? new Date(toRaw) : null;
+    if (to) to.setHours(23, 59, 59, 999);
+
+    if (from && to && from.getTime() > to.getTime()) {
+      return res.status(400).json({ message: 'بداية فترة التقرير يجب أن تسبق نهايتها' });
+    }
+
+    const requestedAssignee = String(req.query.assigneeUserId || '').trim();
+    const mine = String(req.query.mine || '').toLowerCase() === 'true';
+    const supervisor = isSupervisor(req);
+    const scopeAssigneeId = supervisor
+      ? (mine ? req.authUser.id : requestedAssignee || null)
+      : req.authUser.id;
+
+    const assigneeScope = scopeAssigneeId ? { currentAssigneeUserId: scopeAssigneeId } : {};
+    const periodScope = full
+      ? {}
+      : {
+          OR: [
+            { transactionDate: { gte: from, lte: to } },
+            { completedAt: { gte: from, lte: to } },
+            { closedAt: { gte: from, lte: to } },
+            { archivedAt: { gte: from, lte: to } },
+          ],
+        };
+
+    const transactions = await prisma.transactionFollowUp.findMany({
+      where: {
+        ...assigneeScope,
+        ...periodScope,
+      },
+      include: {
+        events: { orderBy: { createdAt: 'asc' } },
+        directives: {
+          include: {
+            reviews: { orderBy: { reviewedAt: 'asc' } },
+          },
+          orderBy: { issuedAt: 'asc' },
+        },
+        extensionRequests: { orderBy: { createdAt: 'asc' } },
+        externalWaits: { orderBy: { createdAt: 'asc' } },
+      },
+      orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    const transactionIds = transactions.map((item) => item.id);
+    const directiveIds = transactions.flatMap((item) => item.directives.map((directive) => directive.id));
+
+    const attachments = transactionIds.length || directiveIds.length
+      ? await prisma.attachment.findMany({
+          where: {
+            OR: [
+              ...(transactionIds.length
+                ? [{ entityType: 'transaction_follow_up', entityId: { in: transactionIds } }]
+                : []),
+              ...(directiveIds.length
+                ? [{ entityType: 'transaction_follow_up_directive', entityId: { in: directiveIds } }]
+                : []),
+            ],
+          },
+          orderBy: { createdAt: 'asc' },
+        })
+      : [];
+
+    res.json({
+      generatedAt: now,
+      full,
+      period: full ? null : { from, to },
+      scope: {
+        mine: !supervisor || mine,
+        assigneeUserId: scopeAssigneeId,
+      },
+      transactions,
+      attachments,
+      totals: {
+        transactions: transactions.length,
+        events: transactions.reduce((sum, item) => sum + item.events.length, 0),
+        directives: transactions.reduce((sum, item) => sum + item.directives.length, 0),
+        attachments: attachments.length,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/reports/backup-attachments/:attachmentId', async (req, res, next) => {
+  try {
+    if (!hasFollowUpPermission(req, 'canPrint')) {
+      return res.status(403).json({ message: 'لا تملك صلاحية تنزيل مرفقات النسخة الاحتياطية' });
+    }
+
+    const attachment = await prisma.attachment.findUnique({
+      where: { id: req.params.attachmentId },
+    });
+    if (!attachment || !['transaction_follow_up', 'transaction_follow_up_directive'].includes(attachment.entityType)) {
+      return res.status(404).json({ message: 'المرفق غير موجود' });
+    }
+
+    let transaction = null;
+    if (attachment.entityType === 'transaction_follow_up') {
+      transaction = await prisma.transactionFollowUp.findUnique({
+        where: { id: attachment.entityId },
+        select: { id: true, currentAssigneeUserId: true },
+      });
+    } else {
+      const directive = await prisma.transactionFollowUpDirective.findUnique({
+        where: { id: attachment.entityId },
+        include: {
+          transaction: {
+            select: { id: true, currentAssigneeUserId: true },
+          },
+        },
+      });
+      transaction = directive?.transaction || null;
+    }
+
+    if (!transaction) {
+      return res.status(404).json({ message: 'تعذر تحديد المعاملة المرتبطة بالمرفق' });
+    }
+    if (!isSupervisor(req) && transaction.currentAssigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'المرفق خارج نطاق معاملاتك' });
+    }
+    if (!attachment.driveFileId) {
+      return res.status(409).json({ message: 'لا تتوفر نسخة قابلة للتنزيل لهذا المرفق' });
+    }
+
+    const downloaded = await downloadGoogleDriveFile(attachment.driveFileId);
+    const downloadName = String(attachment.title || downloaded.fileName || 'attachment')
+      .replace(/[\r\n"]/g, '_');
+
+    res.setHeader('Content-Type', downloaded.mimeType || attachment.mimeType || 'application/octet-stream');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`,
+    );
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(downloaded.buffer);
   } catch (error) {
     next(error);
   }
