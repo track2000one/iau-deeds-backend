@@ -42,7 +42,7 @@ function buildSafeFileName(originalName = 'attachment') {
 }
 
 export async function uploadBufferToGoogleDrive(file, options = {}) {
-  const folderId = requireEnv('GOOGLE_DRIVE_FOLDER_ID');
+  const folderId = options.folderId || requireEnv('GOOGLE_DRIVE_FOLDER_ID');
 
   if (!file?.buffer) {
     throw new Error('No file buffer received for upload.');
@@ -72,16 +72,18 @@ export async function uploadBufferToGoogleDrive(file, options = {}) {
     throw new Error('Google Drive did not return a file ID.');
   }
 
-  try {
-    await drive.permissions.create({
-      fileId: driveFileId,
-      requestBody: {
-        role: 'reader',
-        type: 'anyone',
-      },
-    });
-  } catch (error) {
-    console.warn('Could not make uploaded file public:', error?.message || error);
+  if (options.makePublic !== false) {
+    try {
+      await drive.permissions.create({
+        fileId: driveFileId,
+        requestBody: {
+          role: 'reader',
+          type: 'anyone',
+        },
+      });
+    } catch (error) {
+      console.warn('Could not make uploaded file public:', error?.message || error);
+    }
   }
 
   return {
@@ -90,6 +92,72 @@ export async function uploadBufferToGoogleDrive(file, options = {}) {
     driveFileId,
     mimeType: response.data.mimeType || mimeType,
   };
+}
+
+export async function ensureGoogleDriveFolder(name, parentId = null) {
+  const rootFolderId = parentId || requireEnv('GOOGLE_DRIVE_FOLDER_ID');
+  const drive = getOAuthDriveClient();
+  const escapedName = String(name).replace(/'/g, "\\'");
+  const existing = await drive.files.list({
+    q: `'${rootFolderId}' in parents and name = '${escapedName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: 'files(id,name,webViewLink)',
+    pageSize: 10,
+  });
+
+  const found = existing.data.files?.[0];
+  if (found?.id) {
+    return {
+      id: found.id,
+      name: found.name || name,
+      webViewLink: found.webViewLink || `https://drive.google.com/drive/folders/${found.id}`,
+    };
+  }
+
+  const created = await drive.files.create({
+    requestBody: {
+      name,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [rootFolderId],
+    },
+    fields: 'id,name,webViewLink',
+  });
+
+  if (!created.data.id) throw new Error('Google Drive did not return a folder ID.');
+  return {
+    id: created.data.id,
+    name: created.data.name || name,
+    webViewLink: created.data.webViewLink || `https://drive.google.com/drive/folders/${created.data.id}`,
+  };
+}
+
+export async function copyGoogleDriveFile(fileId, targetFolderId, fileName = null) {
+  if (!fileId) throw new Error('Google Drive source file ID is required.');
+  if (!targetFolderId) throw new Error('Google Drive target folder ID is required.');
+  const drive = getOAuthDriveClient();
+
+  const response = await drive.files.copy({
+    fileId,
+    requestBody: {
+      ...(fileName ? { name: fileName } : {}),
+      parents: [targetFolderId],
+    },
+    fields: 'id,name,mimeType,webViewLink,webContentLink',
+  });
+
+  if (!response.data.id) throw new Error('Google Drive did not return a copied file ID.');
+  return {
+    id: response.data.id,
+    name: response.data.name || fileName || 'attachment',
+    mimeType: response.data.mimeType || 'application/octet-stream',
+    webViewLink: response.data.webViewLink || `https://drive.google.com/file/d/${response.data.id}/view`,
+  };
+}
+
+export async function deleteGoogleDriveFolder(folderId) {
+  if (!folderId) return false;
+  const drive = getOAuthDriveClient();
+  await drive.files.delete({ fileId: folderId });
+  return true;
 }
 
 export async function deleteGoogleDriveFile(fileId) {
