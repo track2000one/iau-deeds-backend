@@ -47,6 +47,11 @@ const transactionTypeLabel = (value) => ({
   internal: 'داخلي',
 }[value] || value || '');
 
+const organizationalUnitLabel = (value) => ({
+  endowments_properties: 'إدارة أوقاف وأملاك الجامعة',
+  mosques_prayer_rooms: 'وحدة العناية بالمساجد والمصليات الجامعية',
+}[value] || (value ? String(value) : 'غير محددة للمعاملات السابقة'));
+
 const buildWorksheet = (rows) => XLSX.utils.json_to_sheet(rows, { skipHeader: false });
 
 const buildWorkbookBuffer = ({ transactions, attachments }) => {
@@ -62,6 +67,7 @@ const buildWorkbookBuffer = ({ transactions, attachments }) => {
       'تاريخ المعاملة الأصلي': record.transactionDateInput || '',
       'تاريخ المعاملة ISO': dateValue(record.transactionDate),
       'نوع المعاملة': transactionTypeLabel(record.transactionType),
+      'الإدارة / الوحدة': organizationalUnitLabel(record.organizationalUnit),
       'الموضوع': record.subject,
       'الجهة': record.sourceEntity || '',
       'الأولوية': record.priority,
