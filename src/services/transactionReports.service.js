@@ -70,6 +70,7 @@ const indicatorForReport = (row, referenceDate = new Date()) => {
 export const buildTransactionExecutiveReport = async ({
   from,
   to,
+  organizationalUnit = null,
   assigneeUserId = null,
   scopeMine = false,
   generatedAt = new Date(),
@@ -77,9 +78,11 @@ export const buildTransactionExecutiveReport = async ({
   const fromDate = startOfSaudiDayUtc(from);
   const toDate = endOfSaudiDayUtc(to);
   const assigneeScope = assigneeUserId ? { currentAssigneeUserId: assigneeUserId } : {};
+  const organizationalUnitScope = organizationalUnit ? { organizationalUnit } : {};
 
   const activityWhere = {
     ...assigneeScope,
+    ...organizationalUnitScope,
     OR: [
       { transactionDate: { gte: fromDate, lte: toDate } },
       { completedAt: { gte: fromDate, lte: toDate } },
@@ -96,6 +99,7 @@ export const buildTransactionExecutiveReport = async ({
         transactionNumber: true,
         transactionDate: true,
         transactionType: true,
+        organizationalUnit: true,
         subject: true,
         sourceEntity: true,
         priority: true,
@@ -120,6 +124,7 @@ export const buildTransactionExecutiveReport = async ({
     prisma.transactionFollowUp.findMany({
       where: {
         ...assigneeScope,
+        ...organizationalUnitScope,
         status: { in: OPEN_STATUSES },
         dueDate: { lte: toDate },
       },
@@ -206,6 +211,7 @@ export const buildTransactionExecutiveReport = async ({
       transactionNumber: row.transactionNumber,
       transactionDate: row.transactionDate,
       transactionType: row.transactionType,
+      organizationalUnit: row.organizationalUnit,
       subject: row.subject,
       sourceEntity: row.sourceEntity,
       priority: row.priority,
@@ -242,6 +248,7 @@ export const buildTransactionExecutiveReport = async ({
     scope: {
       mine: scopeMine,
       assigneeUserId,
+      organizationalUnit,
     },
     summary: {
       totalIncluded: rows.length,
@@ -323,6 +330,7 @@ export const archiveTransactionExecutiveReport = async ({
   reportType,
   from,
   to,
+  organizationalUnit = null,
   assigneeUserId = null,
   assigneeName = null,
   scopeMine = false,
@@ -334,6 +342,7 @@ export const archiveTransactionExecutiveReport = async ({
   const report = await buildTransactionExecutiveReport({
     from,
     to,
+    organizationalUnit,
     assigneeUserId,
     scopeMine,
   });
@@ -343,6 +352,7 @@ export const archiveTransactionExecutiveReport = async ({
       reportType,
       periodFrom: new Date(report.period.from),
       periodTo: new Date(report.period.to),
+      organizationalUnit,
       assigneeUserId,
       assigneeName,
       scopeMine,
@@ -385,6 +395,7 @@ export const syncScheduledTransactionReports = async (now = new Date()) => {
         reportType: schedule.frequency,
         from: period.from,
         to: period.to,
+        organizationalUnit: schedule.organizationalUnit,
         assigneeUserId: schedule.assigneeUserId,
         assigneeName: schedule.assigneeName,
         scopeMine: Boolean(schedule.assigneeUserId),
