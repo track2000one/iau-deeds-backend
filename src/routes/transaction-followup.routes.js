@@ -32,6 +32,11 @@ const transactionTypeSchema = z.enum([
   'outgoing',
   'internal',
 ]);
+
+const organizationalUnitSchema = z.enum([
+  'endowments_properties',
+  'mosques_prayer_rooms',
+]);
 const prioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
 const statusSchema = z.enum([
   'new',
@@ -50,6 +55,7 @@ const createSchema = z.object({
   transactionDate: z.string().trim().min(1, 'تاريخ المعاملة مطلوب'),
   transactionDateType: z.enum(['gregorian', 'hijri']).default('gregorian'),
   transactionType: transactionTypeSchema.default('incoming_external'),
+  organizationalUnit: organizationalUnitSchema,
   subject: z.string().trim().min(2, 'موضوع المعاملة مطلوب').max(1000),
   sourceEntity: nullableText(300),
   priority: prioritySchema.default('normal'),
@@ -8756,6 +8762,7 @@ router.post('/', async (req, res, next) => {
             transactionDateInput: transactionDateMeta.transactionDateInput,
             transactionYear: transactionDateMeta.transactionYear,
             transactionType: input.transactionType,
+            organizationalUnit: input.organizationalUnit,
             subject: input.subject,
             sourceEntity: input.sourceEntity || null,
             priority: input.priority,
@@ -8880,6 +8887,7 @@ router.patch('/:id', async (req, res, next) => {
               }
             : {}),
           ...(input.transactionType !== undefined ? { transactionType: input.transactionType } : {}),
+          ...(input.organizationalUnit !== undefined ? { organizationalUnit: input.organizationalUnit } : {}),
         ...(input.subject !== undefined ? { subject: input.subject } : {}),
         ...(input.sourceEntity !== undefined ? { sourceEntity: input.sourceEntity || null } : {}),
         ...(input.priority !== undefined ? { priority: input.priority } : {}),
