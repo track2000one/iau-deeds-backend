@@ -8442,9 +8442,9 @@ router.get('/:id', async (req, res, next) => {
 
 router.post('/', async (req, res, next) => {
   try {
-    if (!isSupervisor(req)) {
+    if (!hasFollowUpPermission(req, 'canAdd')) {
       return res.status(403).json({
-        message: 'إنشاء المعاملات متاح للمستخدم الإشرافي فقط. المستخدم العادي يتعامل مع المعاملات المسندة إليه.',
+        message: 'لا تملك صلاحية إضافة معاملة جديدة في نظام المتابعة.',
       });
     }
 
