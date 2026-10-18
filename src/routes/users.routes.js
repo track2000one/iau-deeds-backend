@@ -50,6 +50,8 @@ const permissionSchema = z.object({
   canDelete: z.boolean().default(false),
   canReopen: z.boolean().default(false),
   canTransfer: z.boolean().default(false),
+  canUploadAttachments: z.boolean().default(false),
+  canDeleteAttachments: z.boolean().default(false),
   canPrint: z.boolean().default(false),
   canCreateUser: z.boolean().default(false),
   canCreateCycle: z.boolean().default(false),
@@ -88,6 +90,8 @@ const normalizePermissionRows = (permissions = {}) =>
       Boolean(value.canDelete) ||
       Boolean(value.canReopen) ||
       Boolean(value.canTransfer) ||
+      Boolean(value.canUploadAttachments) ||
+      Boolean(value.canDeleteAttachments) ||
       Boolean(value.canPrint) ||
       Boolean(value.canCreateUser) ||
       Boolean(value.canCreateCycle) ||
@@ -97,6 +101,8 @@ const normalizePermissionRows = (permissions = {}) =>
     canDelete: Boolean(value.canDelete),
     canReopen: Boolean(value.canReopen),
     canTransfer: Boolean(value.canTransfer),
+    canUploadAttachments: Boolean(value.canUploadAttachments),
+    canDeleteAttachments: Boolean(value.canDeleteAttachments),
     canPrint: Boolean(value.canPrint),
     canCreateUser: Boolean(value.canCreateUser),
     canCreateCycle: Boolean(value.canCreateCycle),
