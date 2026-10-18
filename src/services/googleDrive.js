@@ -153,6 +153,52 @@ export async function copyGoogleDriveFile(fileId, targetFolderId, fileName = nul
   };
 }
 
+export async function listGoogleDriveFolderFiles(folderId) {
+  if (!folderId) throw new Error('Google Drive folder ID is required.');
+  const drive = getOAuthDriveClient();
+  const files = [];
+  let pageToken;
+
+  do {
+    const response = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'nextPageToken,files(id,name,mimeType,size,webViewLink,parents)',
+      pageSize: 1000,
+      pageToken,
+    });
+    files.push(...(response.data.files || []));
+    pageToken = response.data.nextPageToken || undefined;
+  } while (pageToken);
+
+  return files.map((file) => ({
+    id: file.id,
+    name: file.name || '',
+    mimeType: file.mimeType || '',
+    size: file.size ? Number(file.size) : null,
+    webViewLink: file.webViewLink || null,
+    parents: file.parents || [],
+  }));
+}
+
+export async function listGoogleDriveFolderFilesRecursive(folderId) {
+  const files = [];
+  const stack = [folderId];
+
+  while (stack.length) {
+    const currentFolderId = stack.pop();
+    const children = await listGoogleDriveFolderFiles(currentFolderId);
+    for (const child of children) {
+      if (child.mimeType === 'application/vnd.google-apps.folder') {
+        stack.push(child.id);
+      } else {
+        files.push(child);
+      }
+    }
+  }
+
+  return files;
+}
+
 export async function deleteGoogleDriveFolder(folderId) {
   if (!folderId) return false;
   const drive = getOAuthDriveClient();
