@@ -3,7 +3,9 @@ import { prisma } from '../prisma.js';
 import {
   copyGoogleDriveFile,
   deleteGoogleDriveFolder,
+  downloadGoogleDriveFile,
   ensureGoogleDriveFolder,
+  listGoogleDriveFolderFilesRecursive,
   uploadBufferToGoogleDrive,
 } from './googleDrive.js';
 import { calculateNextTransactionReportRun } from './transactionReports.service.js';
@@ -255,6 +257,103 @@ export const loadFullTransactionBackupData = async () => {
   return { transactions, attachments };
 };
 
+export const verifyTransactionBackupRun = async (runId) => {
+  const run = await prisma.transactionFollowUpBackupRun.findUnique({
+    where: { id: runId },
+  });
+  if (!run) {
+    const error = new Error('سجل النسخة الاحتياطية غير موجود');
+    error.status = 404;
+    throw error;
+  }
+  if (!run.folderId || !run.workbookFileId || !run.manifestFileId) {
+    const integrityMessage = 'النسخة لا تحتوي على مراجع ملفات التحقق الأساسية.';
+    return prisma.transactionFollowUpBackupRun.update({
+      where: { id: run.id },
+      data: {
+        integrityStatus: 'failed',
+        integrityMessage,
+        verifiedFileCount: 0,
+        verifiedAt: new Date(),
+      },
+    });
+  }
+
+  try {
+    const [files, manifestDownload, workbookDownload] = await Promise.all([
+      listGoogleDriveFolderFilesRecursive(run.folderId),
+      downloadGoogleDriveFile(run.manifestFileId),
+      downloadGoogleDriveFile(run.workbookFileId),
+    ]);
+
+    const manifest = JSON.parse(manifestDownload.buffer.toString('utf8'));
+    const expectedTransactions = Number(manifest?.totals?.transactions ?? -1);
+    const expectedAttachments = Number(manifest?.totals?.attachments ?? -1);
+    const expectedCopiedAttachments = Number(manifest?.totals?.copiedAttachments ?? -1);
+
+    const issues = [];
+    if (!files.some((item) => item.id === run.workbookFileId)) {
+      issues.push('ملف Excel غير موجود داخل مجلد النسخة.');
+    }
+    if (!files.some((item) => item.id === run.manifestFileId)) {
+      issues.push('ملف manifest.json غير موجود داخل مجلد النسخة.');
+    }
+    if (!workbookDownload.buffer?.length) {
+      issues.push('ملف Excel فارغ أو غير قابل للقراءة.');
+    }
+    if (!Array.isArray(manifest?.data?.transactions)) {
+      issues.push('بيانات المعاملات داخل manifest غير صالحة.');
+    }
+    if (!Array.isArray(manifest?.data?.attachments)) {
+      issues.push('بيانات المرفقات داخل manifest غير صالحة.');
+    }
+    if (expectedTransactions !== run.transactionCount) {
+      issues.push(`عدد المعاملات لا يطابق السجل (${expectedTransactions} / ${run.transactionCount}).`);
+    }
+    if (expectedAttachments !== run.attachmentCount) {
+      issues.push(`عدد المرفقات لا يطابق السجل (${expectedAttachments} / ${run.attachmentCount}).`);
+    }
+    if (expectedCopiedAttachments !== run.copiedAttachmentCount) {
+      issues.push(`عدد المرفقات المنسوخة لا يطابق السجل (${expectedCopiedAttachments} / ${run.copiedAttachmentCount}).`);
+    }
+
+    const expectedMinimumFileCount = 2 + Math.max(0, run.copiedAttachmentCount);
+    if (files.length < expectedMinimumFileCount) {
+      issues.push(
+        `عدد الملفات الفعلية داخل مجلد النسخة أقل من المتوقع (${files.length} / ${expectedMinimumFileCount}).`,
+      );
+    }
+
+    const integrityStatus = issues.length
+      ? (run.status === 'partial' ? 'warning' : 'failed')
+      : (run.status === 'partial' ? 'warning' : 'success');
+    const integrityMessage = issues.length
+      ? issues.join(' ')
+      : run.status === 'partial'
+        ? 'ملفات النسخة الأساسية سليمة، لكن توجد مرفقات سبق أن تعذر نسخها.'
+        : 'تم التحقق من Excel والبيانات الخام وعدد الملفات، والنسخة سليمة وقابلة للقراءة.';
+
+    return prisma.transactionFollowUpBackupRun.update({
+      where: { id: run.id },
+      data: {
+        integrityStatus,
+        integrityMessage,
+        verifiedFileCount: files.length,
+        verifiedAt: new Date(),
+      },
+    });
+  } catch (error) {
+    return prisma.transactionFollowUpBackupRun.update({
+      where: { id: run.id },
+      data: {
+        integrityStatus: 'failed',
+        integrityMessage: String(error?.message || error).slice(0, 5000),
+        verifiedAt: new Date(),
+      },
+    });
+  }
+};
+
 const pruneBackupRuns = async (schedule) => {
   const retentionCount = Math.min(100, Math.max(1, Number(schedule.retentionCount || 12)));
   const olderRuns = await prisma.transactionFollowUpBackupRun.findMany({
@@ -436,8 +535,9 @@ export const runTransactionFollowUpBackup = async ({
       },
     });
 
+    const verified = await verifyTransactionBackupRun(completed.id);
     await pruneBackupRuns(effectiveSchedule);
-    return { skipped: false, run: completed, copyFailures };
+    return { skipped: false, run: verified, copyFailures };
   } catch (error) {
     const failed = await prisma.transactionFollowUpBackupRun.update({
       where: { id: run.id },
