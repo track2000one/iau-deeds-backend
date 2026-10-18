@@ -305,6 +305,7 @@ export const requireUploadPermission = (req, res, next) => {
     requestedModule === 'transaction_follow_up'
       ? Boolean(
           permission?.canUploadAttachments ||
+          permission?.canEdit ||
           permission?.canDelete
         )
       : Boolean(permission?.canAdd || permission?.canEdit);
