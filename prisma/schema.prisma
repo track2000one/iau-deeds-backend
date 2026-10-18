@@ -2167,6 +2167,7 @@ model TransactionFollowUpReportSchedule {
   dayOfWeek        Int?
   dayOfMonth       Int?
   runHour          Int      @default(8)
+  organizationalUnit String?
   assigneeUserId   String?
   assigneeName     String?
   isActive         Boolean  @default(true)
@@ -2180,6 +2181,7 @@ model TransactionFollowUpReportSchedule {
   archives         TransactionFollowUpReportArchive[]
 
   @@index([frequency])
+  @@index([organizationalUnit])
   @@index([isActive])
   @@index([nextRunAt])
   @@index([createdAt])
@@ -2190,6 +2192,7 @@ model TransactionFollowUpReportArchive {
   reportType       String
   periodFrom       DateTime
   periodTo         DateTime
+  organizationalUnit String?
   assigneeUserId   String?
   assigneeName     String?
   scopeMine        Boolean  @default(false)
@@ -2206,6 +2209,7 @@ model TransactionFollowUpReportArchive {
   @@index([reportType])
   @@index([periodFrom])
   @@index([periodTo])
+  @@index([organizationalUnit])
   @@index([assigneeUserId])
   @@index([source])
   @@index([scheduleId])
