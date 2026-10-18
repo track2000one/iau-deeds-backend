@@ -2209,3 +2209,56 @@ model TransactionFollowUpReportArchive {
   @@index([scheduleId])
   @@index([createdAt])
 }
+
+model TransactionFollowUpBackupSchedule {
+  id                 String   @id @default(cuid())
+  scope              String   @unique @default("global")
+  frequency          String   @default("weekly")
+  dayOfWeek          Int?     @default(0)
+  dayOfMonth         Int?     @default(1)
+  runHour            Int      @default(2)
+  includeAttachments Boolean  @default(true)
+  retentionCount     Int      @default(12)
+  isActive           Boolean  @default(false)
+  lastRunAt          DateTime?
+  nextRunAt          DateTime?
+  updatedById        String?
+  updatedByName      String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  runs               TransactionFollowUpBackupRun[]
+
+  @@index([isActive])
+  @@index([nextRunAt])
+  @@index([updatedAt])
+}
+
+model TransactionFollowUpBackupRun {
+  id                      String   @id @default(cuid())
+  scheduleId              String?
+  status                  String   @default("running")
+  folderId                String?
+  folderUrl               String?
+  folderName              String?
+  workbookFileId          String?
+  workbookUrl             String?
+  manifestFileId          String?
+  manifestUrl             String?
+  transactionCount        Int      @default(0)
+  attachmentCount         Int      @default(0)
+  copiedAttachmentCount   Int      @default(0)
+  failedAttachmentCount   Int      @default(0)
+  errorMessage            String?
+  startedAt               DateTime @default(now())
+  completedAt             DateTime?
+  createdAt               DateTime @default(now())
+
+  schedule                TransactionFollowUpBackupSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
+  @@index([scheduleId])
+  @@index([status])
+  @@index([startedAt])
+  @@index([completedAt])
+  @@index([createdAt])
+}
