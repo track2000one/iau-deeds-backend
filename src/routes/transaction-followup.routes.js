@@ -10,6 +10,7 @@ import {
 import {
   getOrCreateTransactionBackupSchedule,
   runTransactionFollowUpBackup,
+  testTransactionBackupRestore,
   updateTransactionBackupSchedule,
   verifyTransactionBackupRun,
 } from '../services/transactionBackup.service.js';
@@ -7259,6 +7260,18 @@ router.post('/reports/backup-runs/:id/verify', async (req, res, next) => {
       return res.status(403).json({ message: 'فحص سلامة النسخ الاحتياطية متاح للمستخدم الإشرافي فقط' });
     }
     const run = await verifyTransactionBackupRun(req.params.id);
+    res.json(run);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/backup-runs/:id/restore-test', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'اختبار استعادة النسخ الاحتياطية متاح للمستخدم الإشرافي فقط' });
+    }
+    const run = await testTransactionBackupRestore(req.params.id);
     res.json(run);
   } catch (error) {
     next(error);
