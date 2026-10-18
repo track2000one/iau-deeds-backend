@@ -1300,6 +1300,14 @@ const buildEarlyWarningSnapshot = async (periodDays = 30, suppliedTargets = null
 const hasFollowUpPermission = (req, action) =>
   req.authUser?.role === 'admin' || Boolean(modulePermission(req)?.[action]);
 
+const canViewRecord = (req, record) =>
+  hasFollowUpPermission(req, 'canView') &&
+  (
+    isSupervisor(req) ||
+    record.currentAssigneeUserId === req.authUser?.id ||
+    record.createdById === req.authUser?.id
+  );
+
 const canActOnRecord = (req, record) =>
   hasFollowUpPermission(req, 'canEdit') &&
   (
@@ -8461,12 +8469,14 @@ router.post('/:id/attachments', async (req, res, next) => {
     if (!transaction) return res.status(404).json({ message: 'المعاملة غير موجودة' });
 
     const supervisor = isSupervisor(req);
-    const assignedEditor =
-      hasFollowUpPermission(req, 'canEdit') &&
+    const assignedUploader =
+      hasFollowUpPermission(req, 'canUploadAttachments') &&
       transaction.currentAssigneeUserId === req.authUser?.id;
 
-    if (!(supervisor || assignedEditor)) {
-      return res.status(403).json({ message: 'لا تملك صلاحية إضافة مرفقات لهذه المعاملة' });
+    if (!(supervisor || assignedUploader)) {
+      return res.status(403).json({
+        message: 'لا تملك صلاحية رفع مرفقات لهذه المعاملة، أو أن المعاملة غير مسندة إليك',
+      });
     }
     if (!supervisor && FINAL_STATUSES.includes(transaction.status)) {
       return res.status(409).json({ message: 'لا يمكن إضافة مرفقات إلى معاملة منجزة أو مغلقة' });
@@ -8484,6 +8494,7 @@ router.post('/:id/attachments', async (req, res, next) => {
         mimeType: input.mimeType || null,
         notes: input.notes || null,
         createdBy: changedBy.name,
+        createdById: changedBy.id,
       },
     });
 
@@ -8516,16 +8527,6 @@ router.delete('/:id/attachments/:attachmentId', async (req, res, next) => {
     if (!transaction) return res.status(404).json({ message: 'المعاملة غير موجودة' });
 
     const supervisor = isSupervisor(req);
-    const assignedEditor =
-      hasFollowUpPermission(req, 'canEdit') &&
-      transaction.currentAssigneeUserId === req.authUser?.id;
-
-    if (!(supervisor || assignedEditor)) {
-      return res.status(403).json({ message: 'لا تملك صلاحية حذف مرفقات هذه المعاملة' });
-    }
-    if (!supervisor && FINAL_STATUSES.includes(transaction.status)) {
-      return res.status(409).json({ message: 'لا يمكن حذف مرفقات معاملة منجزة أو مغلقة' });
-    }
 
     const attachment = await prisma.attachment.findFirst({
       where: {
@@ -8535,6 +8536,20 @@ router.delete('/:id/attachments/:attachmentId', async (req, res, next) => {
       },
     });
     if (!attachment) return res.status(404).json({ message: 'المرفق غير موجود' });
+
+    const canDeleteOwnAttachment =
+      hasFollowUpPermission(req, 'canDeleteAttachments') &&
+      transaction.currentAssigneeUserId === req.authUser?.id &&
+      attachment.createdById === req.authUser?.id;
+
+    if (!(supervisor || canDeleteOwnAttachment)) {
+      return res.status(403).json({
+        message: 'يمكنك حذف المرفقات التي رفعتها بنفسك فقط، ما لم تكن مستخدمًا إشرافيًا',
+      });
+    }
+    if (!supervisor && FINAL_STATUSES.includes(transaction.status)) {
+      return res.status(409).json({ message: 'لا يمكن حذف مرفقات معاملة منجزة أو مغلقة' });
+    }
 
     if (attachment.driveFileId) {
       try {
@@ -8695,7 +8710,9 @@ router.get('/:id', async (req, res, next) => {
       },
     });
     if (!row) return res.status(404).json({ message: 'المعاملة غير موجودة' });
-    if (!canActOnRecord(req, row)) return denyRecordAccess(res);
+    if (!canViewRecord(req, row)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية عرض هذه المعاملة، أو أنها ليست ضمن نطاق عملك' });
+    }
 
     const attachments = await prisma.attachment.findMany({
       where: {
