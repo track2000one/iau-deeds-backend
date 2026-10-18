@@ -131,6 +131,8 @@ model UserPermission {
   canDelete       Boolean @default(false)
   canReopen       Boolean @default(false)
   canTransfer     Boolean @default(false)
+  canUploadAttachments Boolean @default(false)
+  canDeleteAttachments Boolean @default(false)
   canPrint        Boolean @default(false)
   canCreateUser   Boolean @default(false)
   canCreateCycle  Boolean @default(false)
@@ -707,10 +709,12 @@ model Attachment {
   mimeType       String?
   notes          String?
   createdBy      String?
+  createdById    String?
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 
   @@index([entityType, entityId])
+  @@index([createdById])
 }
 
 model ArchiveDocument {
