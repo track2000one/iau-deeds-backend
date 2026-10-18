@@ -35,6 +35,18 @@ const riyadhStamp = (date = new Date()) => {
 };
 
 const dateValue = (value) => (value ? new Date(value).toISOString() : '');
+
+const transactionTypeLabel = (value) => ({
+  incoming_internal: 'وارد داخلي',
+  incoming_external: 'وارد خارجي',
+  outgoing_internal: 'صادر داخلي',
+  outgoing_external: 'صادر خارجي',
+  other: 'أخرى',
+  incoming: 'وارد',
+  outgoing: 'صادر',
+  internal: 'داخلي',
+}[value] || value || '');
+
 const buildWorksheet = (rows) => XLSX.utils.json_to_sheet(rows, { skipHeader: false });
 
 const buildWorkbookBuffer = ({ transactions, attachments }) => {
@@ -49,7 +61,7 @@ const buildWorkbookBuffer = ({ transactions, attachments }) => {
       'نوع التاريخ': record.transactionDateType === 'hijri' ? 'هجري' : 'ميلادي',
       'تاريخ المعاملة الأصلي': record.transactionDateInput || '',
       'تاريخ المعاملة ISO': dateValue(record.transactionDate),
-      'نوع المعاملة': record.transactionType,
+      'نوع المعاملة': transactionTypeLabel(record.transactionType),
       'الموضوع': record.subject,
       'الجهة': record.sourceEntity || '',
       'الأولوية': record.priority,
