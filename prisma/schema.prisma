@@ -1631,6 +1631,7 @@ model TransactionFollowUp {
   transactionDateInput  String?
   transactionYear       Int?
   transactionType       String   @default("incoming_external")
+  organizationalUnit    String?
   subject               String
   sourceEntity          String?
   priority              String   @default("normal")
@@ -1669,6 +1670,7 @@ model TransactionFollowUp {
   @@index([transactionNumber])
   @@index([transactionYear])
   @@index([transactionDate])
+  @@index([organizationalUnit])
   @@index([status])
   @@index([priority])
   @@index([currentAssigneeUserId])
