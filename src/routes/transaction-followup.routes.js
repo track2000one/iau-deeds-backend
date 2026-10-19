@@ -388,6 +388,7 @@ const reportArchiveSchema = z.object({
   from: z.string().trim().min(1),
   to: z.string().trim().min(1),
   assigneeUserId: nullableText(100),
+  templateSnapshot: z.unknown().optional().nullable(),
 });
 
 const reportScheduleSchema = z.object({
@@ -439,6 +440,30 @@ const reportTemplateOptionsSchema = z.object({
   sortBy: flexibleReportSortSchema.default('transactionDate'),
   sortDirection: z.enum(['asc', 'desc']).default('desc'),
   visibleColumns: z.array(flexibleReportColumnSchema).min(1).max(10),
+});
+
+const archivedFlexibleReportOptionsSchema = reportTemplateOptionsSchema.extend({
+  excludedIds: z.array(z.string().trim().min(1).max(100)).max(5000).default([]),
+});
+
+const manualReportArchiveSnapshotSchema = z.object({
+  id: z.string().trim().min(1).max(150),
+  name: z.string().trim().min(1).max(250),
+  scope: z.literal('personal').default('personal'),
+  reportMode: z.enum(['weekly', 'monthly', 'custom']),
+  customFrom: nullableText(100),
+  customTo: nullableText(100),
+  assigneeUserId: nullableText(100),
+  orientation: z.enum(['portrait', 'landscape']).default('landscape'),
+  options: archivedFlexibleReportOptionsSchema,
+  accessMode: z.literal('all').default('all'),
+  allowedUserIds: z.array(z.string().trim().min(1).max(100)).max(200).default([]),
+  isDefault: z.literal(false).default(false),
+  sortOrder: z.coerce.number().int().min(0).default(0),
+  createdById: nullableText(100),
+  createdByName: nullableText(200),
+  createdAt: z.string().trim().min(1),
+  updatedAt: z.string().trim().min(1),
 });
 
 const reportTemplateSchema = z.object({
