@@ -475,6 +475,56 @@ router.get('/records/trash', async (_req, res, next) => {
   }
 });
 
+router.get('/records/version-approval-notifications', async (req, res, next) => {
+  try {
+    const recipientUserId = req.authUser?.id;
+    if (!recipientUserId) {
+      return res.status(401).json({ message: 'يجب تسجيل الدخول أولًا' });
+    }
+
+    const [items, unreadCount] = await Promise.all([
+      prisma.archiveApprovalNotification.findMany({
+        where: { recipientUserId },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      prisma.archiveApprovalNotification.count({
+        where: {
+          recipientUserId,
+          readAt: null,
+        },
+      }),
+    ]);
+
+    res.json({ items, unreadCount });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/records/version-approval-notifications/read-all', async (req, res, next) => {
+  try {
+    const recipientUserId = req.authUser?.id;
+    if (!recipientUserId) {
+      return res.status(401).json({ message: 'يجب تسجيل الدخول أولًا' });
+    }
+
+    await prisma.archiveApprovalNotification.updateMany({
+      where: {
+        recipientUserId,
+        readAt: null,
+      },
+      data: {
+        readAt: new Date(),
+      },
+    });
+
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/records/version-approvers', async (req, res, next) => {
   try {
     const approvers = await getArchiveApproverUsers(prisma, req.authUser?.id || null);
