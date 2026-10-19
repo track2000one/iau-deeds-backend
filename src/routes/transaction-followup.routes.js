@@ -7522,9 +7522,34 @@ router.get('/reports/archives', async (req, res, next) => {
     const pageSize = Math.min(50, Math.max(10, Number.parseInt(String(req.query.pageSize || '20'), 10) || 20));
     const supervisor = isSupervisor(req);
     const requestedAssignee = String(req.query.assigneeUserId || '').trim();
-    const where = supervisor
+    const search = String(req.query.search || '').trim();
+    const source = String(req.query.source || '').trim();
+    const reportType = String(req.query.reportType || '').trim();
+    const tag = String(req.query.tag || '').trim();
+
+    const accessWhere = supervisor
       ? (requestedAssignee ? { assigneeUserId: requestedAssignee } : {})
       : { assigneeUserId: req.authUser.id };
+
+    const where = {
+      ...accessWhere,
+      ...(source === 'manual' || source === 'scheduled' ? { source } : {}),
+      ...(reportType === 'weekly' || reportType === 'monthly' || reportType === 'custom'
+        ? { reportType }
+        : {}),
+      ...(tag ? { tags: { has: tag } } : {}),
+      ...(search
+        ? {
+            OR: [
+              { archiveName: { contains: search, mode: 'insensitive' } },
+              { notes: { contains: search, mode: 'insensitive' } },
+              { templateName: { contains: search, mode: 'insensitive' } },
+              { assigneeName: { contains: search, mode: 'insensitive' } },
+              { generatedByName: { contains: search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
 
     const [total, items] = await Promise.all([
       prisma.transactionFollowUpReportArchive.count({ where }),
@@ -7532,6 +7557,9 @@ router.get('/reports/archives', async (req, res, next) => {
         where,
         select: {
           id: true,
+          archiveName: true,
+          notes: true,
+          tags: true,
           reportType: true,
           periodFrom: true,
           periodTo: true,
@@ -7547,6 +7575,7 @@ router.get('/reports/archives', async (req, res, next) => {
           generatedById: true,
           generatedByName: true,
           createdAt: true,
+          updatedAt: true,
         },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * pageSize,
