@@ -7037,12 +7037,14 @@ router.get('/reports/templates', async (req, res, next) => {
         ],
       },
       orderBy: [
-        { scope: 'desc' },
+        { isDefault: 'desc' },
+        { sortOrder: 'asc' },
         { updatedAt: 'desc' },
       ],
     });
 
-    res.json(rows);
+    const visibleRows = rows.filter((row) => canUseReportTemplate(req, row));
+    res.json(visibleRows);
   } catch (error) {
     next(error);
   }
