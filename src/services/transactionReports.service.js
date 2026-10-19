@@ -448,6 +448,9 @@ export const scheduledTransactionReportPeriod = (frequency, runAt = new Date()) 
 };
 
 export const archiveTransactionExecutiveReport = async ({
+  archiveName = null,
+  notes = null,
+  tags = [],
   reportType,
   from,
   to,
@@ -475,6 +478,9 @@ export const archiveTransactionExecutiveReport = async ({
 
   return prisma.transactionFollowUpReportArchive.create({
     data: {
+      archiveName,
+      notes,
+      tags: Array.isArray(tags) ? tags : [],
       reportType,
       periodFrom: new Date(report.period.from),
       periodTo: new Date(report.period.to),
@@ -535,6 +541,13 @@ export const syncScheduledTransactionReports = async (now = new Date()) => {
 
     if (!existing) {
       await archiveTransactionExecutiveReport({
+        archiveName: schedule.name || liveTemplate?.name || schedule.templateName || null,
+        notes: 'نسخة مؤرشفة تم إنشاؤها تلقائيًا بواسطة جدولة التقارير.',
+        tags: [
+          'آلي',
+          schedule.frequency === 'weekly' ? 'أسبوعي' : 'شهري',
+          ...(liveTemplate?.name || schedule.templateName ? ['قالب'] : []),
+        ],
         reportType: schedule.frequency,
         from: period.from,
         to: period.to,
