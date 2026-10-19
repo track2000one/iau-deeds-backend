@@ -2197,6 +2197,9 @@ model TransactionFollowUpReportSchedule {
 
 model TransactionFollowUpReportArchive {
   id               String   @id @default(cuid())
+  archiveName      String?
+  notes            String?
+  tags             Json?
   reportType       String
   periodFrom       DateTime
   periodTo         DateTime
@@ -2214,9 +2217,11 @@ model TransactionFollowUpReportArchive {
   generatedById    String?
   generatedByName  String?
   createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   schedule         TransactionFollowUpReportSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
 
+  @@index([archiveName])
   @@index([reportType])
   @@index([periodFrom])
   @@index([periodTo])
@@ -2226,6 +2231,7 @@ model TransactionFollowUpReportArchive {
   @@index([scheduleId])
   @@index([templateId])
   @@index([createdAt])
+  @@index([updatedAt])
 }
 
 model TransactionFollowUpReportTemplate {
