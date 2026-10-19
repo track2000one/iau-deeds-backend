@@ -2174,6 +2174,9 @@ model TransactionFollowUpReportSchedule {
   organizationalUnit String?
   assigneeUserId   String?
   assigneeName     String?
+  templateId       String?
+  templateName     String?
+  templateSnapshot Json?
   isActive         Boolean  @default(true)
   lastRunAt        DateTime?
   nextRunAt        DateTime?
@@ -2186,6 +2189,7 @@ model TransactionFollowUpReportSchedule {
 
   @@index([frequency])
   @@index([organizationalUnit])
+  @@index([templateId])
   @@index([isActive])
   @@index([nextRunAt])
   @@index([createdAt])
@@ -2204,6 +2208,9 @@ model TransactionFollowUpReportArchive {
   snapshot         Json
   summary          Json?
   scheduleId       String?
+  templateId       String?
+  templateName     String?
+  templateSnapshot Json?
   generatedById    String?
   generatedByName  String?
   createdAt        DateTime @default(now())
@@ -2217,6 +2224,7 @@ model TransactionFollowUpReportArchive {
   @@index([assigneeUserId])
   @@index([source])
   @@index([scheduleId])
+  @@index([templateId])
   @@index([createdAt])
 }
 
