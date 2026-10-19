@@ -7764,6 +7764,172 @@ router.get('/reports/archives/compare', async (req, res, next) => {
   }
 });
 
+router.get('/reports/archives/:id/activity', async (req, res, next) => {
+  try {
+    const archive = await prisma.transactionFollowUpReportArchive.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!archive) {
+      return res.status(404).json({ message: 'التقرير المؤرشف غير موجود' });
+    }
+    if (!isSupervisor(req) && archive.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'لا يمكنك عرض سجل هذا التقرير' });
+    }
+
+    const rows = await prisma.auditLog.findMany({
+      where: {
+        module: 'transaction_follow_up',
+        entity: 'report_archive',
+        entityId: archive.id,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      select: {
+        id: true,
+        action: true,
+        description: true,
+        details: true,
+        username: true,
+        userEmail: true,
+        userRole: true,
+        createdAt: true,
+      },
+    });
+
+    res.json(rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/archives/:id/export-event', async (req, res, next) => {
+  try {
+    const input = reportArchiveExportEventSchema.parse(req.body);
+    const archive = await prisma.transactionFollowUpReportArchive.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!archive) {
+      return res.status(404).json({ message: 'التقرير المؤرشف غير موجود' });
+    }
+    if (!isSupervisor(req) && archive.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'لا يمكنك تصدير هذا التقرير' });
+    }
+
+    const formatLabels = {
+      pdf: 'PDF',
+      excel: 'Excel',
+      print: 'طباعة',
+    };
+
+    await auditReportArchiveAction(req, {
+      action: 'report_archive_export',
+      archive,
+      description: `تصدير التقرير المؤرشف بصيغة ${formatLabels[input.format]}`,
+      details: {
+        format: input.format,
+        fileName: input.fileName || null,
+      },
+    });
+
+    res.json({ recorded: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/reports/archives/:id/governance', async (req, res, next) => {
+  try {
+    if (!isSupervisor(req)) {
+      return res.status(403).json({ message: 'حوكمة أرشيف التقارير متاحة للمستخدم الإشرافي فقط' });
+    }
+
+    const input = reportArchiveGovernanceSchema.parse(req.body);
+    const current = await prisma.transactionFollowUpReportArchive.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) {
+      return res.status(404).json({ message: 'التقرير المؤرشف غير موجود' });
+    }
+
+    const nextPolicy = input.retentionPolicy ?? current.retentionPolicy;
+    let retainUntil = current.retainUntil;
+    if (input.retentionPolicy !== undefined || input.retainUntil !== undefined) {
+      if (nextPolicy === 'custom') {
+        const raw = input.retainUntil !== undefined
+          ? input.retainUntil
+          : current.retainUntil?.toISOString();
+        if (!raw) {
+          return res.status(400).json({ message: 'سياسة الاحتفاظ المخصصة تتطلب تاريخ انتهاء' });
+        }
+        retainUntil = toDate(raw, 'تاريخ انتهاء الاحتفاظ');
+        if (retainUntil.getTime() <= Date.now()) {
+          return res.status(400).json({ message: 'تاريخ انتهاء الاحتفاظ يجب أن يكون في المستقبل' });
+        }
+      } else {
+        retainUntil = null;
+      }
+    }
+
+    const nextStatus = input.governanceStatus ?? current.governanceStatus;
+    const statusChanged = nextStatus !== current.governanceStatus;
+    const supervisorActor = actor(req);
+
+    const row = await prisma.transactionFollowUpReportArchive.update({
+      where: { id: current.id },
+      data: {
+        ...(input.governanceStatus !== undefined ? { governanceStatus: input.governanceStatus } : {}),
+        ...(input.isPinned !== undefined ? { isPinned: input.isPinned } : {}),
+        ...(input.isDeletionProtected !== undefined
+          ? { isDeletionProtected: input.isDeletionProtected }
+          : {}),
+        ...(input.retentionPolicy !== undefined ? { retentionPolicy: input.retentionPolicy } : {}),
+        ...(input.retentionPolicy !== undefined || input.retainUntil !== undefined
+          ? { retainUntil }
+          : {}),
+        ...(statusChanged && nextStatus === 'final'
+          ? {
+              finalizedAt: new Date(),
+              finalizedById: supervisorActor.id,
+              finalizedByName: supervisorActor.name,
+            }
+          : statusChanged && nextStatus === 'draft'
+            ? {
+                finalizedAt: null,
+                finalizedById: null,
+                finalizedByName: null,
+              }
+            : {}),
+        updatedById: supervisorActor.id,
+        updatedByName: supervisorActor.name,
+      },
+    });
+
+    await auditReportArchiveAction(req, {
+      action: 'report_archive_governance_update',
+      archive: row,
+      description: 'تحديث إعدادات حوكمة التقرير المؤرشف',
+      previousData: {
+        governanceStatus: current.governanceStatus,
+        isPinned: current.isPinned,
+        isDeletionProtected: current.isDeletionProtected,
+        retentionPolicy: current.retentionPolicy,
+        retainUntil: current.retainUntil,
+      },
+      newData: {
+        governanceStatus: row.governanceStatus,
+        isPinned: row.isPinned,
+        isDeletionProtected: row.isDeletionProtected,
+        retentionPolicy: row.retentionPolicy,
+        retainUntil: row.retainUntil,
+      },
+    });
+
+    res.json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/reports/archives/:id', async (req, res, next) => {
   try {
     const row = await prisma.transactionFollowUpReportArchive.findUnique({
