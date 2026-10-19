@@ -580,6 +580,129 @@ router.post('/records/:id/attachments', async (req, res, next) => {
   }
 });
 
+router.post('/records/merge', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const recordIds = Array.from(
+      new Set(
+        (Array.isArray(req.body?.recordIds) ? req.body.recordIds : [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      ),
+    );
+    const targetId = String(req.body?.targetId || '').trim();
+
+    if (recordIds.length < 2) {
+      return res.status(400).json({ message: 'حدد سجلين أرشيفيين على الأقل للدمج' });
+    }
+    if (!targetId || !recordIds.includes(targetId)) {
+      return res.status(400).json({ message: 'اختر السجل الرئيسي من بين السجلات المحددة' });
+    }
+
+    const records = await prisma.archiveRecord.findMany({
+      where: {
+        id: { in: recordIds },
+        deletedAt: null,
+      },
+      include: {
+        attachments: true,
+      },
+    });
+
+    if (records.length !== recordIds.length) {
+      return res.status(409).json({
+        message: 'تعذر الدمج لأن أحد السجلات المحددة غير موجود أو لم يعد متاحًا',
+      });
+    }
+
+    const target = records.find((item) => item.id === targetId);
+    if (!target) {
+      return res.status(404).json({ message: 'السجل الرئيسي غير موجود' });
+    }
+
+    const sources = records.filter((item) => item.id !== targetId);
+    const movedAttachmentCount = sources.reduce(
+      (sum, item) => sum + item.attachments.length,
+      0,
+    );
+    const mergedAt = new Date();
+
+    const mergedRecord = await prisma.$transaction(async (tx) => {
+      if (sources.length) {
+        await tx.archiveRecordAttachment.updateMany({
+          where: { recordId: { in: sources.map((item) => item.id) } },
+          data: { recordId: targetId },
+        });
+      }
+
+      await tx.archiveRecord.update({
+        where: { id: targetId },
+        data: {
+          updatedBy: changedBy.name,
+          status: 'active',
+        },
+      });
+
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: targetId,
+          action: 'records_merged',
+          description: `دمج ${sources.length} سجل أرشيفي داخل السجل الرئيسي ونقل ${movedAttachmentCount} ملف`,
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+          metadata: {
+            sourceRecords: sources.map((item) => ({
+              id: item.id,
+              archiveNumber: item.archiveNumber,
+              title: item.title,
+            })),
+            movedAttachmentCount,
+          },
+        },
+      });
+
+      for (const source of sources) {
+        await tx.archiveRecord.update({
+          where: { id: source.id },
+          data: {
+            deletedAt: mergedAt,
+            mergedAt,
+            mergedIntoId: targetId,
+            status: 'merged',
+            updatedBy: changedBy.name,
+          },
+        });
+        await tx.archiveRecordActivity.create({
+          data: {
+            recordId: source.id,
+            action: 'record_merged',
+            description: `تم دمج السجل داخل ${target.archiveNumber} — ${target.title}`,
+            actorId: changedBy.id,
+            actorName: changedBy.name,
+            metadata: {
+              targetId,
+              targetArchiveNumber: target.archiveNumber,
+            },
+          },
+        });
+      }
+
+      return tx.archiveRecord.findUnique({
+        where: { id: targetId },
+        include: recordInclude,
+      });
+    });
+
+    res.json({
+      record: serializeRecord(mergedRecord),
+      mergedSourceIds: sources.map((item) => item.id),
+      movedAttachmentCount,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.delete('/records/:recordId/attachments/:attachmentId', async (req, res, next) => {
   try {
     const changedBy = actor(req);
@@ -667,6 +790,11 @@ router.patch('/records/:id/restore', async (req, res, next) => {
     const current = await prisma.archiveRecord.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
     if (!current.deletedAt) return res.status(409).json({ message: 'السجل غير موجود في المحذوفات' });
+    if (current.status === 'merged' && current.mergedIntoId) {
+      return res.status(409).json({
+        message: 'هذا السجل تم دمجه في سجل آخر ولا يمكن استعادته كسجل مستقل من المحذوفات.',
+      });
+    }
 
     const record = await prisma.$transaction(async (tx) => {
       await tx.archiveRecord.update({

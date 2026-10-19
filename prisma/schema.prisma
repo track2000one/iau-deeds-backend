@@ -757,6 +757,8 @@ model ArchiveRecord {
   tags             String?
   description      String?
   status           String   @default("active")
+  mergedIntoId     String?
+  mergedAt         DateTime?
   createdById      String?
   createdBy        String?
   updatedBy        String?
@@ -772,6 +774,7 @@ model ArchiveRecord {
   @@index([documentNumber])
   @@index([confidentiality])
   @@index([status])
+  @@index([mergedIntoId])
   @@index([createdAt])
   @@index([updatedAt])
 }
