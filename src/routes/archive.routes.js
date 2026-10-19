@@ -773,6 +773,32 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
     }
 
     const nextVersion = Math.max(1, Number(latest?.version || currentAttachment.version || 1) + 1);
+    const approvalRoute = req.body?.approvalRoute === 'specific' ? 'specific' : 'pool';
+    const eligibleApprovers = await getArchiveApproverUsers(prisma, changedBy.id);
+
+    if (!eligibleApprovers.length) {
+      return res.status(409).json({
+        message: 'لا يوجد مستخدم آخر مخول باعتماد الأرشيف حاليًا. أضف معتمدًا آخر قبل إنشاء مسودة الإصدار.',
+      });
+    }
+
+    let assignedApprover = null;
+    if (approvalRoute === 'specific') {
+      const approverUserId = String(req.body?.approverUserId || '').trim();
+      assignedApprover = eligibleApprovers.find((item) => item.id === approverUserId) || null;
+
+      if (!assignedApprover) {
+        return res.status(400).json({
+          message: 'اختر معتمدًا محددًا صالحًا ومخولًا باعتماد الأرشيف.',
+        });
+      }
+    }
+
+    const approvalRequestedAt = new Date();
+    const approvalLabel =
+      approvalRoute === 'specific'
+        ? assignedApprover.name
+        : 'مجموعة معتمدي الأرشيف';
 
     const updatedRecord = await prisma.$transaction(async (tx) => {
       if (!currentAttachment.versionGroupId) {
@@ -782,7 +808,7 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
         });
       }
 
-      await tx.archiveRecordAttachment.create({
+      const draft = await tx.archiveRecordAttachment.create({
         data: {
           recordId: req.params.recordId,
           fileName: incoming.fileName,
@@ -795,11 +821,33 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
           versionGroupId,
           versionNote: incoming.versionNote,
           versionStatus: 'draft',
+          approvalRoute,
+          assignedApproverId: assignedApprover?.id || null,
+          assignedApproverName: assignedApprover?.name || null,
+          approvalRequestedAt,
           isCurrent: false,
           addedById: changedBy.id,
           addedBy: changedBy.name,
         },
       });
+
+      const recipients =
+        approvalRoute === 'specific'
+          ? [assignedApprover]
+          : eligibleApprovers;
+
+      if (recipients.length) {
+        await tx.archiveApprovalNotification.createMany({
+          data: recipients.map((recipient) => ({
+            recipientUserId: recipient.id,
+            recordId: req.params.recordId,
+            attachmentId: draft.id,
+            type: 'approval_requested',
+            title: `طلب اعتماد إصدار V${nextVersion}`,
+            message: `${record.archiveNumber} — ${record.title} — ${incoming.originalName || incoming.fileName}`,
+          })),
+        });
+      }
 
       await tx.archiveRecord.update({
         where: { id: req.params.recordId },
@@ -810,17 +858,21 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
         data: {
           recordId: req.params.recordId,
           action: 'attachment_version_added',
-          description: `إنشاء مسودة الإصدار ${nextVersion} للملف ${currentAttachment.originalName || currentAttachment.fileName} بانتظار الاعتماد`,
+          description: `إنشاء مسودة الإصدار ${nextVersion} للملف ${currentAttachment.originalName || currentAttachment.fileName} وإرسالها للاعتماد إلى ${approvalLabel}`,
           actorId: changedBy.id,
           actorName: changedBy.name,
           metadata: {
-            attachmentId: currentAttachment.id,
+            attachmentId: draft.id,
             versionGroupId,
             previousVersion: currentAttachment.version,
             newVersion: nextVersion,
             versionNote: incoming.versionNote || null,
             fileName: incoming.originalName || incoming.fileName,
             status: 'draft',
+            approvalRoute,
+            assignedApproverId: assignedApprover?.id || null,
+            assignedApproverName: assignedApprover?.name || null,
+            approvalRequestedAt: approvalRequestedAt.toISOString(),
           },
         },
       });
