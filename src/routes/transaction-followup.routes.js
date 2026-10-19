@@ -6966,6 +6966,236 @@ router.get('/dashboard', async (req, res, next) => {
   }
 });
 
+router.get('/reports/templates', async (req, res, next) => {
+  try {
+    const rows = await prisma.transactionFollowUpReportTemplate.findMany({
+      where: {
+        OR: [
+          { createdById: req.authUser.id },
+          { scope: 'shared' },
+        ],
+      },
+      orderBy: [
+        { scope: 'desc' },
+        { updatedAt: 'desc' },
+      ],
+    });
+
+    res.json(rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/templates', async (req, res, next) => {
+  try {
+    const input = reportTemplateSchema.parse(req.body);
+    const supervisor = isSupervisor(req);
+    if (input.scope === 'shared' && !supervisor) {
+      return res.status(403).json({
+        message: 'إنشاء قالب عام للإدارة متاح للمستخدم الإشرافي فقط',
+      });
+    }
+
+    const createdBy = actor(req);
+    const requestedAssignee =
+      input.scope === 'personal' && supervisor
+        ? input.assigneeUserId || null
+        : null;
+    const assignee = requestedAssignee
+      ? await resolveAssignee(requestedAssignee)
+      : null;
+
+    let customFrom = null;
+    let customTo = null;
+    if (input.reportMode === 'custom') {
+      if (!input.customFrom || !input.customTo) {
+        return res.status(400).json({
+          message: 'الفترة المخصصة تتطلب تاريخ بداية ونهاية',
+        });
+      }
+      customFrom = toDate(input.customFrom, 'بداية فترة القالب');
+      customTo = toDate(input.customTo, 'نهاية فترة القالب');
+      if (customFrom.getTime() > customTo.getTime()) {
+        return res.status(400).json({
+          message: 'بداية فترة القالب يجب أن تسبق نهايتها',
+        });
+      }
+    }
+
+    const existing = await prisma.transactionFollowUpReportTemplate.findFirst({
+      where: {
+        createdById: createdBy.id,
+        name: input.name,
+      },
+    });
+
+    const data = {
+      name: input.name,
+      scope: input.scope,
+      reportMode: input.reportMode,
+      customFrom,
+      customTo,
+      assigneeUserId: assignee?.id || null,
+      orientation: input.orientation,
+      options: input.options,
+      createdByName: createdBy.name,
+    };
+
+    const row = existing
+      ? await prisma.transactionFollowUpReportTemplate.update({
+          where: { id: existing.id },
+          data,
+        })
+      : await prisma.transactionFollowUpReportTemplate.create({
+          data: {
+            ...data,
+            createdById: createdBy.id,
+          },
+        });
+
+    res.status(existing ? 200 : 201).json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/reports/templates/:id', async (req, res, next) => {
+  try {
+    const input = reportTemplateSchema.partial().parse(req.body);
+    const current = await prisma.transactionFollowUpReportTemplate.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) {
+      return res.status(404).json({ message: 'قالب التقرير غير موجود' });
+    }
+
+    const supervisor = isSupervisor(req);
+    const ownsTemplate = current.createdById === req.authUser.id;
+    if (current.scope === 'shared') {
+      if (!supervisor) {
+        return res.status(403).json({
+          message: 'تعديل القالب العام متاح للمستخدم الإشرافي فقط',
+        });
+      }
+    } else if (!ownsTemplate) {
+      return res.status(403).json({
+        message: 'لا يمكنك تعديل قالب شخصي يخص مستخدمًا آخر',
+      });
+    }
+
+    const nextScope = input.scope || current.scope;
+    if (nextScope === 'shared' && !supervisor) {
+      return res.status(403).json({
+        message: 'تحويل القالب إلى قالب عام متاح للمستخدم الإشرافي فقط',
+      });
+    }
+
+    const nextMode = input.reportMode || current.reportMode;
+    let customFrom = current.customFrom;
+    let customTo = current.customTo;
+    if (nextMode === 'custom') {
+      const fromValue = input.customFrom !== undefined
+        ? input.customFrom
+        : current.customFrom?.toISOString();
+      const toValue = input.customTo !== undefined
+        ? input.customTo
+        : current.customTo?.toISOString();
+      if (!fromValue || !toValue) {
+        return res.status(400).json({
+          message: 'الفترة المخصصة تتطلب تاريخ بداية ونهاية',
+        });
+      }
+      customFrom = toDate(fromValue, 'بداية فترة القالب');
+      customTo = toDate(toValue, 'نهاية فترة القالب');
+      if (customFrom.getTime() > customTo.getTime()) {
+        return res.status(400).json({
+          message: 'بداية فترة القالب يجب أن تسبق نهايتها',
+        });
+      }
+    } else {
+      customFrom = null;
+      customTo = null;
+    }
+
+    let assigneeUserId = current.assigneeUserId;
+    if (nextScope === 'shared') {
+      assigneeUserId = null;
+    } else if (input.assigneeUserId !== undefined) {
+      if (supervisor && input.assigneeUserId) {
+        const assignee = await resolveAssignee(input.assigneeUserId);
+        assigneeUserId = assignee.id;
+      } else {
+        assigneeUserId = null;
+      }
+    }
+
+    if (input.name && input.name !== current.name) {
+      const duplicate = await prisma.transactionFollowUpReportTemplate.findFirst({
+        where: {
+          createdById: current.createdById,
+          name: input.name,
+          NOT: { id: current.id },
+        },
+        select: { id: true },
+      });
+      if (duplicate) {
+        return res.status(409).json({
+          message: 'يوجد قالب آخر بالاسم نفسه',
+        });
+      }
+    }
+
+    const row = await prisma.transactionFollowUpReportTemplate.update({
+      where: { id: current.id },
+      data: {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        scope: nextScope,
+        reportMode: nextMode,
+        customFrom,
+        customTo,
+        assigneeUserId,
+        ...(input.orientation !== undefined ? { orientation: input.orientation } : {}),
+        ...(input.options !== undefined ? { options: input.options } : {}),
+      },
+    });
+
+    res.json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/reports/templates/:id', async (req, res, next) => {
+  try {
+    const current = await prisma.transactionFollowUpReportTemplate.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) {
+      return res.status(404).json({ message: 'قالب التقرير غير موجود' });
+    }
+
+    if (current.scope === 'shared') {
+      if (!isSupervisor(req)) {
+        return res.status(403).json({
+          message: 'حذف القالب العام متاح للمستخدم الإشرافي فقط',
+        });
+      }
+    } else if (current.createdById !== req.authUser.id) {
+      return res.status(403).json({
+        message: 'لا يمكنك حذف قالب شخصي يخص مستخدمًا آخر',
+      });
+    }
+
+    await prisma.transactionFollowUpReportTemplate.delete({
+      where: { id: current.id },
+    });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/reports/archives', async (req, res, next) => {
   try {
     const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
