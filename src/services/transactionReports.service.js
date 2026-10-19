@@ -497,6 +497,8 @@ export const archiveTransactionExecutiveReport = async ({
       templateSnapshot,
       generatedById,
       generatedByName,
+      updatedById: generatedById,
+      updatedByName: generatedByName,
     },
   });
 };
