@@ -7678,6 +7678,9 @@ router.post('/reports/archives', async (req, res, next) => {
       : null;
 
     const archive = await archiveTransactionExecutiveReport({
+      archiveName: input.archiveName || manualSnapshot?.name || null,
+      notes: input.notes || null,
+      tags: input.tags || [],
       reportType: input.reportType,
       from,
       to,
@@ -7693,6 +7696,35 @@ router.post('/reports/archives', async (req, res, next) => {
     });
 
     res.status(201).json(archive);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/reports/archives/:id', async (req, res, next) => {
+  try {
+    const input = reportArchiveMetadataSchema.parse(req.body);
+    const current = await prisma.transactionFollowUpReportArchive.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) {
+      return res.status(404).json({ message: 'التقرير المؤرشف غير موجود' });
+    }
+
+    if (!isSupervisor(req) && current.assigneeUserId !== req.authUser.id) {
+      return res.status(403).json({ message: 'لا يمكنك تعديل بيانات هذا التقرير المؤرشف' });
+    }
+
+    const row = await prisma.transactionFollowUpReportArchive.update({
+      where: { id: current.id },
+      data: {
+        archiveName: input.archiveName || null,
+        notes: input.notes || null,
+        tags: input.tags || [],
+      },
+    });
+
+    res.json(row);
   } catch (error) {
     next(error);
   }
