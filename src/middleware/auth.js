@@ -229,6 +229,24 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canEdit';
   }
 
+  // Archive version approval is intentionally separated from generic archive editing.
+  // Users may upload/update archive files without being allowed to approve official versions.
+  if (
+    moduleName === 'archive' &&
+    (
+      (
+        method === 'GET' &&
+        /\/records\/version-approvals\/?(?:\?|$)/.test(requestPath)
+      ) ||
+      (
+        method === 'PATCH' &&
+        /\/records\/[^/]+\/attachments\/[^/]+\/(?:approve|cancel)\/?(?:\?|$)/.test(requestPath)
+      )
+    )
+  ) {
+    action = 'canApproveArchive';
+  }
+
   // GIS bulk geometry changes are editing operations even though they use POST
   // to submit a transactional batch payload.
   if (
