@@ -7913,14 +7913,14 @@ router.patch('/reports/archives/:id/governance', async (req, res, next) => {
         isPinned: current.isPinned,
         isDeletionProtected: current.isDeletionProtected,
         retentionPolicy: current.retentionPolicy,
-        retainUntil: current.retainUntil,
+        retainUntil: current.retainUntil ? current.retainUntil.toISOString() : null,
       },
       newData: {
         governanceStatus: row.governanceStatus,
         isPinned: row.isPinned,
         isDeletionProtected: row.isDeletionProtected,
         retentionPolicy: row.retentionPolicy,
-        retainUntil: row.retainUntil,
+        retainUntil: row.retainUntil ? row.retainUntil.toISOString() : null,
       },
     });
 
