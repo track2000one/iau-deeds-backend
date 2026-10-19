@@ -107,6 +107,40 @@ const serializeRecord = (record) => {
   };
 };
 
+const getArchiveApproverUsers = async (client = prisma, excludeUserId = null) => {
+  const users = await client.appUser.findMany({
+    where: {
+      isActive: true,
+      ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
+      OR: [
+        { role: 'admin' },
+        {
+          permissions: {
+            some: {
+              module: 'archive',
+              canApproveArchive: true,
+            },
+          },
+        },
+      ],
+    },
+    select: {
+      id: true,
+      username: true,
+      email: true,
+      role: true,
+    },
+    orderBy: [{ role: 'asc' }, { username: 'asc' }],
+  });
+
+  return users.map((user) => ({
+    id: user.id,
+    name: user.username || user.email,
+    email: user.email,
+    role: user.role,
+  }));
+};
+
 const nextArchiveNumber = async () => {
   const year = new Date().getFullYear();
   const prefix = `ARC-${year}-`;
@@ -441,6 +475,65 @@ router.get('/records/trash', async (_req, res, next) => {
   }
 });
 
+router.get('/records/version-approval-notifications', async (req, res, next) => {
+  try {
+    const recipientUserId = req.authUser?.id;
+    if (!recipientUserId) {
+      return res.status(401).json({ message: 'يجب تسجيل الدخول أولًا' });
+    }
+
+    const [items, unreadCount] = await Promise.all([
+      prisma.archiveApprovalNotification.findMany({
+        where: { recipientUserId },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      prisma.archiveApprovalNotification.count({
+        where: {
+          recipientUserId,
+          readAt: null,
+        },
+      }),
+    ]);
+
+    res.json({ items, unreadCount });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/records/version-approval-notifications/read-all', async (req, res, next) => {
+  try {
+    const recipientUserId = req.authUser?.id;
+    if (!recipientUserId) {
+      return res.status(401).json({ message: 'يجب تسجيل الدخول أولًا' });
+    }
+
+    await prisma.archiveApprovalNotification.updateMany({
+      where: {
+        recipientUserId,
+        readAt: null,
+      },
+      data: {
+        readAt: new Date(),
+      },
+    });
+
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/records/version-approvers', async (req, res, next) => {
+  try {
+    const approvers = await getArchiveApproverUsers(prisma, req.authUser?.id || null);
+    res.json(approvers);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/records/version-approvals', async (req, res, next) => {
   try {
     const requestedStatus = String(req.query.status || 'draft').trim();
@@ -450,37 +543,46 @@ router.get('/records/version-approvals', async (req, res, next) => {
     const confidentiality = String(req.query.confidentiality || '').trim();
     const addedBy = String(req.query.addedBy || '').trim();
 
-    const where = {
-      record: { deletedAt: null },
-      ...(status !== 'all' ? { versionStatus: status } : {}),
-      ...(addedBy ? { addedBy: { contains: addedBy, mode: 'insensitive' } } : {}),
-      ...(confidentiality
-        ? { record: { deletedAt: null, confidentiality } }
-        : {}),
-      ...(search
-        ? {
-            OR: [
-              { originalName: { contains: search, mode: 'insensitive' } },
-              { fileName: { contains: search, mode: 'insensitive' } },
-              { addedBy: { contains: search, mode: 'insensitive' } },
-              {
-                record: {
-                  OR: [
-                    { archiveNumber: { contains: search, mode: 'insensitive' } },
-                    { title: { contains: search, mode: 'insensitive' } },
-                    { category: { contains: search, mode: 'insensitive' } },
-                    { documentNumber: { contains: search, mode: 'insensitive' } },
-                    { issuingAuthority: { contains: search, mode: 'insensitive' } },
-                  ],
-                },
-              },
-            ],
-          }
-        : {}),
-    };
+    const conditions = [
+      { record: { deletedAt: null } },
+      ...(status !== 'all' ? [{ versionStatus: status }] : []),
+      ...(addedBy ? [{ addedBy: { contains: addedBy, mode: 'insensitive' } }] : []),
+      ...(confidentiality ? [{ record: { deletedAt: null, confidentiality } }] : []),
+    ];
+
+    if (req.authUser?.role !== 'admin') {
+      conditions.push({
+        OR: [
+          { approvalRoute: 'pool' },
+          { assignedApproverId: req.authUser?.id || '__none__' },
+        ],
+      });
+    }
+
+    if (search) {
+      conditions.push({
+        OR: [
+          { originalName: { contains: search, mode: 'insensitive' } },
+          { fileName: { contains: search, mode: 'insensitive' } },
+          { addedBy: { contains: search, mode: 'insensitive' } },
+          { assignedApproverName: { contains: search, mode: 'insensitive' } },
+          {
+            record: {
+              OR: [
+                { archiveNumber: { contains: search, mode: 'insensitive' } },
+                { title: { contains: search, mode: 'insensitive' } },
+                { category: { contains: search, mode: 'insensitive' } },
+                { documentNumber: { contains: search, mode: 'insensitive' } },
+                { issuingAuthority: { contains: search, mode: 'insensitive' } },
+              ],
+            },
+          },
+        ],
+      });
+    }
 
     const items = await prisma.archiveRecordAttachment.findMany({
-      where,
+      where: { AND: conditions },
       include: {
         record: {
           select: {
@@ -496,7 +598,10 @@ router.get('/records/version-approvals', async (req, res, next) => {
           },
         },
       },
-      orderBy: [{ createdAt: 'desc' }],
+      orderBy: [
+        { approvalRequestedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
       take: 500,
     });
 
@@ -718,6 +823,32 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
     }
 
     const nextVersion = Math.max(1, Number(latest?.version || currentAttachment.version || 1) + 1);
+    const approvalRoute = req.body?.approvalRoute === 'specific' ? 'specific' : 'pool';
+    const eligibleApprovers = await getArchiveApproverUsers(prisma, changedBy.id);
+
+    if (!eligibleApprovers.length) {
+      return res.status(409).json({
+        message: 'لا يوجد مستخدم آخر مخول باعتماد الأرشيف حاليًا. أضف معتمدًا آخر قبل إنشاء مسودة الإصدار.',
+      });
+    }
+
+    let assignedApprover = null;
+    if (approvalRoute === 'specific') {
+      const approverUserId = String(req.body?.approverUserId || '').trim();
+      assignedApprover = eligibleApprovers.find((item) => item.id === approverUserId) || null;
+
+      if (!assignedApprover) {
+        return res.status(400).json({
+          message: 'اختر معتمدًا محددًا صالحًا ومخولًا باعتماد الأرشيف.',
+        });
+      }
+    }
+
+    const approvalRequestedAt = new Date();
+    const approvalLabel =
+      approvalRoute === 'specific'
+        ? assignedApprover.name
+        : 'مجموعة معتمدي الأرشيف';
 
     const updatedRecord = await prisma.$transaction(async (tx) => {
       if (!currentAttachment.versionGroupId) {
@@ -727,7 +858,7 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
         });
       }
 
-      await tx.archiveRecordAttachment.create({
+      const draft = await tx.archiveRecordAttachment.create({
         data: {
           recordId: req.params.recordId,
           fileName: incoming.fileName,
@@ -740,11 +871,33 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
           versionGroupId,
           versionNote: incoming.versionNote,
           versionStatus: 'draft',
+          approvalRoute,
+          assignedApproverId: assignedApprover?.id || null,
+          assignedApproverName: assignedApprover?.name || null,
+          approvalRequestedAt,
           isCurrent: false,
           addedById: changedBy.id,
           addedBy: changedBy.name,
         },
       });
+
+      const recipients =
+        approvalRoute === 'specific'
+          ? [assignedApprover]
+          : eligibleApprovers;
+
+      if (recipients.length) {
+        await tx.archiveApprovalNotification.createMany({
+          data: recipients.map((recipient) => ({
+            recipientUserId: recipient.id,
+            recordId: req.params.recordId,
+            attachmentId: draft.id,
+            type: 'approval_requested',
+            title: `طلب اعتماد إصدار V${nextVersion}`,
+            message: `${record.archiveNumber} — ${record.title} — ${incoming.originalName || incoming.fileName}`,
+          })),
+        });
+      }
 
       await tx.archiveRecord.update({
         where: { id: req.params.recordId },
@@ -755,17 +908,21 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
         data: {
           recordId: req.params.recordId,
           action: 'attachment_version_added',
-          description: `إنشاء مسودة الإصدار ${nextVersion} للملف ${currentAttachment.originalName || currentAttachment.fileName} بانتظار الاعتماد`,
+          description: `إنشاء مسودة الإصدار ${nextVersion} للملف ${currentAttachment.originalName || currentAttachment.fileName} وإرسالها للاعتماد إلى ${approvalLabel}`,
           actorId: changedBy.id,
           actorName: changedBy.name,
           metadata: {
-            attachmentId: currentAttachment.id,
+            attachmentId: draft.id,
             versionGroupId,
             previousVersion: currentAttachment.version,
             newVersion: nextVersion,
             versionNote: incoming.versionNote || null,
             fileName: incoming.originalName || incoming.fileName,
             status: 'draft',
+            approvalRoute,
+            assignedApproverId: assignedApprover?.id || null,
+            assignedApproverName: assignedApprover?.name || null,
+            approvalRequestedAt: approvalRequestedAt.toISOString(),
           },
         },
       });
@@ -816,6 +973,17 @@ router.patch('/records/:recordId/attachments/:attachmentId/approve', async (req,
       });
     }
 
+    if (
+      draft.approvalRoute === 'specific' &&
+      draft.assignedApproverId &&
+      draft.assignedApproverId !== changedBy.id
+    ) {
+      return res.status(403).json({
+        message: `طلب الاعتماد موجه إلى ${draft.assignedApproverName || 'معتمد آخر'} ولا يمكن اعتماده من مستخدم آخر.`,
+        code: 'ARCHIVE_APPROVAL_ASSIGNED_TO_ANOTHER_USER',
+      });
+    }
+
     const versionGroupId = draft.versionGroupId || draft.id;
     const approvedAt = new Date();
 
@@ -853,6 +1021,27 @@ router.patch('/records/:recordId/attachments/:attachmentId/approve', async (req,
         where: { id: req.params.recordId },
         data: { updatedBy: changedBy.name },
       });
+
+      await tx.archiveApprovalNotification.updateMany({
+        where: {
+          attachmentId: draft.id,
+          readAt: null,
+        },
+        data: { readAt: approvedAt },
+      });
+
+      if (draft.addedById && draft.addedById !== changedBy.id) {
+        await tx.archiveApprovalNotification.create({
+          data: {
+            recipientUserId: draft.addedById,
+            recordId: req.params.recordId,
+            attachmentId: draft.id,
+            type: 'version_approved',
+            title: `تم اعتماد الإصدار V${draft.version}`,
+            message: `${record.archiveNumber} — ${record.title}`,
+          },
+        });
+      }
 
       await tx.archiveRecordActivity.create({
         data: {
@@ -907,6 +1096,17 @@ router.patch('/records/:recordId/attachments/:attachmentId/cancel', async (req, 
       return res.status(409).json({ message: 'يمكن إلغاء الإصدارات الموجودة بحالة مسودة فقط' });
     }
 
+    if (
+      draft.approvalRoute === 'specific' &&
+      draft.assignedApproverId &&
+      draft.assignedApproverId !== changedBy.id
+    ) {
+      return res.status(403).json({
+        message: `طلب الاعتماد موجه إلى ${draft.assignedApproverName || 'معتمد آخر'} ولا يمكن إلغاؤه من مستخدم آخر.`,
+        code: 'ARCHIVE_APPROVAL_ASSIGNED_TO_ANOTHER_USER',
+      });
+    }
+
     const cancelledAt = new Date();
     const updatedRecord = await prisma.$transaction(async (tx) => {
       await tx.archiveRecordAttachment.update({
@@ -925,6 +1125,27 @@ router.patch('/records/:recordId/attachments/:attachmentId/cancel', async (req, 
         where: { id: req.params.recordId },
         data: { updatedBy: changedBy.name },
       });
+
+      await tx.archiveApprovalNotification.updateMany({
+        where: {
+          attachmentId: draft.id,
+          readAt: null,
+        },
+        data: { readAt: cancelledAt },
+      });
+
+      if (draft.addedById && draft.addedById !== changedBy.id) {
+        await tx.archiveApprovalNotification.create({
+          data: {
+            recipientUserId: draft.addedById,
+            recordId: req.params.recordId,
+            attachmentId: draft.id,
+            type: 'version_cancelled',
+            title: `تم إلغاء مسودة الإصدار V${draft.version}`,
+            message: `${record.archiveNumber} — ${record.title}`,
+          },
+        });
+      }
 
       await tx.archiveRecordActivity.create({
         data: {

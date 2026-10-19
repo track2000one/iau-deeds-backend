@@ -229,6 +229,20 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canEdit';
   }
 
+  // Archive record maintenance on an existing record is an edit capability even
+  // when the HTTP route uses POST (add attachment, add version, merge records).
+  if (
+    moduleName === 'archive' &&
+    method === 'POST' &&
+    (
+      /\/records\/[^/]+\/attachments\/?(?:\?|$)/.test(requestPath) ||
+      /\/records\/[^/]+\/attachments\/[^/]+\/versions\/?(?:\?|$)/.test(requestPath) ||
+      /\/records\/merge\/?(?:\?|$)/.test(requestPath)
+    )
+  ) {
+    action = 'canEdit';
+  }
+
   // Archive version approval is intentionally separated from generic archive editing.
   // Users may upload/update archive files without being allowed to approve official versions.
   if (
@@ -245,6 +259,34 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     )
   ) {
     action = 'canApproveArchive';
+  }
+
+  // Choosing the approval destination is part of preparing/editing the archive version,
+  // not an approval action. This lets an uploader route the request without granting
+  // them the authority to approve it.
+  if (
+    moduleName === 'archive' &&
+    method === 'GET' &&
+    /\/records\/version-approvers\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canEdit';
+  }
+
+  // Reading/marking personal archive approval notifications is a view-level action.
+  if (
+    moduleName === 'archive' &&
+    (
+      (
+        method === 'GET' &&
+        /\/records\/version-approval-notifications\/?(?:\?|$)/.test(requestPath)
+      ) ||
+      (
+        method === 'PATCH' &&
+        /\/records\/version-approval-notifications\/read-all\/?(?:\?|$)/.test(requestPath)
+      )
+    )
+  ) {
+    action = 'canView';
   }
 
   // GIS bulk geometry changes are editing operations even though they use POST

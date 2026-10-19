@@ -793,6 +793,10 @@ model ArchiveRecordAttachment {
   versionGroupId   String?  @default(cuid())
   versionNote      String?
   versionStatus    String   @default("approved")
+  approvalRoute    String   @default("pool")
+  assignedApproverId   String?
+  assignedApproverName String?
+  approvalRequestedAt DateTime?
   approvedById     String?
   approvedByName   String?
   approvedAt       DateTime?
@@ -813,8 +817,28 @@ model ArchiveRecordAttachment {
   @@index([recordId])
   @@index([versionGroupId])
   @@index([versionStatus])
+  @@index([approvalRoute])
+  @@index([assignedApproverId])
   @@index([addedById])
   @@index([driveFileId])
+  @@index([createdAt])
+}
+
+model ArchiveApprovalNotification {
+  id              String   @id @default(cuid())
+  recipientUserId String
+  recordId        String
+  attachmentId    String
+  type            String   @default("approval_requested")
+  title           String
+  message         String?
+  readAt          DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([recipientUserId])
+  @@index([recordId])
+  @@index([attachmentId])
+  @@index([readAt])
   @@index([createdAt])
 }
 
