@@ -2230,6 +2230,10 @@ model TransactionFollowUpReportTemplate {
   assigneeUserId    String?
   orientation       String   @default("landscape")
   options           Json
+  accessMode        String   @default("all")
+  allowedUserIds    Json?
+  isDefault         Boolean  @default(false)
+  sortOrder         Int      @default(0)
   createdById       String
   createdByName     String?
   createdAt         DateTime @default(now())
@@ -2239,6 +2243,8 @@ model TransactionFollowUpReportTemplate {
   @@index([scope])
   @@index([createdById])
   @@index([assigneeUserId])
+  @@index([isDefault])
+  @@index([sortOrder])
   @@index([updatedAt])
 }
 
