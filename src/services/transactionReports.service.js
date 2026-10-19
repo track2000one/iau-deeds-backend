@@ -476,7 +476,7 @@ export const archiveTransactionExecutiveReport = async ({
 
   const summary = buildFlexibleReportSummary(report, templateSnapshot);
 
-  return prisma.transactionFollowUpReportArchive.create({
+  const archive = await prisma.transactionFollowUpReportArchive.create({
     data: {
       archiveName,
       notes,
@@ -501,6 +501,29 @@ export const archiveTransactionExecutiveReport = async ({
       updatedByName: generatedByName,
     },
   });
+
+  if (source === 'scheduled') {
+    await prisma.auditLog.create({
+      data: {
+        userId: generatedById,
+        username: generatedByName || 'النظام',
+        action: 'report_archive_create',
+        module: 'transaction_follow_up',
+        entity: 'report_archive',
+        entityId: archive.id,
+        entityLabel: archive.archiveName || archive.templateName || 'تقرير آلي',
+        description: 'إنشاء تقرير مؤرشف تلقائيًا بواسطة الجدولة',
+        details: {
+          source: 'scheduled',
+          scheduleId,
+          templateId,
+          reportType,
+        },
+      },
+    }).catch(() => null);
+  }
+
+  return archive;
 };
 
 export const syncScheduledTransactionReports = async (now = new Date()) => {
