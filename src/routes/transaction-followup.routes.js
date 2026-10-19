@@ -9072,9 +9072,9 @@ router.patch('/:id/archive', async (req, res, next) => {
     if (current.archivedAt) {
       return res.status(409).json({ message: 'المعاملة مؤرشفة مسبقًا' });
     }
-    if (current.status !== 'closed') {
+    if (!FINAL_STATUSES.includes(current.status)) {
       return res.status(409).json({
-        message: 'لا يمكن ترحيل المعاملة إلى الأرشفة إلا بعد اعتماد إنجازها وإقفالها.',
+        message: 'لا يمكن إنشاء نسخة أرشيفية إلا للمعاملة المنجزة أو المغلقة.',
       });
     }
 
@@ -9101,7 +9101,7 @@ router.patch('/:id/archive', async (req, res, next) => {
           fromAssigneeName: current.currentAssigneeName,
           toAssigneeUserId: current.currentAssigneeUserId,
           toAssigneeName: current.currentAssigneeName,
-          actionText: 'ترحيل المعاملة إلى الأرشفة',
+          actionText: 'إنشاء نسخة أرشيفية مع إبقاء المعاملة في نظام المتابعة',
           note: input.note || null,
           createdById: changedBy.id,
           createdByName: changedBy.name,
@@ -9184,7 +9184,6 @@ router.get('/', async (req, res, next) => {
     const mine = !supervisor || mineRequested;
 
     const where = {
-      archivedAt: null,
       ...(search
         ? {
             OR: [
