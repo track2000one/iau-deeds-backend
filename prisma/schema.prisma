@@ -791,6 +791,15 @@ model ArchiveRecordAttachment {
   version          Int      @default(1)
   versionGroupId   String?  @default(cuid())
   versionNote      String?
+  versionStatus    String   @default("approved")
+  approvedById     String?
+  approvedByName   String?
+  approvedAt       DateTime?
+  approvalNote     String?
+  cancelledById    String?
+  cancelledByName  String?
+  cancelledAt      DateTime?
+  cancelReason     String?
   isCurrent        Boolean  @default(true)
   addedBy          String?
   legacyDocumentId String?  @unique
@@ -801,6 +810,7 @@ model ArchiveRecordAttachment {
 
   @@index([recordId])
   @@index([versionGroupId])
+  @@index([versionStatus])
   @@index([driveFileId])
   @@index([createdAt])
 }
