@@ -646,6 +646,53 @@ const archiveModulePermission = (req) =>
 const isSupervisor = (req) =>
   req.authUser?.role === 'admin' || Boolean(modulePermission(req)?.canDelete);
 
+const templateAllowedUserIds = (template) =>
+  Array.isArray(template?.allowedUserIds)
+    ? template.allowedUserIds.map((value) => String(value))
+    : [];
+
+const canUseReportTemplate = (req, template) => {
+  if (!template) return false;
+  if (template.createdById === req.authUser?.id) return true;
+  if (template.scope !== 'shared') return false;
+  if (isSupervisor(req)) return true;
+  if (template.accessMode !== 'selected') return true;
+  return templateAllowedUserIds(template).includes(req.authUser?.id);
+};
+
+const normalizeTemplateAllowedUserIds = async (inputIds = []) => {
+  const ids = Array.from(new Set(
+    (Array.isArray(inputIds) ? inputIds : [])
+      .map((value) => String(value).trim())
+      .filter(Boolean),
+  ));
+  if (!ids.length) return [];
+
+  const users = await prisma.appUser.findMany({
+    where: {
+      id: { in: ids },
+      isActive: true,
+      OR: [
+        { role: 'admin' },
+        { permissions: { some: { module: 'transaction_follow_up', canView: true } } },
+      ],
+    },
+    select: { id: true },
+  });
+
+  return users.map((user) => user.id);
+};
+
+const nextTemplateSortOrder = async (scope, createdById) => {
+  const aggregate = await prisma.transactionFollowUpReportTemplate.aggregate({
+    where: scope === 'shared'
+      ? { scope: 'shared' }
+      : { scope: 'personal', createdById },
+    _max: { sortOrder: true },
+  });
+  return Number(aggregate._max.sortOrder || 0) + 10;
+};
+
 const canViewTransactionArchive = (req) =>
   req.authUser?.role === 'admin' || Boolean(archiveModulePermission(req)?.canView);
 
