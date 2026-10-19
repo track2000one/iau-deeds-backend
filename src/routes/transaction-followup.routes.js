@@ -449,6 +449,20 @@ const reportTemplateSchema = z.object({
   assigneeUserId: nullableText(100),
   orientation: z.enum(['portrait', 'landscape']).default('landscape'),
   options: reportTemplateOptionsSchema,
+  accessMode: z.enum(['all', 'selected']).default('all'),
+  allowedUserIds: z.array(z.string().trim().min(1).max(100)).max(200).default([]),
+  isDefault: z.boolean().default(false),
+  sortOrder: z.coerce.number().int().min(0).max(100000).optional(),
+});
+
+const reportTemplateReorderSchema = z.object({
+  scope: z.enum(['personal', 'shared']),
+  orderedIds: z.array(z.string().trim().min(1)).min(1).max(200),
+});
+
+const reportTemplateCloneSchema = z.object({
+  templateId: z.string().trim().min(1),
+  name: z.string().trim().min(2).max(200).optional(),
 });
 
 const backupScheduleSchema = z.object({
