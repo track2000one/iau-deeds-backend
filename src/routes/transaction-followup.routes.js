@@ -7655,7 +7655,13 @@ router.post('/reports/schedules', async (req, res, next) => {
   try {
     const input = reportScheduleSchema.parse(req.body);
     const supervisor = isSupervisor(req);
-    const requestedAssignee = supervisor ? input.assigneeUserId || null : req.authUser.id;
+    const template = await resolveScheduleTemplate(req, input.templateId || null);
+    const templateSnapshot = reportTemplateScheduleSnapshot(template);
+    const templateAssigneeId =
+      template?.scope === 'personal' ? template.assigneeUserId || null : null;
+    const requestedAssignee = supervisor
+      ? input.assigneeUserId || templateAssigneeId || null
+      : req.authUser.id;
     const assignee = requestedAssignee ? await resolveAssignee(requestedAssignee) : null;
     const createdBy = actor(req);
 
@@ -7666,6 +7672,11 @@ router.post('/reports/schedules', async (req, res, next) => {
       runHour: input.runHour,
     };
 
+    const templateOrganizationalUnit =
+      template?.options && typeof template.options === 'object'
+        ? template.options.organizationalUnit || null
+        : null;
+
     const row = await prisma.transactionFollowUpReportSchedule.create({
       data: {
         name: input.name,
@@ -7673,8 +7684,12 @@ router.post('/reports/schedules', async (req, res, next) => {
         dayOfWeek: draft.dayOfWeek,
         dayOfMonth: draft.dayOfMonth,
         runHour: input.runHour,
+        organizationalUnit: templateOrganizationalUnit || null,
         assigneeUserId: assignee?.id || null,
         assigneeName: assignee?.username || null,
+        templateId: template?.id || null,
+        templateName: template?.name || null,
+        templateSnapshot,
         isActive: input.isActive,
         nextRunAt: input.isActive ? calculateNextTransactionReportRun(draft) : null,
         createdById: createdBy.id,
@@ -7700,9 +7715,28 @@ router.patch('/reports/schedules/:id', async (req, res, next) => {
       return res.status(403).json({ message: 'لا يمكنك تعديل هذه الجدولة' });
     }
 
+    const nextTemplateId =
+      input.templateId !== undefined
+        ? input.templateId || null
+        : current.templateId || null;
+    const template = nextTemplateId
+      ? await resolveScheduleTemplate(req, nextTemplateId)
+      : null;
+    const templateSnapshot = template
+      ? reportTemplateScheduleSnapshot(template)
+      : input.templateId === null
+        ? null
+        : current.templateSnapshot;
+    const templateAssigneeId =
+      template?.scope === 'personal' ? template.assigneeUserId || null : null;
+
     const nextFrequency = input.frequency || current.frequency;
     const requestedAssignee = supervisor
-      ? (input.assigneeUserId !== undefined ? input.assigneeUserId || null : current.assigneeUserId)
+      ? (
+          input.assigneeUserId !== undefined
+            ? input.assigneeUserId || null
+            : templateAssigneeId || current.assigneeUserId
+        )
       : req.authUser.id;
     const assignee = requestedAssignee ? await resolveAssignee(requestedAssignee) : null;
     const isActive = input.isActive ?? current.isActive;
@@ -7717,6 +7751,11 @@ router.patch('/reports/schedules/:id', async (req, res, next) => {
       runHour: input.runHour ?? current.runHour,
     };
 
+    const templateOrganizationalUnit =
+      template?.options && typeof template.options === 'object'
+        ? template.options.organizationalUnit || null
+        : current.organizationalUnit;
+
     const row = await prisma.transactionFollowUpReportSchedule.update({
       where: { id: current.id },
       data: {
@@ -7725,8 +7764,12 @@ router.patch('/reports/schedules/:id', async (req, res, next) => {
         dayOfWeek: nextSchedule.dayOfWeek,
         dayOfMonth: nextSchedule.dayOfMonth,
         runHour: nextSchedule.runHour,
+        organizationalUnit: templateOrganizationalUnit || null,
         assigneeUserId: assignee?.id || null,
         assigneeName: assignee?.username || null,
+        templateId: template?.id || null,
+        templateName: template?.name || null,
+        templateSnapshot,
         isActive,
         nextRunAt: isActive ? calculateNextTransactionReportRun(nextSchedule) : null,
       },
