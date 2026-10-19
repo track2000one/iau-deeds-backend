@@ -49,13 +49,26 @@ import { notFound, errorHandler } from './middleware/errorHandler.js';
 
 export const app = express();
 
-const allowedOrigin = process.env.FRONTEND_URL || '*';
+const configuredOrigins = [
+  ...(process.env.FRONTEND_URL || '').split(','),
+  ...(process.env.CORS_ORIGINS || '').split(','),
+]
+  .map((value) => value.trim().replace(/\/$/, ''))
+  .filter(Boolean);
+
+const allowAnyOrigin = configuredOrigins.includes('*') || configuredOrigins.length === 0;
 
 app.set('trust proxy', true);
 app.use(helmet());
 app.use(
   cors({
-    origin: allowedOrigin === '*' ? true : allowedOrigin,
+    origin(origin, callback) {
+      if (!origin || allowAnyOrigin || configuredOrigins.includes(origin.replace(/\/$/, ''))) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error('Origin not allowed by CORS'));
+    },
     credentials: false,
   })
 );
