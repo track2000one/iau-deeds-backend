@@ -230,6 +230,7 @@ router.get('/transactions', async (req, res, next) => {
     const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
     const pageSize = Math.min(500, Math.max(10, Number.parseInt(String(req.query.pageSize || '100'), 10) || 100));
     const search = String(req.query.search || '').trim();
+    const includeAttachments = String(req.query.includeAttachments || '').toLowerCase() === 'true';
 
     const where = {
       archivedAt: { not: null },
@@ -247,7 +248,7 @@ router.get('/transactions', async (req, res, next) => {
         : {}),
     };
 
-    const [total, items] = await Promise.all([
+    const [total, rows] = await Promise.all([
       prisma.transactionFollowUp.count({ where }),
       prisma.transactionFollowUp.findMany({
         where,
@@ -256,6 +257,30 @@ router.get('/transactions', async (req, res, next) => {
         take: pageSize,
       }),
     ]);
+
+    let items = rows;
+    if (includeAttachments && rows.length) {
+      const attachments = await prisma.attachment.findMany({
+        where: {
+          entityType: 'transaction_follow_up',
+          entityId: { in: rows.map((item) => item.id) },
+        },
+        orderBy: [{ entityId: 'asc' }, { createdAt: 'desc' }],
+      });
+
+      const grouped = new Map();
+      attachments.forEach((attachment) => {
+        const bucket = grouped.get(attachment.entityId) || [];
+        bucket.push(attachment);
+        grouped.set(attachment.entityId, bucket);
+      });
+
+      items = rows.map((item) => ({
+        ...item,
+        attachments: grouped.get(item.id) || [],
+        attachmentCount: (grouped.get(item.id) || []).length,
+      }));
+    }
 
     res.json({
       items,
@@ -314,9 +339,9 @@ router.post('/transactions/:id', async (req, res, next) => {
     if (current.archivedAt) {
       return res.status(409).json({ message: 'المعاملة مؤرشفة مسبقًا' });
     }
-    if (current.status !== 'closed') {
+    if (!['completed', 'closed'].includes(current.status)) {
       return res.status(409).json({
-        message: 'لا يمكن ترحيل المعاملة إلى الأرشفة إلا بعد اعتماد إنجازها وإقفالها.',
+        message: 'لا يمكن إنشاء نسخة أرشيفية إلا للمعاملة المنجزة أو المغلقة.',
       });
     }
 
@@ -345,7 +370,7 @@ router.post('/transactions/:id', async (req, res, next) => {
           fromAssigneeName: current.currentAssigneeName,
           toAssigneeUserId: current.currentAssigneeUserId,
           toAssigneeName: current.currentAssigneeName,
-          actionText: 'ترحيل المعاملة إلى الأرشفة',
+          actionText: 'إنشاء نسخة أرشيفية مع إبقاء المعاملة في نظام المتابعة',
           note,
           createdById: changedBy.id,
           createdByName: changedBy.name,
