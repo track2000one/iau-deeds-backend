@@ -7101,6 +7101,7 @@ router.post('/reports/templates', async (req, res, next) => {
     const existing = await prisma.transactionFollowUpReportTemplate.findFirst({
       where: {
         createdById: createdBy.id,
+        scope: input.scope,
         name: input.name,
       },
     });
@@ -7235,6 +7236,7 @@ router.patch('/reports/templates/:id', async (req, res, next) => {
       const duplicate = await prisma.transactionFollowUpReportTemplate.findFirst({
         where: {
           createdById: current.createdById,
+          scope: nextScope,
           name: input.name,
           NOT: { id: current.id },
         },
@@ -7376,6 +7378,7 @@ router.post('/reports/templates/clone', async (req, res, next) => {
       await prisma.transactionFollowUpReportTemplate.findFirst({
         where: {
           createdById: req.authUser.id,
+          scope: 'personal',
           name: nextName,
         },
         select: { id: true },
