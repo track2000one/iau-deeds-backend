@@ -182,6 +182,24 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canPrint';
   }
 
+  // Export events are part of the report/print workspace.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'POST' &&
+    /\/reports\/archives\/[^/]+\/export-event\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canPrint';
+  }
+
+  // Archive governance (finalization, deletion protection and retention) is supervisory.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'PATCH' &&
+    /\/reports\/archives\/[^/]+\/governance\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canDelete';
+  }
+
   // Editing archive labels, notes and tags belongs to the reporting workspace.
   if (
     moduleName === 'transaction_follow_up' &&
