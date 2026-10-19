@@ -493,37 +493,46 @@ router.get('/records/version-approvals', async (req, res, next) => {
     const confidentiality = String(req.query.confidentiality || '').trim();
     const addedBy = String(req.query.addedBy || '').trim();
 
-    const where = {
-      record: { deletedAt: null },
-      ...(status !== 'all' ? { versionStatus: status } : {}),
-      ...(addedBy ? { addedBy: { contains: addedBy, mode: 'insensitive' } } : {}),
-      ...(confidentiality
-        ? { record: { deletedAt: null, confidentiality } }
-        : {}),
-      ...(search
-        ? {
-            OR: [
-              { originalName: { contains: search, mode: 'insensitive' } },
-              { fileName: { contains: search, mode: 'insensitive' } },
-              { addedBy: { contains: search, mode: 'insensitive' } },
-              {
-                record: {
-                  OR: [
-                    { archiveNumber: { contains: search, mode: 'insensitive' } },
-                    { title: { contains: search, mode: 'insensitive' } },
-                    { category: { contains: search, mode: 'insensitive' } },
-                    { documentNumber: { contains: search, mode: 'insensitive' } },
-                    { issuingAuthority: { contains: search, mode: 'insensitive' } },
-                  ],
-                },
-              },
-            ],
-          }
-        : {}),
-    };
+    const conditions = [
+      { record: { deletedAt: null } },
+      ...(status !== 'all' ? [{ versionStatus: status }] : []),
+      ...(addedBy ? [{ addedBy: { contains: addedBy, mode: 'insensitive' } }] : []),
+      ...(confidentiality ? [{ record: { deletedAt: null, confidentiality } }] : []),
+    ];
+
+    if (req.authUser?.role !== 'admin') {
+      conditions.push({
+        OR: [
+          { approvalRoute: 'pool' },
+          { assignedApproverId: req.authUser?.id || '__none__' },
+        ],
+      });
+    }
+
+    if (search) {
+      conditions.push({
+        OR: [
+          { originalName: { contains: search, mode: 'insensitive' } },
+          { fileName: { contains: search, mode: 'insensitive' } },
+          { addedBy: { contains: search, mode: 'insensitive' } },
+          { assignedApproverName: { contains: search, mode: 'insensitive' } },
+          {
+            record: {
+              OR: [
+                { archiveNumber: { contains: search, mode: 'insensitive' } },
+                { title: { contains: search, mode: 'insensitive' } },
+                { category: { contains: search, mode: 'insensitive' } },
+                { documentNumber: { contains: search, mode: 'insensitive' } },
+                { issuingAuthority: { contains: search, mode: 'insensitive' } },
+              ],
+            },
+          },
+        ],
+      });
+    }
 
     const items = await prisma.archiveRecordAttachment.findMany({
-      where,
+      where: { AND: conditions },
       include: {
         record: {
           select: {
@@ -539,7 +548,10 @@ router.get('/records/version-approvals', async (req, res, next) => {
           },
         },
       },
-      orderBy: [{ createdAt: 'desc' }],
+      orderBy: [
+        { approvalRequestedAt: 'desc' },
+        { createdAt: 'desc' },
+      ],
       take: 500,
     });
 
