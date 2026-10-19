@@ -802,6 +802,7 @@ model ArchiveRecordAttachment {
   cancelledAt      DateTime?
   cancelReason     String?
   isCurrent        Boolean  @default(true)
+  addedById        String?
   addedBy          String?
   legacyDocumentId String?  @unique
   createdAt        DateTime @default(now())
@@ -812,6 +813,7 @@ model ArchiveRecordAttachment {
   @@index([recordId])
   @@index([versionGroupId])
   @@index([versionStatus])
+  @@index([addedById])
   @@index([driveFileId])
   @@index([createdAt])
 }
