@@ -182,6 +182,15 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canPrint';
   }
 
+  // Editing archive labels, notes and tags belongs to the reporting workspace.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    method === 'PATCH' &&
+    /\/reports\/archives\/[^/]+\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canPrint';
+  }
+
   // Saved report templates are part of the reporting workspace. Users with
   // print/report permission may create, update and delete their own templates;
   // shared-template governance is enforced inside the route.
