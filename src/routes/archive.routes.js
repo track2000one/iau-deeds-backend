@@ -96,6 +96,7 @@ const serializeRecord = (record) => {
     ...record,
     attachmentCount: effectiveCurrent.length,
     attachmentVersionCount: attachments.length,
+    pendingVersionCount: attachments.filter((item) => item.versionStatus === 'draft').length,
     totalFileSize: effectiveCurrent.reduce((sum, item) => sum + Number(item.fileSize || 0), 0),
     fileName: primary?.fileName || '',
     originalName: primary?.originalName || '',
@@ -621,10 +622,30 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
     const latest = await prisma.archiveRecordAttachment.findFirst({
       where: {
         recordId: req.params.recordId,
-        versionGroupId,
+        OR: [
+          { versionGroupId },
+          { id: currentAttachment.id },
+        ],
       },
       orderBy: [{ version: 'desc' }, { createdAt: 'desc' }],
     });
+
+    const existingDraft = await prisma.archiveRecordAttachment.findFirst({
+      where: {
+        recordId: req.params.recordId,
+        versionStatus: 'draft',
+        OR: [
+          { versionGroupId },
+          { id: currentAttachment.id },
+        ],
+      },
+    });
+    if (existingDraft) {
+      return res.status(409).json({
+        message: 'يوجد إصدار مسودة بانتظار الاعتماد لهذا الملف. اعتمده أو ألغِه قبل إنشاء إصدار جديد.',
+      });
+    }
+
     const nextVersion = Math.max(1, Number(latest?.version || currentAttachment.version || 1) + 1);
 
     const updatedRecord = await prisma.$transaction(async (tx) => {
@@ -634,14 +655,6 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
           data: { versionGroupId },
         });
       }
-
-      await tx.archiveRecordAttachment.updateMany({
-        where: {
-          recordId: req.params.recordId,
-          versionGroupId,
-        },
-        data: { isCurrent: false },
-      });
 
       await tx.archiveRecordAttachment.create({
         data: {
@@ -655,7 +668,8 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
           version: nextVersion,
           versionGroupId,
           versionNote: incoming.versionNote,
-          isCurrent: true,
+          versionStatus: 'draft',
+          isCurrent: false,
           addedBy: incoming.addedBy || changedBy.name,
         },
       });
@@ -669,7 +683,7 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
         data: {
           recordId: req.params.recordId,
           action: 'attachment_version_added',
-          description: `إضافة إصدار ${nextVersion} للملف ${currentAttachment.originalName || currentAttachment.fileName}`,
+          description: `إنشاء مسودة الإصدار ${nextVersion} للملف ${currentAttachment.originalName || currentAttachment.fileName} بانتظار الاعتماد`,
           actorId: changedBy.id,
           actorName: changedBy.name,
           metadata: {
@@ -679,6 +693,7 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
             newVersion: nextVersion,
             versionNote: incoming.versionNote || null,
             fileName: incoming.originalName || incoming.fileName,
+            status: 'draft',
           },
         },
       });
@@ -690,6 +705,161 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
     });
 
     res.status(201).json(serializeRecord(updatedRecord));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/records/:recordId/attachments/:attachmentId/approve', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const approvalNote = cleanString(req.body?.note);
+
+    const record = await prisma.archiveRecord.findFirst({
+      where: { id: req.params.recordId, deletedAt: null },
+    });
+    if (!record) return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
+
+    const draft = await prisma.archiveRecordAttachment.findFirst({
+      where: {
+        id: req.params.attachmentId,
+        recordId: req.params.recordId,
+      },
+    });
+    if (!draft) return res.status(404).json({ message: 'إصدار الملف غير موجود' });
+    if (draft.versionStatus !== 'draft') {
+      return res.status(409).json({ message: 'يمكن اعتماد الإصدارات الموجودة بحالة مسودة فقط' });
+    }
+
+    const versionGroupId = draft.versionGroupId || draft.id;
+    const approvedAt = new Date();
+
+    const updatedRecord = await prisma.$transaction(async (tx) => {
+      await tx.archiveRecordAttachment.updateMany({
+        where: {
+          recordId: req.params.recordId,
+          versionGroupId,
+          isCurrent: true,
+        },
+        data: {
+          isCurrent: false,
+          versionStatus: 'superseded',
+        },
+      });
+
+      await tx.archiveRecordAttachment.update({
+        where: { id: draft.id },
+        data: {
+          versionGroupId,
+          versionStatus: 'approved',
+          isCurrent: true,
+          approvedById: changedBy.id,
+          approvedByName: changedBy.name,
+          approvedAt,
+          approvalNote,
+          cancelledById: null,
+          cancelledByName: null,
+          cancelledAt: null,
+          cancelReason: null,
+        },
+      });
+
+      await tx.archiveRecord.update({
+        where: { id: req.params.recordId },
+        data: { updatedBy: changedBy.name },
+      });
+
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: req.params.recordId,
+          action: 'attachment_version_approved',
+          description: `اعتماد الإصدار ${draft.version} للملف ${draft.originalName || draft.fileName} كنسخة رسمية حالية`,
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+          metadata: {
+            attachmentId: draft.id,
+            versionGroupId,
+            version: draft.version,
+            approvalNote,
+          },
+        },
+      });
+
+      return tx.archiveRecord.findUnique({
+        where: { id: req.params.recordId },
+        include: recordInclude,
+      });
+    });
+
+    res.json(serializeRecord(updatedRecord));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/records/:recordId/attachments/:attachmentId/cancel', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const cancelReason = cleanString(req.body?.reason);
+
+    const record = await prisma.archiveRecord.findFirst({
+      where: { id: req.params.recordId, deletedAt: null },
+    });
+    if (!record) return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
+
+    const draft = await prisma.archiveRecordAttachment.findFirst({
+      where: {
+        id: req.params.attachmentId,
+        recordId: req.params.recordId,
+      },
+    });
+    if (!draft) return res.status(404).json({ message: 'إصدار الملف غير موجود' });
+    if (draft.versionStatus !== 'draft') {
+      return res.status(409).json({ message: 'يمكن إلغاء الإصدارات الموجودة بحالة مسودة فقط' });
+    }
+
+    const cancelledAt = new Date();
+    const updatedRecord = await prisma.$transaction(async (tx) => {
+      await tx.archiveRecordAttachment.update({
+        where: { id: draft.id },
+        data: {
+          versionStatus: 'cancelled',
+          isCurrent: false,
+          cancelledById: changedBy.id,
+          cancelledByName: changedBy.name,
+          cancelledAt,
+          cancelReason,
+        },
+      });
+
+      await tx.archiveRecord.update({
+        where: { id: req.params.recordId },
+        data: { updatedBy: changedBy.name },
+      });
+
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: req.params.recordId,
+          action: 'attachment_version_cancelled',
+          description: `إلغاء مسودة الإصدار ${draft.version} للملف ${draft.originalName || draft.fileName}`,
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+          metadata: {
+            attachmentId: draft.id,
+            versionGroupId: draft.versionGroupId,
+            version: draft.version,
+            cancelReason,
+          },
+        },
+      });
+
+      return tx.archiveRecord.findUnique({
+        where: { id: req.params.recordId },
+        include: recordInclude,
+      });
+    });
+
+    res.json(serializeRecord(updatedRecord));
   } catch (error) {
     next(error);
   }
