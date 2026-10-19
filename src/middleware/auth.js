@@ -229,6 +229,20 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canEdit';
   }
 
+  // Archive record maintenance on an existing record is an edit capability even
+  // when the HTTP route uses POST (add attachment, add version, merge records).
+  if (
+    moduleName === 'archive' &&
+    method === 'POST' &&
+    (
+      /\/records\/[^/]+\/attachments\/?(?:\?|$)/.test(requestPath) ||
+      /\/records\/[^/]+\/attachments\/[^/]+\/versions\/?(?:\?|$)/.test(requestPath) ||
+      /\/records\/merge\/?(?:\?|$)/.test(requestPath)
+    )
+  ) {
+    action = 'canEdit';
+  }
+
   // Archive version approval is intentionally separated from generic archive editing.
   // Users may upload/update archive files without being allowed to approve official versions.
   if (
