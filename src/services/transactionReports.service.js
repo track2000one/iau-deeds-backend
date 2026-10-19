@@ -108,9 +108,15 @@ const buildFlexibleReportSummary = (report, templateSnapshot) => {
       ? options.categories
       : ['completed', 'overdue', 'waiting_response', 'needs_follow_up'],
   );
+  const excludedIds = new Set(
+    Array.isArray(options.excludedIds)
+      ? options.excludedIds.map((value) => String(value))
+      : [],
+  );
   const search = String(options.search || '').trim().toLocaleLowerCase('ar');
 
   const rows = [...overdueRows, ...statusRows].filter((row) => {
+    if (excludedIds.has(row.id)) return false;
     if (!categories.has(row.category)) return false;
     if (options.priority && row.priority !== options.priority) return false;
     if (
