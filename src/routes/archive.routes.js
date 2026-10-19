@@ -1,5 +1,6 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
+import { downloadGoogleDriveFile } from '../services/googleDrive.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -289,6 +290,51 @@ router.get('/transactions', async (req, res, next) => {
       pageSize,
       totalPages: total ? Math.ceil(total / pageSize) : 0,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/transactions/:transactionId/attachments/:attachmentId/content', async (req, res, next) => {
+  try {
+    const transaction = await prisma.transactionFollowUp.findFirst({
+      where: {
+        id: req.params.transactionId,
+        archivedAt: { not: null },
+      },
+      select: { id: true },
+    });
+
+    if (!transaction) {
+      return res.status(404).json({ message: 'المعاملة المؤرشفة غير موجودة' });
+    }
+
+    const attachment = await prisma.attachment.findFirst({
+      where: {
+        id: req.params.attachmentId,
+        entityType: 'transaction_follow_up',
+        entityId: req.params.transactionId,
+      },
+    });
+
+    if (!attachment) {
+      return res.status(404).json({ message: 'المرفق غير موجود' });
+    }
+
+    if (!attachment.driveFileId) {
+      return res.status(409).json({ message: 'المرفق لا يحتوي على معرف ملف صالح' });
+    }
+
+    const file = await downloadGoogleDriveFile(attachment.driveFileId);
+    const safeName = encodeURIComponent(
+      attachment.title || file.fileName || 'attachment'
+    );
+
+    res.setHeader('Content-Type', file.mimeType || attachment.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${safeName}`);
+    if (file.size) res.setHeader('Content-Length', String(file.size));
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.send(file.buffer);
   } catch (error) {
     next(error);
   }
