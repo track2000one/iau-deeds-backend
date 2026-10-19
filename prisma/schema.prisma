@@ -2217,7 +2217,7 @@ model TransactionFollowUpReportArchive {
   generatedById    String?
   generatedByName  String?
   createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  updatedAt        DateTime @default(now()) @updatedAt
 
   schedule         TransactionFollowUpReportSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
 
