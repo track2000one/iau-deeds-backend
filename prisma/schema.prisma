@@ -789,6 +789,8 @@ model ArchiveRecordAttachment {
   driveUrl         String
   driveFileId      String?
   version          Int      @default(1)
+  versionGroupId   String   @default(cuid())
+  versionNote      String?
   isCurrent        Boolean  @default(true)
   addedBy          String?
   legacyDocumentId String?  @unique
@@ -798,6 +800,7 @@ model ArchiveRecordAttachment {
   record ArchiveRecord @relation(fields: [recordId], references: [id], onDelete: Cascade)
 
   @@index([recordId])
+  @@index([versionGroupId])
   @@index([driveFileId])
   @@index([createdAt])
 }

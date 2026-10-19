@@ -68,23 +68,35 @@ const sanitizeAttachmentPayload = (body = {}) => ({
   driveUrl: cleanString(body.driveUrl),
   driveFileId: cleanString(body.driveFileId),
   version: Math.max(1, Number.parseInt(String(body.version || '1'), 10) || 1),
+  versionGroupId: cleanString(body.versionGroupId) || undefined,
+  versionNote: cleanString(body.versionNote),
   isCurrent: body.isCurrent !== false,
   addedBy: cleanString(body.addedBy),
   legacyDocumentId: cleanString(body.legacyDocumentId),
 });
 
 const recordInclude = {
-  attachments: { orderBy: { createdAt: 'desc' } },
+  attachments: {
+    orderBy: [
+      { isCurrent: 'desc' },
+      { versionGroupId: 'asc' },
+      { version: 'desc' },
+      { createdAt: 'desc' },
+    ],
+  },
   activities: { orderBy: { createdAt: 'desc' }, take: 100 },
 };
 
 const serializeRecord = (record) => {
   const attachments = Array.isArray(record.attachments) ? record.attachments : [];
-  const primary = attachments.find((item) => item.isCurrent) || attachments[0] || null;
+  const currentAttachments = attachments.filter((item) => item.isCurrent);
+  const effectiveCurrent = currentAttachments.length ? currentAttachments : attachments.slice(0, 1);
+  const primary = effectiveCurrent[0] || attachments[0] || null;
   return {
     ...record,
-    attachmentCount: attachments.length,
-    totalFileSize: attachments.reduce((sum, item) => sum + Number(item.fileSize || 0), 0),
+    attachmentCount: effectiveCurrent.length,
+    attachmentVersionCount: attachments.length,
+    totalFileSize: effectiveCurrent.reduce((sum, item) => sum + Number(item.fileSize || 0), 0),
     fileName: primary?.fileName || '',
     originalName: primary?.originalName || '',
     mimeType: primary?.mimeType || '',
@@ -575,6 +587,102 @@ router.post('/records/:id/attachments', async (req, res, next) => {
     });
 
     res.status(201).json(serializeRecord(record));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/records/:recordId/attachments/:attachmentId/versions', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const record = await prisma.archiveRecord.findFirst({
+      where: { id: req.params.recordId, deletedAt: null },
+    });
+    if (!record) {
+      return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
+    }
+
+    const currentAttachment = await prisma.archiveRecordAttachment.findFirst({
+      where: {
+        id: req.params.attachmentId,
+        recordId: req.params.recordId,
+      },
+    });
+    if (!currentAttachment) {
+      return res.status(404).json({ message: 'الملف المرفق غير موجود' });
+    }
+
+    const incoming = sanitizeAttachmentPayload(req.body || {});
+    if (!incoming.driveUrl) {
+      return res.status(400).json({ message: 'بيانات الإصدار الجديد غير مكتملة' });
+    }
+
+    const versionGroupId = currentAttachment.versionGroupId || currentAttachment.id;
+    const latest = await prisma.archiveRecordAttachment.findFirst({
+      where: {
+        recordId: req.params.recordId,
+        versionGroupId,
+      },
+      orderBy: [{ version: 'desc' }, { createdAt: 'desc' }],
+    });
+    const nextVersion = Math.max(1, Number(latest?.version || currentAttachment.version || 1) + 1);
+
+    const updatedRecord = await prisma.$transaction(async (tx) => {
+      await tx.archiveRecordAttachment.updateMany({
+        where: {
+          recordId: req.params.recordId,
+          versionGroupId,
+        },
+        data: { isCurrent: false },
+      });
+
+      await tx.archiveRecordAttachment.create({
+        data: {
+          recordId: req.params.recordId,
+          fileName: incoming.fileName,
+          originalName: incoming.originalName,
+          mimeType: incoming.mimeType,
+          fileSize: incoming.fileSize,
+          driveUrl: incoming.driveUrl,
+          driveFileId: incoming.driveFileId,
+          version: nextVersion,
+          versionGroupId,
+          versionNote: incoming.versionNote,
+          isCurrent: true,
+          addedBy: incoming.addedBy || changedBy.name,
+        },
+      });
+
+      await tx.archiveRecord.update({
+        where: { id: req.params.recordId },
+        data: { updatedBy: changedBy.name },
+      });
+
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: req.params.recordId,
+          action: 'attachment_version_added',
+          description: `إضافة إصدار ${nextVersion} للملف ${currentAttachment.originalName || currentAttachment.fileName}`,
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+          metadata: {
+            attachmentId: currentAttachment.id,
+            versionGroupId,
+            previousVersion: currentAttachment.version,
+            newVersion: nextVersion,
+            versionNote: incoming.versionNote || null,
+            fileName: incoming.originalName || incoming.fileName,
+          },
+        },
+      });
+
+      return tx.archiveRecord.findUnique({
+        where: { id: req.params.recordId },
+        include: recordInclude,
+      });
+    });
+
+    res.status(201).json(serializeRecord(updatedRecord));
   } catch (error) {
     next(error);
   }
