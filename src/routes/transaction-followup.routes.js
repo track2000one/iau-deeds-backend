@@ -7313,6 +7313,105 @@ router.patch('/reports/templates/:id', async (req, res, next) => {
   }
 });
 
+router.post('/reports/templates/reorder', async (req, res, next) => {
+  try {
+    const input = reportTemplateReorderSchema.parse(req.body);
+    const supervisor = isSupervisor(req);
+
+    if (input.scope === 'shared' && !supervisor) {
+      return res.status(403).json({
+        message: 'ترتيب القوالب العامة متاح للمستخدم الإشرافي فقط',
+      });
+    }
+
+    const rows = await prisma.transactionFollowUpReportTemplate.findMany({
+      where: input.scope === 'shared'
+        ? { id: { in: input.orderedIds }, scope: 'shared' }
+        : {
+            id: { in: input.orderedIds },
+            scope: 'personal',
+            createdById: req.authUser.id,
+          },
+      select: { id: true },
+    });
+
+    if (rows.length !== input.orderedIds.length) {
+      return res.status(400).json({
+        message: 'قائمة ترتيب القوالب تحتوي على عناصر غير مسموح بها',
+      });
+    }
+
+    await prisma.$transaction(
+      input.orderedIds.map((id, index) =>
+        prisma.transactionFollowUpReportTemplate.update({
+          where: { id },
+          data: { sortOrder: (index + 1) * 10 },
+        }),
+      ),
+    );
+
+    res.json({ updated: input.orderedIds.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reports/templates/clone', async (req, res, next) => {
+  try {
+    const input = reportTemplateCloneSchema.parse(req.body);
+    const source = await prisma.transactionFollowUpReportTemplate.findUnique({
+      where: { id: input.templateId },
+    });
+    if (!source) {
+      return res.status(404).json({ message: 'قالب التقرير غير موجود' });
+    }
+    if (!canUseReportTemplate(req, source)) {
+      return res.status(403).json({ message: 'لا يمكنك استخدام هذا القالب' });
+    }
+
+    const baseName = input.name || `${source.name} - نسخة شخصية`;
+    let nextName = baseName;
+    let suffix = 2;
+    while (
+      await prisma.transactionFollowUpReportTemplate.findFirst({
+        where: {
+          createdById: req.authUser.id,
+          name: nextName,
+        },
+        select: { id: true },
+      })
+    ) {
+      nextName = `${baseName} (${suffix})`;
+      suffix += 1;
+    }
+
+    const sortOrder = await nextTemplateSortOrder('personal', req.authUser.id);
+    const createdBy = actor(req);
+    const row = await prisma.transactionFollowUpReportTemplate.create({
+      data: {
+        name: nextName,
+        scope: 'personal',
+        reportMode: source.reportMode,
+        customFrom: source.customFrom,
+        customTo: source.customTo,
+        assigneeUserId: null,
+        orientation: source.orientation,
+        options: source.options,
+        accessMode: 'all',
+        allowedUserIds: [],
+        isDefault: false,
+        sortOrder,
+        createdById: req.authUser.id,
+        createdByName: createdBy.name,
+      },
+    });
+
+    res.status(201).json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.delete('/reports/templates/:id', async (req, res, next) => {
   try {
     const current = await prisma.transactionFollowUpReportTemplate.findUnique({
