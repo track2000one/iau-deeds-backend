@@ -400,6 +400,19 @@ const reportArchiveMetadataSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(80)).max(30).default([]),
 });
 
+const reportArchiveGovernanceSchema = z.object({
+  governanceStatus: z.enum(['draft', 'final']).optional(),
+  isPinned: z.boolean().optional(),
+  isDeletionProtected: z.boolean().optional(),
+  retentionPolicy: z.enum(['none', 'one_year', 'three_years', 'five_years', 'permanent', 'custom']).optional(),
+  retainUntil: nullableText(100),
+});
+
+const reportArchiveExportEventSchema = z.object({
+  format: z.enum(['pdf', 'excel', 'print']),
+  fileName: nullableText(250),
+});
+
 const reportScheduleSchema = z.object({
   name: z.string().trim().min(2).max(200),
   frequency: z.enum(['weekly', 'monthly']),
@@ -671,6 +684,87 @@ const actor = (req) => ({
   id: req.authUser?.id || null,
   name: req.authUser?.username || req.authUser?.email || 'مستخدم',
 });
+
+const reportArchiveLabel = (archive) =>
+  archive?.archiveName
+  || archive?.templateName
+  || (
+    archive?.reportType === 'weekly'
+      ? 'تقرير أسبوعي'
+      : archive?.reportType === 'monthly'
+        ? 'تقرير شهري'
+        : 'تقرير مخصص'
+  );
+
+const auditReportArchiveAction = async (
+  req,
+  {
+    action,
+    archive,
+    description,
+    details = null,
+    previousData = null,
+    newData = null,
+  },
+) => {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        userId: req.authUser?.id || null,
+        username: req.authUser?.username || null,
+        userEmail: req.authUser?.email || null,
+        userRole: req.authUser?.role || null,
+        action,
+        module: 'transaction_follow_up',
+        entity: 'report_archive',
+        entityId: archive?.id || null,
+        entityLabel: reportArchiveLabel(archive),
+        description,
+        details,
+        previousData,
+        newData,
+        ipAddress: req.ip || null,
+        userAgent: req.get?.('user-agent') || null,
+      },
+    });
+  } catch (error) {
+    console.warn('Unable to write report archive audit log', error?.message || error);
+  }
+};
+
+const retentionExpiryForArchive = (archive) => {
+  const createdAt = archive?.createdAt ? new Date(archive.createdAt) : null;
+  if (!createdAt || Number.isNaN(createdAt.getTime())) return null;
+
+  const expiry = new Date(createdAt);
+  if (archive.retentionPolicy === 'one_year') expiry.setUTCFullYear(expiry.getUTCFullYear() + 1);
+  else if (archive.retentionPolicy === 'three_years') expiry.setUTCFullYear(expiry.getUTCFullYear() + 3);
+  else if (archive.retentionPolicy === 'five_years') expiry.setUTCFullYear(expiry.getUTCFullYear() + 5);
+  else if (archive.retentionPolicy === 'custom' && archive.retainUntil) {
+    const custom = new Date(archive.retainUntil);
+    return Number.isNaN(custom.getTime()) ? null : custom;
+  } else {
+    return null;
+  }
+  return expiry;
+};
+
+const archiveDeletionBlockReason = (archive, now = new Date()) => {
+  if (archive?.governanceStatus === 'final') {
+    return 'التقرير نهائي؛ أعده إلى مسودة قبل الحذف';
+  }
+  if (archive?.isDeletionProtected) {
+    return 'التقرير محمي من الحذف';
+  }
+  if (archive?.retentionPolicy === 'permanent') {
+    return 'سياسة الاحتفاظ لهذا التقرير دائمة';
+  }
+  const expiry = retentionExpiryForArchive(archive);
+  if (expiry && expiry.getTime() > now.getTime()) {
+    return `لا يمكن حذف التقرير قبل انتهاء مدة الاحتفاظ في ${expiry.toISOString().slice(0, 10)}`;
+  }
+  return null;
+};
 
 const modulePermission = (req) =>
   req.authUser?.permissions?.find((item) => item.module === 'transaction_follow_up');
