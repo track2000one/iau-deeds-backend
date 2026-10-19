@@ -441,6 +441,75 @@ router.get('/records/trash', async (_req, res, next) => {
   }
 });
 
+router.get('/records/version-approvals', async (req, res, next) => {
+  try {
+    const requestedStatus = String(req.query.status || 'draft').trim();
+    const allowedStatuses = new Set(['draft', 'approved', 'superseded', 'cancelled', 'all']);
+    const status = allowedStatuses.has(requestedStatus) ? requestedStatus : 'draft';
+    const search = String(req.query.search || '').trim();
+    const confidentiality = String(req.query.confidentiality || '').trim();
+    const addedBy = String(req.query.addedBy || '').trim();
+
+    const where = {
+      record: { deletedAt: null },
+      ...(status !== 'all' ? { versionStatus: status } : {}),
+      ...(addedBy ? { addedBy: { contains: addedBy, mode: 'insensitive' } } : {}),
+      ...(confidentiality
+        ? { record: { deletedAt: null, confidentiality } }
+        : {}),
+      ...(search
+        ? {
+            OR: [
+              { originalName: { contains: search, mode: 'insensitive' } },
+              { fileName: { contains: search, mode: 'insensitive' } },
+              { addedBy: { contains: search, mode: 'insensitive' } },
+              {
+                record: {
+                  OR: [
+                    { archiveNumber: { contains: search, mode: 'insensitive' } },
+                    { title: { contains: search, mode: 'insensitive' } },
+                    { category: { contains: search, mode: 'insensitive' } },
+                    { documentNumber: { contains: search, mode: 'insensitive' } },
+                    { issuingAuthority: { contains: search, mode: 'insensitive' } },
+                  ],
+                },
+              },
+            ],
+          }
+        : {}),
+    };
+
+    const items = await prisma.archiveRecordAttachment.findMany({
+      where,
+      include: {
+        record: {
+          select: {
+            id: true,
+            archiveNumber: true,
+            title: true,
+            category: true,
+            documentNumber: true,
+            documentDate: true,
+            issuingAuthority: true,
+            confidentiality: true,
+            updatedAt: true,
+          },
+        },
+      },
+      orderBy: [{ createdAt: 'desc' }],
+      take: 500,
+    });
+
+    res.json({
+      items,
+      total: items.length,
+      status,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/records/:id', async (req, res, next) => {
   try {
     const record = await prisma.archiveRecord.findFirst({
