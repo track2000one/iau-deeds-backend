@@ -43,14 +43,14 @@ const reportTemplateSnapshot = (template) => {
     name: template.name,
     scope: template.scope,
     reportMode: template.reportMode,
-    customFrom: template.customFrom,
-    customTo: template.customTo,
+    customFrom: template.customFrom ? new Date(template.customFrom).toISOString() : null,
+    customTo: template.customTo ? new Date(template.customTo).toISOString() : null,
     assigneeUserId: template.assigneeUserId,
     orientation: template.orientation,
     options: template.options,
     accessMode: template.accessMode,
     isDefault: template.isDefault,
-    updatedAt: template.updatedAt,
+    updatedAt: template.updatedAt ? new Date(template.updatedAt).toISOString() : null,
   };
 };
 
