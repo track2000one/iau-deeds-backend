@@ -744,6 +744,78 @@ model ArchiveDocument {
   @@index([createdAt])
 }
 
+model ArchiveRecord {
+  id               String   @id @default(cuid())
+  archiveNumber    String   @unique
+  title            String
+  category         String   @default("عام")
+  documentNumber   String?
+  documentDate     String?
+  documentDateType String   @default("gregorian")
+  issuingAuthority String?
+  confidentiality  String   @default("internal")
+  tags             String?
+  description      String?
+  status           String   @default("active")
+  createdById      String?
+  createdBy        String?
+  updatedBy        String?
+  deletedAt        DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  attachments ArchiveRecordAttachment[]
+  activities  ArchiveRecordActivity[]
+
+  @@index([archiveNumber])
+  @@index([category])
+  @@index([documentNumber])
+  @@index([confidentiality])
+  @@index([status])
+  @@index([createdAt])
+  @@index([updatedAt])
+}
+
+model ArchiveRecordAttachment {
+  id               String   @id @default(cuid())
+  recordId         String
+  fileName         String
+  originalName     String?
+  mimeType         String?
+  fileSize         Float    @default(0)
+  driveUrl         String
+  driveFileId      String?
+  version          Int      @default(1)
+  isCurrent        Boolean  @default(true)
+  addedBy          String?
+  legacyDocumentId String?  @unique
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  record ArchiveRecord @relation(fields: [recordId], references: [id], onDelete: Cascade)
+
+  @@index([recordId])
+  @@index([driveFileId])
+  @@index([createdAt])
+}
+
+model ArchiveRecordActivity {
+  id          String   @id @default(cuid())
+  recordId    String
+  action      String
+  description String?
+  actorId     String?
+  actorName   String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  record ArchiveRecord @relation(fields: [recordId], references: [id], onDelete: Cascade)
+
+  @@index([recordId])
+  @@index([action])
+  @@index([createdAt])
+}
+
 model AuditLog {
   id           String   @id @default(cuid())
   userId       String?

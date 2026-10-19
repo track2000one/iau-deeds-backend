@@ -42,6 +42,130 @@ const sanitizePayload = (body = {}) => ({
   createdBy: cleanString(body.createdBy),
 });
 
+
+const sanitizeRecordPayload = (body = {}) => ({
+  title: cleanString(body.title) || 'سجل أرشيفي',
+  category: cleanString(body.category) || 'عام',
+  documentNumber: cleanString(body.documentNumber),
+  documentDate: cleanString(body.documentDate),
+  documentDateType: body.documentDateType === 'hijri' ? 'hijri' : 'gregorian',
+  issuingAuthority: cleanString(body.issuingAuthority),
+  confidentiality: ['public', 'internal', 'confidential'].includes(body.confidentiality)
+    ? body.confidentiality
+    : 'internal',
+  tags: cleanString(body.tags),
+  description: cleanString(body.description),
+});
+
+const sanitizeAttachmentPayload = (body = {}) => ({
+  fileName: cleanString(body.fileName) || cleanString(body.originalName) || 'file',
+  originalName: cleanString(body.originalName),
+  mimeType: cleanString(body.mimeType),
+  fileSize:
+    body.fileSize === '' || body.fileSize === undefined || body.fileSize === null
+      ? 0
+      : Number(body.fileSize) || 0,
+  driveUrl: cleanString(body.driveUrl),
+  driveFileId: cleanString(body.driveFileId),
+  version: Math.max(1, Number.parseInt(String(body.version || '1'), 10) || 1),
+  isCurrent: body.isCurrent !== false,
+  addedBy: cleanString(body.addedBy),
+  legacyDocumentId: cleanString(body.legacyDocumentId),
+});
+
+const recordInclude = {
+  attachments: { orderBy: { createdAt: 'desc' } },
+  activities: { orderBy: { createdAt: 'desc' }, take: 100 },
+};
+
+const serializeRecord = (record) => {
+  const attachments = Array.isArray(record.attachments) ? record.attachments : [];
+  const primary = attachments.find((item) => item.isCurrent) || attachments[0] || null;
+  return {
+    ...record,
+    attachmentCount: attachments.length,
+    totalFileSize: attachments.reduce((sum, item) => sum + Number(item.fileSize || 0), 0),
+    fileName: primary?.fileName || '',
+    originalName: primary?.originalName || '',
+    mimeType: primary?.mimeType || '',
+    fileSize: Number(primary?.fileSize || 0),
+    driveUrl: primary?.driveUrl || '',
+    driveFileId: primary?.driveFileId || '',
+  };
+};
+
+const nextArchiveNumber = async () => {
+  const year = new Date().getFullYear();
+  const prefix = `ARC-${year}-`;
+  const latest = await prisma.archiveRecord.findFirst({
+    where: { archiveNumber: { startsWith: prefix } },
+    orderBy: { archiveNumber: 'desc' },
+    select: { archiveNumber: true },
+  });
+  const last = Number.parseInt(String(latest?.archiveNumber || '').split('-').pop() || '0', 10) || 0;
+  return `${prefix}${String(last + 1).padStart(6, '0')}`;
+};
+
+const ensureLegacyArchiveMigrated = async () => {
+  const legacyDocuments = await prisma.archiveDocument.findMany({
+    orderBy: { createdAt: 'asc' },
+  });
+  if (!legacyDocuments.length) return;
+
+  const legacyIds = legacyDocuments.map((item) => item.id);
+  const migrated = await prisma.archiveRecordAttachment.findMany({
+    where: { legacyDocumentId: { in: legacyIds } },
+    select: { legacyDocumentId: true },
+  });
+  const migratedIds = new Set(migrated.map((item) => item.legacyDocumentId).filter(Boolean));
+
+  for (const legacy of legacyDocuments) {
+    if (migratedIds.has(legacy.id) || !legacy.driveUrl) continue;
+
+    const archiveNumber = await nextArchiveNumber();
+    await prisma.archiveRecord.create({
+      data: {
+        archiveNumber,
+        title: legacy.title || 'سجل أرشيفي',
+        category: legacy.category || 'عام',
+        documentNumber: legacy.documentNumber,
+        documentDate: legacy.documentDate,
+        documentDateType: legacy.documentDateType || 'gregorian',
+        issuingAuthority: legacy.issuingAuthority,
+        confidentiality: legacy.confidentiality || 'internal',
+        tags: legacy.tags,
+        description: legacy.description,
+        createdBy: legacy.createdBy,
+        createdAt: legacy.createdAt,
+        updatedAt: legacy.updatedAt,
+        attachments: {
+          create: {
+            fileName: legacy.fileName || legacy.originalName || 'file',
+            originalName: legacy.originalName,
+            mimeType: legacy.mimeType,
+            fileSize: Number(legacy.fileSize || 0),
+            driveUrl: legacy.driveUrl,
+            driveFileId: legacy.driveFileId,
+            addedBy: legacy.createdBy,
+            legacyDocumentId: legacy.id,
+            createdAt: legacy.createdAt,
+            updatedAt: legacy.updatedAt,
+          },
+        },
+        activities: {
+          create: {
+            action: 'legacy_migrated',
+            description: 'نقل تلقائي من بنية الأرشفة السابقة إلى سجل أرشيفي متعدد الملفات',
+            actorName: 'النظام',
+            metadata: { legacyDocumentId: legacy.id },
+            createdAt: legacy.createdAt,
+          },
+        },
+      },
+    });
+  }
+};
+
 router.get('/', async (_req, res, next) => {
   try {
     const documents = await prisma.archiveDocument.findMany({
@@ -271,6 +395,304 @@ router.patch('/transactions/:id/restore', async (req, res, next) => {
     });
 
     res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+
+router.get('/records', async (_req, res, next) => {
+  try {
+    await ensureLegacyArchiveMigrated();
+    const records = await prisma.archiveRecord.findMany({
+      where: { deletedAt: null },
+      include: recordInclude,
+      orderBy: { updatedAt: 'desc' },
+    });
+    res.json(records.map(serializeRecord));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/records/trash', async (_req, res, next) => {
+  try {
+    const records = await prisma.archiveRecord.findMany({
+      where: { deletedAt: { not: null } },
+      include: recordInclude,
+      orderBy: { deletedAt: 'desc' },
+    });
+    res.json(records.map(serializeRecord));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/records/:id', async (req, res, next) => {
+  try {
+    const record = await prisma.archiveRecord.findFirst({
+      where: { id: req.params.id, deletedAt: null },
+      include: recordInclude,
+    });
+    if (!record) return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
+    res.json(serializeRecord(record));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/records', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const data = sanitizeRecordPayload(req.body);
+    const attachments = (Array.isArray(req.body?.attachments) ? req.body.attachments : [])
+      .map(sanitizeAttachmentPayload);
+
+    if (!attachments.length) {
+      return res.status(400).json({ message: 'يجب إرفاق ملف واحد على الأقل عند إنشاء السجل الأرشيفي' });
+    }
+    if (attachments.some((item) => !item.driveUrl)) {
+      return res.status(400).json({ message: 'رابط Google Drive مطلوب لكل ملف مرفق' });
+    }
+
+    const archiveNumber = await nextArchiveNumber();
+    const record = await prisma.archiveRecord.create({
+      data: {
+        ...data,
+        archiveNumber,
+        createdById: changedBy.id,
+        createdBy: changedBy.name,
+        updatedBy: changedBy.name,
+        attachments: {
+          create: attachments.map((item) => ({
+            ...item,
+            addedBy: item.addedBy || changedBy.name,
+          })),
+        },
+        activities: {
+          create: {
+            action: 'record_created',
+            description: `إنشاء السجل الأرشيفي وإضافة ${attachments.length} ملف`,
+            actorId: changedBy.id,
+            actorName: changedBy.name,
+            metadata: { attachmentCount: attachments.length },
+          },
+        },
+      },
+      include: recordInclude,
+    });
+
+    res.status(201).json(serializeRecord(record));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/records/:id', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const current = await prisma.archiveRecord.findFirst({
+      where: { id: req.params.id, deletedAt: null },
+    });
+    if (!current) return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
+
+    const data = sanitizeRecordPayload(req.body);
+    const record = await prisma.$transaction(async (tx) => {
+      await tx.archiveRecord.update({
+        where: { id: current.id },
+        data: { ...data, updatedBy: changedBy.name },
+      });
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: current.id,
+          action: 'record_updated',
+          description: 'تحديث البيانات الوصفية للسجل الأرشيفي',
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+        },
+      });
+      return tx.archiveRecord.findUnique({
+        where: { id: current.id },
+        include: recordInclude,
+      });
+    });
+
+    res.json(serializeRecord(record));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/records/:id/attachments', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const current = await prisma.archiveRecord.findFirst({
+      where: { id: req.params.id, deletedAt: null },
+    });
+    if (!current) return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
+
+    const source = Array.isArray(req.body?.attachments)
+      ? req.body.attachments
+      : req.body
+        ? [req.body]
+        : [];
+    const attachments = source.map(sanitizeAttachmentPayload);
+    if (!attachments.length || attachments.some((item) => !item.driveUrl)) {
+      return res.status(400).json({ message: 'بيانات الملفات المرفقة غير مكتملة' });
+    }
+
+    const record = await prisma.$transaction(async (tx) => {
+      for (const item of attachments) {
+        await tx.archiveRecordAttachment.create({
+          data: {
+            ...item,
+            recordId: current.id,
+            addedBy: item.addedBy || changedBy.name,
+          },
+        });
+      }
+      await tx.archiveRecord.update({
+        where: { id: current.id },
+        data: { updatedBy: changedBy.name },
+      });
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: current.id,
+          action: 'attachments_added',
+          description: `إضافة ${attachments.length} ملف إلى السجل الأرشيفي`,
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+          metadata: {
+            attachmentCount: attachments.length,
+            fileNames: attachments.map((item) => item.originalName || item.fileName),
+          },
+        },
+      });
+      return tx.archiveRecord.findUnique({
+        where: { id: current.id },
+        include: recordInclude,
+      });
+    });
+
+    res.status(201).json(serializeRecord(record));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/records/:recordId/attachments/:attachmentId', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const attachment = await prisma.archiveRecordAttachment.findFirst({
+      where: {
+        id: req.params.attachmentId,
+        recordId: req.params.recordId,
+      },
+    });
+    if (!attachment) return res.status(404).json({ message: 'الملف المرفق غير موجود' });
+
+    const count = await prisma.archiveRecordAttachment.count({
+      where: { recordId: req.params.recordId },
+    });
+    if (count <= 1) {
+      return res.status(409).json({
+        message: 'لا يمكن حذف آخر ملف من السجل. احذف السجل الأرشيفي كاملًا إذا لم تعد بحاجة إليه.',
+      });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.archiveRecordAttachment.delete({ where: { id: attachment.id } });
+      await tx.archiveRecord.update({
+        where: { id: req.params.recordId },
+        data: { updatedBy: changedBy.name },
+      });
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: req.params.recordId,
+          action: 'attachment_removed',
+          description: `إزالة الملف ${attachment.originalName || attachment.fileName} من السجل`,
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+          metadata: {
+            attachmentId: attachment.id,
+            driveFileId: attachment.driveFileId,
+          },
+        },
+      });
+    });
+
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/records/:id', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const current = await prisma.archiveRecord.findFirst({
+      where: { id: req.params.id, deletedAt: null },
+    });
+    if (!current) return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.archiveRecord.update({
+        where: { id: current.id },
+        data: {
+          deletedAt: new Date(),
+          status: 'deleted',
+          updatedBy: changedBy.name,
+        },
+      });
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: current.id,
+          action: 'record_deleted',
+          description: 'نقل السجل الأرشيفي إلى المحذوفات',
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+        },
+      });
+    });
+
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/records/:id/restore', async (req, res, next) => {
+  try {
+    const changedBy = actor(req);
+    const current = await prisma.archiveRecord.findUnique({ where: { id: req.params.id } });
+    if (!current) return res.status(404).json({ message: 'السجل الأرشيفي غير موجود' });
+    if (!current.deletedAt) return res.status(409).json({ message: 'السجل غير موجود في المحذوفات' });
+
+    const record = await prisma.$transaction(async (tx) => {
+      await tx.archiveRecord.update({
+        where: { id: current.id },
+        data: {
+          deletedAt: null,
+          status: 'active',
+          updatedBy: changedBy.name,
+        },
+      });
+      await tx.archiveRecordActivity.create({
+        data: {
+          recordId: current.id,
+          action: 'record_restored',
+          description: 'استعادة السجل الأرشيفي من المحذوفات',
+          actorId: changedBy.id,
+          actorName: changedBy.name,
+        },
+      });
+      return tx.archiveRecord.findUnique({
+        where: { id: current.id },
+        include: recordInclude,
+      });
+    });
+
+    res.json(serializeRecord(record));
   } catch (error) {
     next(error);
   }
