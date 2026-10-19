@@ -923,6 +923,17 @@ router.patch('/records/:recordId/attachments/:attachmentId/approve', async (req,
       });
     }
 
+    if (
+      draft.approvalRoute === 'specific' &&
+      draft.assignedApproverId &&
+      draft.assignedApproverId !== changedBy.id
+    ) {
+      return res.status(403).json({
+        message: `طلب الاعتماد موجه إلى ${draft.assignedApproverName || 'معتمد آخر'} ولا يمكن اعتماده من مستخدم آخر.`,
+        code: 'ARCHIVE_APPROVAL_ASSIGNED_TO_ANOTHER_USER',
+      });
+    }
+
     const versionGroupId = draft.versionGroupId || draft.id;
     const approvedAt = new Date();
 
@@ -960,6 +971,27 @@ router.patch('/records/:recordId/attachments/:attachmentId/approve', async (req,
         where: { id: req.params.recordId },
         data: { updatedBy: changedBy.name },
       });
+
+      await tx.archiveApprovalNotification.updateMany({
+        where: {
+          attachmentId: draft.id,
+          readAt: null,
+        },
+        data: { readAt: approvedAt },
+      });
+
+      if (draft.addedById && draft.addedById !== changedBy.id) {
+        await tx.archiveApprovalNotification.create({
+          data: {
+            recipientUserId: draft.addedById,
+            recordId: req.params.recordId,
+            attachmentId: draft.id,
+            type: 'version_approved',
+            title: `تم اعتماد الإصدار V${draft.version}`,
+            message: `${record.archiveNumber} — ${record.title}`,
+          },
+        });
+      }
 
       await tx.archiveRecordActivity.create({
         data: {
@@ -1014,6 +1046,17 @@ router.patch('/records/:recordId/attachments/:attachmentId/cancel', async (req, 
       return res.status(409).json({ message: 'يمكن إلغاء الإصدارات الموجودة بحالة مسودة فقط' });
     }
 
+    if (
+      draft.approvalRoute === 'specific' &&
+      draft.assignedApproverId &&
+      draft.assignedApproverId !== changedBy.id
+    ) {
+      return res.status(403).json({
+        message: `طلب الاعتماد موجه إلى ${draft.assignedApproverName || 'معتمد آخر'} ولا يمكن إلغاؤه من مستخدم آخر.`,
+        code: 'ARCHIVE_APPROVAL_ASSIGNED_TO_ANOTHER_USER',
+      });
+    }
+
     const cancelledAt = new Date();
     const updatedRecord = await prisma.$transaction(async (tx) => {
       await tx.archiveRecordAttachment.update({
@@ -1032,6 +1075,27 @@ router.patch('/records/:recordId/attachments/:attachmentId/cancel', async (req, 
         where: { id: req.params.recordId },
         data: { updatedBy: changedBy.name },
       });
+
+      await tx.archiveApprovalNotification.updateMany({
+        where: {
+          attachmentId: draft.id,
+          readAt: null,
+        },
+        data: { readAt: cancelledAt },
+      });
+
+      if (draft.addedById && draft.addedById !== changedBy.id) {
+        await tx.archiveApprovalNotification.create({
+          data: {
+            recipientUserId: draft.addedById,
+            recordId: req.params.recordId,
+            attachmentId: draft.id,
+            type: 'version_cancelled',
+            title: `تم إلغاء مسودة الإصدار V${draft.version}`,
+            message: `${record.archiveNumber} — ${record.title}`,
+          },
+        });
+      }
 
       await tx.archiveRecordActivity.create({
         data: {
