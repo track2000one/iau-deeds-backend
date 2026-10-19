@@ -258,6 +258,23 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canEdit';
   }
 
+  // Reading/marking personal archive approval notifications is a view-level action.
+  if (
+    moduleName === 'archive' &&
+    (
+      (
+        method === 'GET' &&
+        /\/records\/version-approval-notifications\/?(?:\?|$)/.test(requestPath)
+      ) ||
+      (
+        method === 'PATCH' &&
+        /\/records\/version-approval-notifications\/read-all\/?(?:\?|$)/.test(requestPath)
+      )
+    )
+  ) {
+    action = 'canView';
+  }
+
   // GIS bulk geometry changes are editing operations even though they use POST
   // to submit a transactional batch payload.
   if (
