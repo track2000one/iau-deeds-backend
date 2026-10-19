@@ -36,6 +36,121 @@ const startOfSaudiDayUtc = (date) => {
   return riyadhLocalToUtc(parts.year, parts.month, parts.day, 0);
 };
 
+const reportTemplateSnapshot = (template) => {
+  if (!template) return null;
+  return {
+    id: template.id,
+    name: template.name,
+    scope: template.scope,
+    reportMode: template.reportMode,
+    customFrom: template.customFrom,
+    customTo: template.customTo,
+    assigneeUserId: template.assigneeUserId,
+    orientation: template.orientation,
+    options: template.options,
+    accessMode: template.accessMode,
+    isDefault: template.isDefault,
+    updatedAt: template.updatedAt,
+  };
+};
+
+const flexibleReportCategoryForStatus = (status) => {
+  if (status === 'completed') return 'completed';
+  if (status === 'waiting_response') return 'waiting_response';
+  if (status === 'needs_follow_up') return 'needs_follow_up';
+  return null;
+};
+
+const buildFlexibleReportSummary = (report, templateSnapshot) => {
+  const options =
+    templateSnapshot?.options && typeof templateSnapshot.options === 'object'
+      ? templateSnapshot.options
+      : null;
+  if (!options) return report.summary;
+
+  const transactionById = new Map(report.transactions.map((row) => [row.id, row]));
+  const overdueIds = new Set(report.overdueSnapshot.map((row) => row.id));
+
+  const overdueRows = report.overdueSnapshot.map((row) => {
+    const source = transactionById.get(row.id);
+    return {
+      id: row.id,
+      transactionNumber: row.transactionNumber,
+      subject: row.subject,
+      organizationalUnit: source?.organizationalUnit || null,
+      currentAssigneeName: row.currentAssigneeName || source?.currentAssigneeName || null,
+      requiredAction: source?.requiredAction || null,
+      priority: row.priority,
+      category: 'overdue',
+    };
+  });
+
+  const statusRows = report.transactions
+    .filter((row) => !overdueIds.has(row.id))
+    .map((row) => {
+      const category = flexibleReportCategoryForStatus(row.status);
+      if (!category) return null;
+      return {
+        id: row.id,
+        transactionNumber: row.transactionNumber,
+        subject: row.subject,
+        organizationalUnit: row.organizationalUnit || null,
+        currentAssigneeName: row.currentAssigneeName || null,
+        requiredAction: row.requiredAction || null,
+        priority: row.priority,
+        category,
+      };
+    })
+    .filter(Boolean);
+
+  const categories = new Set(
+    Array.isArray(options.categories) && options.categories.length
+      ? options.categories
+      : ['completed', 'overdue', 'waiting_response', 'needs_follow_up'],
+  );
+  const search = String(options.search || '').trim().toLocaleLowerCase('ar');
+
+  const rows = [...overdueRows, ...statusRows].filter((row) => {
+    if (!categories.has(row.category)) return false;
+    if (options.priority && row.priority !== options.priority) return false;
+    if (
+      options.organizationalUnit
+      && row.organizationalUnit !== options.organizationalUnit
+    ) {
+      return false;
+    }
+    if (search) {
+      const haystack = [
+        row.transactionNumber,
+        row.subject,
+        row.currentAssigneeName || '',
+        row.requiredAction || '',
+        row.organizationalUnit || '',
+        row.category,
+      ]
+        .join(' ')
+        .toLocaleLowerCase('ar');
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+
+  const completed = rows.filter((row) => row.category === 'completed').length;
+  const overdueSnapshot = rows.filter((row) => row.category === 'overdue').length;
+  const waiting = rows.filter((row) => row.category === 'waiting_response').length;
+  const needsFollowUp = rows.filter((row) => row.category === 'needs_follow_up').length;
+
+  return {
+    ...report.summary,
+    totalIncluded: rows.length,
+    open: overdueSnapshot + waiting + needsFollowUp,
+    completed,
+    waiting,
+    needsFollowUp,
+    overdueSnapshot,
+  };
+};
+
 const indicatorForReport = (row, referenceDate = new Date()) => {
   if (FINAL_STATUSES.includes(row.status)) {
     return {
@@ -336,6 +451,9 @@ export const archiveTransactionExecutiveReport = async ({
   scopeMine = false,
   source = 'manual',
   scheduleId = null,
+  templateId = null,
+  templateName = null,
+  templateSnapshot = null,
   generatedById = null,
   generatedByName = null,
 }) => {
@@ -346,6 +464,8 @@ export const archiveTransactionExecutiveReport = async ({
     assigneeUserId,
     scopeMine,
   });
+
+  const summary = buildFlexibleReportSummary(report, templateSnapshot);
 
   return prisma.transactionFollowUpReportArchive.create({
     data: {
@@ -358,8 +478,11 @@ export const archiveTransactionExecutiveReport = async ({
       scopeMine,
       source,
       snapshot: report,
-      summary: report.summary,
+      summary,
       scheduleId,
+      templateId,
+      templateName,
+      templateSnapshot,
       generatedById,
       generatedByName,
     },
@@ -381,6 +504,20 @@ export const syncScheduledTransactionReports = async (now = new Date()) => {
     const runAt = schedule.nextRunAt || now;
     const period = scheduledTransactionReportPeriod(schedule.frequency, runAt);
 
+    const liveTemplate = schedule.templateId
+      ? await prisma.transactionFollowUpReportTemplate.findUnique({
+          where: { id: schedule.templateId },
+        })
+      : null;
+    const effectiveTemplateSnapshot =
+      reportTemplateSnapshot(liveTemplate) || schedule.templateSnapshot || null;
+    const templateOptions =
+      effectiveTemplateSnapshot?.options && typeof effectiveTemplateSnapshot.options === 'object'
+        ? effectiveTemplateSnapshot.options
+        : null;
+    const effectiveOrganizationalUnit =
+      templateOptions?.organizationalUnit || schedule.organizationalUnit || null;
+
     const existing = await prisma.transactionFollowUpReportArchive.findFirst({
       where: {
         scheduleId: schedule.id,
@@ -395,12 +532,15 @@ export const syncScheduledTransactionReports = async (now = new Date()) => {
         reportType: schedule.frequency,
         from: period.from,
         to: period.to,
-        organizationalUnit: schedule.organizationalUnit,
+        organizationalUnit: effectiveOrganizationalUnit,
         assigneeUserId: schedule.assigneeUserId,
         assigneeName: schedule.assigneeName,
         scopeMine: Boolean(schedule.assigneeUserId),
         source: 'scheduled',
         scheduleId: schedule.id,
+        templateId: liveTemplate?.id || schedule.templateId || null,
+        templateName: liveTemplate?.name || schedule.templateName || null,
+        templateSnapshot: effectiveTemplateSnapshot,
         generatedById: schedule.createdById,
         generatedByName: schedule.createdByName || 'النظام',
       });
@@ -412,6 +552,13 @@ export const syncScheduledTransactionReports = async (now = new Date()) => {
       data: {
         lastRunAt: now,
         nextRunAt: calculateNextTransactionReportRun(schedule, now),
+        ...(liveTemplate
+          ? {
+              templateName: liveTemplate.name,
+              templateSnapshot: effectiveTemplateSnapshot,
+              organizationalUnit: effectiveOrganizationalUnit,
+            }
+          : {}),
       },
     });
   }
