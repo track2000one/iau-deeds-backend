@@ -107,6 +107,40 @@ const serializeRecord = (record) => {
   };
 };
 
+const getArchiveApproverUsers = async (client = prisma, excludeUserId = null) => {
+  const users = await client.appUser.findMany({
+    where: {
+      isActive: true,
+      ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
+      OR: [
+        { role: 'admin' },
+        {
+          permissions: {
+            some: {
+              module: 'archive',
+              canApproveArchive: true,
+            },
+          },
+        },
+      ],
+    },
+    select: {
+      id: true,
+      username: true,
+      email: true,
+      role: true,
+    },
+    orderBy: [{ role: 'asc' }, { username: 'asc' }],
+  });
+
+  return users.map((user) => ({
+    id: user.id,
+    name: user.username || user.email,
+    email: user.email,
+    role: user.role,
+  }));
+};
+
 const nextArchiveNumber = async () => {
   const year = new Date().getFullYear();
   const prefix = `ARC-${year}-`;
@@ -436,6 +470,15 @@ router.get('/records/trash', async (_req, res, next) => {
       orderBy: { deletedAt: 'desc' },
     });
     res.json(records.map(serializeRecord));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/records/version-approvers', async (req, res, next) => {
+  try {
+    const approvers = await getArchiveApproverUsers(prisma, req.authUser?.id || null);
+    res.json(approvers);
   } catch (error) {
     next(error);
   }
