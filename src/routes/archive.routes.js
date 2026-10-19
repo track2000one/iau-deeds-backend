@@ -548,7 +548,8 @@ router.post('/records', async (req, res, next) => {
         attachments: {
           create: attachments.map((item) => ({
             ...item,
-            addedBy: item.addedBy || changedBy.name,
+            addedById: changedBy.id,
+            addedBy: changedBy.name,
           })),
         },
         activities: {
@@ -629,7 +630,8 @@ router.post('/records/:id/attachments', async (req, res, next) => {
           data: {
             ...item,
             recordId: current.id,
-            addedBy: item.addedBy || changedBy.name,
+            addedById: changedBy.id,
+            addedBy: changedBy.name,
           },
         });
       }
@@ -739,7 +741,8 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
           versionNote: incoming.versionNote,
           versionStatus: 'draft',
           isCurrent: false,
-          addedBy: incoming.addedBy || changedBy.name,
+          addedById: changedBy.id,
+          addedBy: changedBy.name,
         },
       });
 
@@ -800,6 +803,19 @@ router.patch('/records/:recordId/attachments/:attachmentId/approve', async (req,
       return res.status(409).json({ message: 'يمكن اعتماد الإصدارات الموجودة بحالة مسودة فقط' });
     }
 
+    const actorName = String(changedBy.name || '').trim().toLowerCase();
+    const uploaderName = String(draft.addedBy || '').trim().toLowerCase();
+    const uploadedBySameUser =
+      Boolean(changedBy.id && draft.addedById && changedBy.id === draft.addedById) ||
+      Boolean(!draft.addedById && actorName && uploaderName && actorName === uploaderName);
+
+    if (uploadedBySameUser) {
+      return res.status(403).json({
+        message: 'لا يمكن اعتماد إصدار قمت برفعه بنفسك. يجب أن يعتمد الإصدار مستخدم آخر لديه صلاحية «اعتماد الأرشيف».',
+        code: 'ARCHIVE_MAKER_CHECKER_SELF_APPROVAL_BLOCKED',
+      });
+    }
+
     const versionGroupId = draft.versionGroupId || draft.id;
     const approvedAt = new Date();
 
@@ -850,6 +866,10 @@ router.patch('/records/:recordId/attachments/:attachmentId/approve', async (req,
             versionGroupId,
             version: draft.version,
             approvalNote,
+            makerUserId: draft.addedById || null,
+            makerName: draft.addedBy || null,
+            checkerUserId: changedBy.id,
+            checkerName: changedBy.name,
           },
         },
       });
