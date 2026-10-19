@@ -182,6 +182,17 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canPrint';
   }
 
+  // Saved report templates are part of the reporting workspace. Users with
+  // print/report permission may create, update and delete their own templates;
+  // shared-template governance is enforced inside the route.
+  if (
+    moduleName === 'transaction_follow_up' &&
+    ['POST', 'PATCH', 'DELETE'].includes(method) &&
+    /\/reports\/templates(?:\/[^/]+)?\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canPrint';
+  }
+
   // Creating or manually running report schedules is a workflow-edit capability.
   if (
     moduleName === 'transaction_follow_up' &&
