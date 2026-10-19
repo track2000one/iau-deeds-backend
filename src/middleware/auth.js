@@ -247,6 +247,17 @@ export const requirePermission = (moduleName) => (req, res, next) => {
     action = 'canApproveArchive';
   }
 
+  // Choosing the approval destination is part of preparing/editing the archive version,
+  // not an approval action. This lets an uploader route the request without granting
+  // them the authority to approve it.
+  if (
+    moduleName === 'archive' &&
+    method === 'GET' &&
+    /\/records\/version-approvers\/?(?:\?|$)/.test(requestPath)
+  ) {
+    action = 'canEdit';
+  }
+
   // GIS bulk geometry changes are editing operations even though they use POST
   // to submit a transactional batch payload.
   if (
