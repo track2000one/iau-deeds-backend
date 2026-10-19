@@ -7697,7 +7697,7 @@ router.get('/reports/archives', async (req, res, next) => {
           createdAt: true,
           updatedAt: true,
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -7981,6 +7981,18 @@ router.post('/reports/archives', async (req, res, next) => {
       generatedByName: createdBy.name,
     });
 
+    await auditReportArchiveAction(req, {
+      action: 'report_archive_create',
+      archive,
+      description: 'إنشاء نسخة مؤرشفة من التقرير',
+      newData: {
+        archiveName: archive.archiveName,
+        reportType: archive.reportType,
+        source: archive.source,
+        governanceStatus: archive.governanceStatus,
+      },
+    });
+
     res.status(201).json(archive);
   } catch (error) {
     next(error);
@@ -7997,16 +8009,39 @@ router.patch('/reports/archives/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'التقرير المؤرشف غير موجود' });
     }
 
-    if (!isSupervisor(req) && current.assigneeUserId !== req.authUser.id) {
+    const supervisor = isSupervisor(req);
+    if (!supervisor && current.assigneeUserId !== req.authUser.id) {
       return res.status(403).json({ message: 'لا يمكنك تعديل بيانات هذا التقرير المؤرشف' });
     }
+    if (!supervisor && current.governanceStatus === 'final') {
+      return res.status(403).json({ message: 'التقرير النهائي لا يمكن تعديل بياناته إلا من المستخدم الإشرافي' });
+    }
 
+    const updater = actor(req);
     const row = await prisma.transactionFollowUpReportArchive.update({
       where: { id: current.id },
       data: {
         archiveName: input.archiveName || null,
         notes: input.notes || null,
         tags: input.tags || [],
+        updatedById: updater.id,
+        updatedByName: updater.name,
+      },
+    });
+
+    await auditReportArchiveAction(req, {
+      action: 'report_archive_metadata_update',
+      archive: row,
+      description: 'تعديل بيانات التقرير المؤرشف',
+      previousData: {
+        archiveName: current.archiveName,
+        notes: current.notes,
+        tags: current.tags,
+      },
+      newData: {
+        archiveName: row.archiveName,
+        notes: row.notes,
+        tags: row.tags,
       },
     });
 
@@ -8021,7 +8056,32 @@ router.delete('/reports/archives/:id', async (req, res, next) => {
     if (!isSupervisor(req)) {
       return res.status(403).json({ message: 'حذف التقارير المؤرشفة متاح للمستخدم الإشرافي فقط' });
     }
-    await prisma.transactionFollowUpReportArchive.delete({ where: { id: req.params.id } });
+
+    const current = await prisma.transactionFollowUpReportArchive.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!current) {
+      return res.status(404).json({ message: 'التقرير المؤرشف غير موجود' });
+    }
+
+    const blockReason = archiveDeletionBlockReason(current);
+    if (blockReason) {
+      return res.status(409).json({ message: blockReason });
+    }
+
+    await auditReportArchiveAction(req, {
+      action: 'report_archive_delete',
+      archive: current,
+      description: 'حذف تقرير مؤرشف',
+      previousData: {
+        archiveName: current.archiveName,
+        reportType: current.reportType,
+        governanceStatus: current.governanceStatus,
+        retentionPolicy: current.retentionPolicy,
+      },
+    });
+
+    await prisma.transactionFollowUpReportArchive.delete({ where: { id: current.id } });
     res.status(204).end();
   } catch (error) {
     next(error);
