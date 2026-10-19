@@ -2200,6 +2200,16 @@ model TransactionFollowUpReportArchive {
   archiveName      String?
   notes            String?
   tags             String[] @default([])
+  governanceStatus String   @default("draft")
+  isPinned         Boolean  @default(false)
+  isDeletionProtected Boolean @default(false)
+  retentionPolicy  String   @default("none")
+  retainUntil      DateTime?
+  finalizedAt      DateTime?
+  finalizedById    String?
+  finalizedByName  String?
+  updatedById      String?
+  updatedByName    String?
   reportType       String
   periodFrom       DateTime
   periodTo         DateTime
@@ -2222,6 +2232,11 @@ model TransactionFollowUpReportArchive {
   schedule         TransactionFollowUpReportSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
 
   @@index([archiveName])
+  @@index([governanceStatus])
+  @@index([isPinned])
+  @@index([isDeletionProtected])
+  @@index([retentionPolicy])
+  @@index([retainUntil])
   @@index([reportType])
   @@index([periodFrom])
   @@index([periodTo])
