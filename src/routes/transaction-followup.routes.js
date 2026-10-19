@@ -400,6 +400,57 @@ const reportScheduleSchema = z.object({
   isActive: z.boolean().optional().default(true),
 });
 
+const flexibleReportCategorySchema = z.enum([
+  'completed',
+  'overdue',
+  'waiting_response',
+  'needs_follow_up',
+]);
+
+const flexibleReportColumnSchema = z.enum([
+  'transactionNumber',
+  'transactionDate',
+  'subject',
+  'transactionType',
+  'organizationalUnit',
+  'currentAssigneeName',
+  'category',
+  'priority',
+  'dueDate',
+  'requiredAction',
+]);
+
+const flexibleReportSortSchema = z.enum([
+  'transactionDate',
+  'transactionNumber',
+  'priority',
+  'currentAssigneeName',
+  'dueDate',
+  'category',
+]);
+
+const reportTemplateOptionsSchema = z.object({
+  title: z.string().trim().max(250).default('التقرير المرن لمتابعة المعاملات'),
+  categories: z.array(flexibleReportCategorySchema).min(1).max(4),
+  search: z.string().trim().max(500).default(''),
+  priority: z.union([prioritySchema, z.literal('')]).default(''),
+  organizationalUnit: z.union([organizationalUnitSchema, z.literal('')]).default(''),
+  sortBy: flexibleReportSortSchema.default('transactionDate'),
+  sortDirection: z.enum(['asc', 'desc']).default('desc'),
+  visibleColumns: z.array(flexibleReportColumnSchema).min(1).max(10),
+});
+
+const reportTemplateSchema = z.object({
+  name: z.string().trim().min(2, 'اسم قالب التقرير مطلوب').max(200),
+  scope: z.enum(['personal', 'shared']).default('personal'),
+  reportMode: z.enum(['weekly', 'monthly', 'custom']).default('monthly'),
+  customFrom: nullableText(100),
+  customTo: nullableText(100),
+  assigneeUserId: nullableText(100),
+  orientation: z.enum(['portrait', 'landscape']).default('landscape'),
+  options: reportTemplateOptionsSchema,
+});
+
 const backupScheduleSchema = z.object({
   frequency: z.enum(['weekly', 'monthly']),
   dayOfWeek: z.coerce.number().int().min(0).max(6).optional().nullable(),
