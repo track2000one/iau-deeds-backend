@@ -137,6 +137,7 @@ model UserPermission {
   canCreateUser   Boolean @default(false)
   canCreateCycle  Boolean @default(false)
   canApproveCycle Boolean @default(false)
+  canApproveArchive Boolean @default(false)
 
   user AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
 
