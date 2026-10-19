@@ -2239,7 +2239,7 @@ model TransactionFollowUpReportTemplate {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
-  @@unique([createdById, name], map: "transaction_follow_up_report_template_owner_name_key")
+  @@unique([createdById, scope, name], map: "transaction_follow_up_report_template_owner_scope_name_key")
   @@index([scope])
   @@index([createdById])
   @@index([assigneeUserId])
