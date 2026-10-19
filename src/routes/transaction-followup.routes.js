@@ -7247,18 +7247,64 @@ router.patch('/reports/templates/:id', async (req, res, next) => {
       }
     }
 
-    const row = await prisma.transactionFollowUpReportTemplate.update({
-      where: { id: current.id },
-      data: {
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        scope: nextScope,
-        reportMode: nextMode,
-        customFrom,
-        customTo,
-        assigneeUserId,
-        ...(input.orientation !== undefined ? { orientation: input.orientation } : {}),
-        ...(input.options !== undefined ? { options: input.options } : {}),
-      },
+    const nextAccessMode =
+      nextScope === 'shared'
+        ? input.accessMode ?? current.accessMode ?? 'all'
+        : 'all';
+    const allowedUserIdsInput =
+      input.allowedUserIds !== undefined
+        ? input.allowedUserIds
+        : templateAllowedUserIds(current);
+    const nextAllowedUserIds =
+      nextScope === 'shared' && nextAccessMode === 'selected'
+        ? await normalizeTemplateAllowedUserIds(allowedUserIdsInput)
+        : [];
+
+    if (nextScope === 'shared' && nextAccessMode === 'selected' && !nextAllowedUserIds.length) {
+      return res.status(400).json({
+        message: 'حدد مستخدمًا واحدًا على الأقل للقالب العام المقيّد',
+      });
+    }
+
+    const nextIsDefault = input.isDefault ?? current.isDefault;
+    const nextSortOrder = input.sortOrder ?? current.sortOrder;
+
+    const row = await prisma.$transaction(async (tx) => {
+      if (nextIsDefault) {
+        await tx.transactionFollowUpReportTemplate.updateMany({
+          where: nextScope === 'shared'
+            ? {
+                scope: 'shared',
+                isDefault: true,
+                NOT: { id: current.id },
+              }
+            : {
+                scope: 'personal',
+                createdById: current.createdById,
+                isDefault: true,
+                NOT: { id: current.id },
+              },
+          data: { isDefault: false },
+        });
+      }
+
+      return tx.transactionFollowUpReportTemplate.update({
+        where: { id: current.id },
+        data: {
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          scope: nextScope,
+          reportMode: nextMode,
+          customFrom,
+          customTo,
+          assigneeUserId,
+          ...(input.orientation !== undefined ? { orientation: input.orientation } : {}),
+          ...(input.options !== undefined ? { options: input.options } : {}),
+          accessMode: nextAccessMode,
+          allowedUserIds: nextAllowedUserIds,
+          isDefault: nextIsDefault,
+          sortOrder: nextSortOrder,
+        },
+      });
     });
 
     res.json(row);
