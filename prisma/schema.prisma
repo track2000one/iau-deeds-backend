@@ -2220,6 +2220,28 @@ model TransactionFollowUpReportArchive {
   @@index([createdAt])
 }
 
+model TransactionFollowUpReportTemplate {
+  id                String   @id @default(cuid())
+  name              String
+  scope             String   @default("personal")
+  reportMode        String   @default("monthly")
+  customFrom        DateTime?
+  customTo          DateTime?
+  assigneeUserId    String?
+  orientation       String   @default("landscape")
+  options           Json
+  createdById       String
+  createdByName     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([createdById, name], map: "transaction_follow_up_report_template_owner_name_key")
+  @@index([scope])
+  @@index([createdById])
+  @@index([assigneeUserId])
+  @@index([updatedAt])
+}
+
 model TransactionFollowUpBackupSchedule {
   id                 String   @id @default(cuid())
   scope              String   @unique @default("global")
