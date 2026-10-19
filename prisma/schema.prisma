@@ -789,7 +789,7 @@ model ArchiveRecordAttachment {
   driveUrl         String
   driveFileId      String?
   version          Int      @default(1)
-  versionGroupId   String   @default(cuid())
+  versionGroupId   String?  @default(cuid())
   versionNote      String?
   isCurrent        Boolean  @default(true)
   addedBy          String?

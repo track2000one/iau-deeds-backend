@@ -628,6 +628,13 @@ router.post('/records/:recordId/attachments/:attachmentId/versions', async (req,
     const nextVersion = Math.max(1, Number(latest?.version || currentAttachment.version || 1) + 1);
 
     const updatedRecord = await prisma.$transaction(async (tx) => {
+      if (!currentAttachment.versionGroupId) {
+        await tx.archiveRecordAttachment.update({
+          where: { id: currentAttachment.id },
+          data: { versionGroupId },
+        });
+      }
+
       await tx.archiveRecordAttachment.updateMany({
         where: {
           recordId: req.params.recordId,
