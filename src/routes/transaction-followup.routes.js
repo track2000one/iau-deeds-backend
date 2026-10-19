@@ -397,6 +397,7 @@ const reportScheduleSchema = z.object({
   dayOfMonth: z.coerce.number().int().min(1).max(28).optional().nullable(),
   runHour: z.coerce.number().int().min(0).max(23).default(8),
   assigneeUserId: nullableText(100),
+  templateId: nullableText(100),
   isActive: z.boolean().optional().default(true),
 });
 
@@ -658,6 +659,42 @@ const canUseReportTemplate = (req, template) => {
   if (isSupervisor(req)) return true;
   if (template.accessMode !== 'selected') return true;
   return templateAllowedUserIds(template).includes(req.authUser?.id);
+};
+
+const reportTemplateScheduleSnapshot = (template) => {
+  if (!template) return null;
+  return {
+    id: template.id,
+    name: template.name,
+    scope: template.scope,
+    reportMode: template.reportMode,
+    customFrom: template.customFrom,
+    customTo: template.customTo,
+    assigneeUserId: template.assigneeUserId,
+    orientation: template.orientation,
+    options: template.options,
+    accessMode: template.accessMode,
+    isDefault: template.isDefault,
+    updatedAt: template.updatedAt,
+  };
+};
+
+const resolveScheduleTemplate = async (req, templateId) => {
+  if (!templateId) return null;
+  const template = await prisma.transactionFollowUpReportTemplate.findUnique({
+    where: { id: templateId },
+  });
+  if (!template) {
+    const error = new Error('قالب التقرير المحدد غير موجود');
+    error.status = 404;
+    throw error;
+  }
+  if (!canUseReportTemplate(req, template)) {
+    const error = new Error('لا يمكنك استخدام قالب التقرير المحدد');
+    error.status = 403;
+    throw error;
+  }
+  return template;
 };
 
 const normalizeTemplateAllowedUserIds = async (inputIds = []) => {
