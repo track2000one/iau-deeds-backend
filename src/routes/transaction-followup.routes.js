@@ -384,11 +384,20 @@ const improvementPlanUpdateSchema = z.object({
 });
 
 const reportArchiveSchema = z.object({
+  archiveName: nullableText(250),
+  notes: nullableText(5000),
+  tags: z.array(z.string().trim().min(1).max(80)).max(30).default([]),
   reportType: z.enum(['weekly', 'monthly', 'custom']).default('custom'),
   from: z.string().trim().min(1),
   to: z.string().trim().min(1),
   assigneeUserId: nullableText(100),
   templateSnapshot: z.unknown().optional().nullable(),
+});
+
+const reportArchiveMetadataSchema = z.object({
+  archiveName: nullableText(250),
+  notes: nullableText(5000),
+  tags: z.array(z.string().trim().min(1).max(80)).max(30).default([]),
 });
 
 const reportScheduleSchema = z.object({
