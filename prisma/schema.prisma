@@ -2199,7 +2199,7 @@ model TransactionFollowUpReportArchive {
   id               String   @id @default(cuid())
   archiveName      String?
   notes            String?
-  tags             Json?
+  tags             String[] @default([])
   reportType       String
   periodFrom       DateTime
   periodTo         DateTime
