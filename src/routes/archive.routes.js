@@ -68,7 +68,7 @@ const sanitizeAttachmentPayload = (body = {}) => ({
   driveUrl: cleanString(body.driveUrl),
   driveFileId: cleanString(body.driveFileId),
   version: Math.max(1, Number.parseInt(String(body.version || '1'), 10) || 1),
-  versionGroupId: cleanString(body.versionGroupId),
+  versionGroupId: cleanString(body.versionGroupId) || undefined,
   versionNote: cleanString(body.versionNote),
   isCurrent: body.isCurrent !== false,
   addedBy: cleanString(body.addedBy),
