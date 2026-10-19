@@ -7086,12 +7086,29 @@ router.post('/reports/templates', async (req, res, next) => {
       }
     }
 
+    const accessMode = input.scope === 'shared' ? input.accessMode : 'all';
+    const allowedUserIds =
+      input.scope === 'shared' && accessMode === 'selected'
+        ? await normalizeTemplateAllowedUserIds(input.allowedUserIds)
+        : [];
+
+    if (input.scope === 'shared' && accessMode === 'selected' && !allowedUserIds.length) {
+      return res.status(400).json({
+        message: 'حدد مستخدمًا واحدًا على الأقل للقالب العام المقيّد',
+      });
+    }
+
     const existing = await prisma.transactionFollowUpReportTemplate.findFirst({
       where: {
         createdById: createdBy.id,
         name: input.name,
       },
     });
+
+    const sortOrder =
+      input.sortOrder !== undefined
+        ? input.sortOrder
+        : existing?.sortOrder ?? await nextTemplateSortOrder(input.scope, createdBy.id);
 
     const data = {
       name: input.name,
@@ -7102,20 +7119,41 @@ router.post('/reports/templates', async (req, res, next) => {
       assigneeUserId: assignee?.id || null,
       orientation: input.orientation,
       options: input.options,
+      accessMode,
+      allowedUserIds,
+      isDefault: input.isDefault,
+      sortOrder,
       createdByName: createdBy.name,
     };
 
-    const row = existing
-      ? await prisma.transactionFollowUpReportTemplate.update({
+    const row = await prisma.$transaction(async (tx) => {
+      if (input.isDefault) {
+        await tx.transactionFollowUpReportTemplate.updateMany({
+          where: input.scope === 'shared'
+            ? { scope: 'shared', isDefault: true }
+            : {
+                scope: 'personal',
+                createdById: createdBy.id,
+                isDefault: true,
+              },
+          data: { isDefault: false },
+        });
+      }
+
+      if (existing) {
+        return tx.transactionFollowUpReportTemplate.update({
           where: { id: existing.id },
           data,
-        })
-      : await prisma.transactionFollowUpReportTemplate.create({
-          data: {
-            ...data,
-            createdById: createdBy.id,
-          },
         });
+      }
+
+      return tx.transactionFollowUpReportTemplate.create({
+        data: {
+          ...data,
+          createdById: createdBy.id,
+        },
+      });
+    });
 
     res.status(existing ? 200 : 201).json(row);
   } catch (error) {
