@@ -2735,7 +2735,7 @@ router.get('/directives/approval-center', async (req, res, next) => {
             entityType: 'transaction_follow_up_directive',
             entityId: { in: directiveIds },
           },
-          orderBy: { createdAt: 'desc' },
+          orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
         })
       : [];
 
@@ -7620,6 +7620,10 @@ router.get('/reports/archives', async (req, res, next) => {
     const source = String(req.query.source || '').trim();
     const reportType = String(req.query.reportType || '').trim();
     const tag = String(req.query.tag || '').trim();
+    const governanceStatus = String(req.query.governanceStatus || '').trim();
+    const retentionPolicy = String(req.query.retentionPolicy || '').trim();
+    const pinned = String(req.query.pinned || '').trim();
+    const protectedFlag = String(req.query.protected || '').trim();
 
     const accessWhere = supervisor
       ? (requestedAssignee ? { assigneeUserId: requestedAssignee } : {})
@@ -7632,6 +7636,18 @@ router.get('/reports/archives', async (req, res, next) => {
         ? { reportType }
         : {}),
       ...(tag ? { tags: { has: tag } } : {}),
+      ...(governanceStatus === 'draft' || governanceStatus === 'final'
+        ? { governanceStatus }
+        : {}),
+      ...(retentionPolicy && ['none', 'one_year', 'three_years', 'five_years', 'permanent', 'custom'].includes(retentionPolicy)
+        ? { retentionPolicy }
+        : {}),
+      ...(pinned === 'true' ? { isPinned: true } : pinned === 'false' ? { isPinned: false } : {}),
+      ...(protectedFlag === 'true'
+        ? { isDeletionProtected: true }
+        : protectedFlag === 'false'
+          ? { isDeletionProtected: false }
+          : {}),
       ...(search
         ? {
             OR: [
@@ -7654,6 +7670,16 @@ router.get('/reports/archives', async (req, res, next) => {
           archiveName: true,
           notes: true,
           tags: true,
+          governanceStatus: true,
+          isPinned: true,
+          isDeletionProtected: true,
+          retentionPolicy: true,
+          retainUntil: true,
+          finalizedAt: true,
+          finalizedById: true,
+          finalizedByName: true,
+          updatedById: true,
+          updatedByName: true,
           reportType: true,
           periodFrom: true,
           periodTo: true,
