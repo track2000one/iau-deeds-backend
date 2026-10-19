@@ -7635,6 +7635,10 @@ router.post('/reports/archives', async (req, res, next) => {
       return res.status(400).json({ message: 'بداية فترة التقرير يجب أن تسبق نهايتها' });
     }
 
+    const manualSnapshot = input.templateSnapshot
+      ? manualReportArchiveSnapshotSchema.parse(input.templateSnapshot)
+      : null;
+
     const archive = await archiveTransactionExecutiveReport({
       reportType: input.reportType,
       from,
@@ -7643,6 +7647,9 @@ router.post('/reports/archives', async (req, res, next) => {
       assigneeName: assignee?.username || null,
       scopeMine: !supervisor || Boolean(assignee),
       source: 'manual',
+      templateId: null,
+      templateName: null,
+      templateSnapshot: manualSnapshot,
       generatedById: createdBy.id,
       generatedByName: createdBy.name,
     });
