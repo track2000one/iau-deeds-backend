@@ -20,6 +20,7 @@ const moduleLabels = {
   archive: 'الأرشفة',
   users: 'المستخدمون',
   investments: 'المساحات والفرص الاستثمارية',
+  central_buildings: 'السجل المركزي للمباني',
 };
 
 const prismaModelByModule = {
@@ -46,6 +47,14 @@ const getPathParts = (req) =>
 
 const getEntityInfo = (moduleName, req) => {
   const parts = getPathParts(req);
+
+  if (moduleName === 'mosques' && parts[0] === 'buildings') {
+    return {
+      entity: 'central_building',
+      entityId: parts[1] && parts[1] !== 'pending-imports' ? parts[1] : null,
+      prismaModel: 'mosqueBuilding',
+    };
+  }
 
   if (moduleName === 'records') {
     return {
@@ -86,6 +95,8 @@ const getEntityLabel = (value) => {
   if (!value || typeof value !== 'object') return null;
 
   return (
+    value.buildingNumber ||
+    value.name ||
     value.deedNumber ||
     value.documentNumber ||
     value.contractNumber ||
@@ -127,6 +138,7 @@ export const auditTrail = (moduleName) => {
     }
 
     const entityInfo = getEntityInfo(moduleName, req);
+    const effectiveModule = entityInfo.entity === 'central_building' ? 'central_buildings' : moduleName;
     const previousData =
       action === 'update' || action === 'delete'
         ? await readPreviousData(entityInfo)
@@ -170,14 +182,14 @@ export const auditTrail = (moduleName) => {
       void createAuditLog({
         user: req.authUser,
         action,
-        module: moduleName,
+        module: effectiveModule,
         entity: entityInfo.entity,
         entityId,
         entityLabel,
         status,
         description: getDescription({
           action,
-          moduleName,
+          moduleName: effectiveModule,
           status,
         }),
         previousData,

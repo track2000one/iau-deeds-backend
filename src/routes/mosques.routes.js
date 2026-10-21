@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { uploadBufferToGoogleDrive } from '../services/googleDrive.js';
 import { hashPassword } from '../security/auth.js';
+import { canManageOwnedRecord, ownedRecordWhere } from '../security/record-ownership.js';
 import { sendMosquePersonnelActivationEmail } from '../services/email.service.js';
 import { archiveMosqueLeavesForRemovedPersonnel } from '../services/mosqueLeaveLifecycle.service.js';
 
@@ -1395,10 +1396,37 @@ router.get('/dashboard', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Registry permissions are granted per module, not only through mosque roles.
+const hasRegistryPermission = (req, action) => (
+  req.authUser?.role === 'admin' ||
+  Boolean(req.authUser?.permissions?.some(
+    (permission) => permission.module === 'central_buildings' && permission[action]
+  ))
+);
+
+const requireBuildingRegistryRole = (action) => (req, res, next) => {
+  if (hasRegistryPermission(req, action)) return next();
+  return requireRoles('head')(req, res, next);
+};
+
+const enrichBuildingCreators = async (buildings) => {
+  const userIds = [...new Set(buildings.map((building) => building.createdBy).filter(Boolean))];
+  if (!userIds.length) return buildings.map((building) => ({ ...building, createdByName: null }));
+  const creators = await prisma.appUser.findMany({
+    where: { id: { in: userIds } },
+    select: { id: true, username: true },
+  });
+  const names = new Map(creators.map((user) => [user.id, user.username]));
+  return buildings.map((building) => ({
+    ...building,
+    createdByName: names.get(building.createdBy) || null,
+  }));
+};
+
 router.get('/building-deeds', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
-    if (!['head', 'supervisor'].includes(context.role)) return res.json([]);
+    if (!hasRegistryPermission(req, 'canView') && !['head', 'supervisor'].includes(context.role)) return res.json([]);
 
     const deeds = await prisma.deed.findMany({
       select: {
@@ -1422,7 +1450,7 @@ router.get('/building-deeds', async (req, res, next) => {
 router.get('/buildings', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
-    if (!['head', 'supervisor'].includes(context.role)) return res.json([]);
+    if (!hasRegistryPermission(req, 'canView') && !['head', 'supervisor'].includes(context.role)) return res.json([]);
 
     const pendingOnly = String(req.query.pending || '').toLowerCase() === 'true';
     if (pendingOnly) {
@@ -1458,6 +1486,7 @@ router.get('/buildings', async (req, res, next) => {
           notes: true,
           coverageStatus: true,
           creationFeasibility: true,
+          createdBy: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -1466,7 +1495,7 @@ router.get('/buildings', async (req, res, next) => {
         take: pageSize,
       });
 
-      return res.json({ items, total, page, pageSize, totalPages });
+      return res.json({ items: await enrichBuildingCreators(items), total, page, pageSize, totalPages });
     }
 
     const rows = await prisma.mosqueBuilding.findMany({
@@ -1490,11 +1519,11 @@ router.get('/buildings', async (req, res, next) => {
       },
       orderBy: [{ buildingNumber: 'asc' }, { name: 'asc' }],
     });
-    res.json(rows);
+    res.json(await enrichBuildingCreators(rows));
   } catch (error) { next(error); }
 });
 
-router.post('/buildings', requireRoles('head'), async (req, res, next) => {
+router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res, next) => {
   try {
     const input = buildingSchema.parse(req.body);
     const pendingImport = input.buildingNumber.startsWith('IMP-');
@@ -1528,23 +1557,31 @@ router.post('/buildings', requireRoles('head'), async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.put('/buildings/:id', requireRoles('head'), async (req, res, next) => {
+router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req, res, next) => {
   try {
     const input = buildingSchema.parse(req.body);
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
-      select: { id: true, deedId: true, buildingNumber: true },
+      select: { id: true, deedId: true, buildingNumber: true, createdBy: true },
     });
     if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
+    if (!canManageOwnedRecord(req.authUser, current)) {
+      return res.status(403).json({ message: 'لا يسمح بتعديل مبنى أنشأه مستخدم آخر؛ تواصل مع المسؤول.' });
+    }
 
     const deedId = input.deedId || current.deedId;
     const effectiveBuildingNumber = input.buildingNumber || current.buildingNumber;
     const pendingImport = effectiveBuildingNumber.startsWith('IMP-');
     if (!pendingImport) await assertBuildingDeed(deedId);
 
-    const building = await prisma.mosqueBuilding.update({
-      where: { id: req.params.id },
+    // The creator must still match when the database performs the write.
+    const updated = await prisma.mosqueBuilding.updateMany({
+      where: ownedRecordWhere(req.authUser, req.params.id),
       data: { ...input, deedId },
+    });
+    if (!updated.count) return res.status(403).json({ message: 'لا تملك صلاحية تعديل هذا المبنى' });
+    const building = await prisma.mosqueBuilding.findUnique({
+      where: { id: req.params.id },
       include: {
         deed: {
           select: {
@@ -1565,11 +1602,12 @@ router.put('/buildings/:id', requireRoles('head'), async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.delete('/buildings/pending-imports/all', requireRoles('head'), async (req, res, next) => {
+router.delete('/buildings/pending-imports/all', requireBuildingRegistryRole('canDelete'), async (req, res, next) => {
   try {
     const pendingWhere = {
       buildingNumber: { startsWith: 'IMP-' },
       notes: { contains: '[[IAU_BUILDING_IMPORT_PENDING_V1]]' },
+      ...(req.authUser.role === 'admin' ? {} : { createdBy: req.authUser.id }),
     };
 
     const [totalPending, protectedPending] = await Promise.all([
@@ -1601,13 +1639,16 @@ router.delete('/buildings/pending-imports/all', requireRoles('head'), async (req
   } catch (error) { next(error); }
 });
 
-router.delete('/buildings/:id', requireRoles('head'), async (req, res, next) => {
+router.delete('/buildings/:id', requireBuildingRegistryRole('canDelete'), async (req, res, next) => {
   try {
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
       include: { _count: { select: { sites: true, siteInspections: true } } },
     });
     if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
+    if (!canManageOwnedRecord(req.authUser, current)) {
+      return res.status(403).json({ message: 'لا يسمح بحذف مبنى أنشأه مستخدم آخر؛ تواصل مع المسؤول.' });
+    }
     if (current._count.sites > 0 || current._count.siteInspections > 0) {
       return res.status(409).json({
         message: current._count.siteInspections > 0
@@ -1615,7 +1656,10 @@ router.delete('/buildings/:id', requireRoles('head'), async (req, res, next) => 
           : 'لا يمكن حذف المبنى قبل فك ارتباط المساجد والمصليات التابعة له',
       });
     }
-    await prisma.mosqueBuilding.delete({ where: { id: req.params.id } });
+    const deleted = await prisma.mosqueBuilding.deleteMany({
+      where: ownedRecordWhere(req.authUser, req.params.id),
+    });
+    if (!deleted.count) return res.status(403).json({ message: 'لا تملك صلاحية حذف هذا المبنى' });
     res.status(204).end();
   } catch (error) { next(error); }
 });

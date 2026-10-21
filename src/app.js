@@ -227,11 +227,36 @@ app.use(
   mosqueJobImportRoutes
 );
 
+// The central buildings registry shares endpoints with the mosque module, but
+// its staff permissions are managed independently. Keep existing mosque-unit
+// access while allowing explicitly granted central_buildings permissions.
+const requireMosquesOrCentralBuildings = (req, res, next) => {
+  const registryPath = /^\/(?:buildings|building-deeds)(?:\/|$)/.test(req.path);
+  if (!registryPath || req.authUser?.role === 'admin') {
+    return requirePermission('mosques')(req, res, next);
+  }
+
+  const action = {
+    GET: 'canView',
+    HEAD: 'canView',
+    POST: 'canAdd',
+    PUT: 'canEdit',
+    PATCH: 'canEdit',
+    DELETE: 'canDelete',
+  }[req.method.toUpperCase()];
+
+  const registryGrant = req.authUser?.permissions?.find(
+    (permission) => permission.module === 'central_buildings'
+  );
+  if (action && registryGrant?.[action]) return next();
+  return requirePermission('mosques')(req, res, next);
+};
+
 app.use(
   '/api/mosques',
   requireAuth,
   auditTrail('mosques'),
-  requirePermission('mosques'),
+  requireMosquesOrCentralBuildings,
   mosquesRoutes
 );
 
