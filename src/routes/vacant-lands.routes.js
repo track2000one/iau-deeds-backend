@@ -258,4 +258,21 @@ router.delete('/:id', async (req, res, next) => {
   } catch (err) { replyError(err, res, next); }
 });
 
+
+/**
+ * Don't expose raw Prisma SQL errors to users while deployment is pending.
+ * This handler is scoped to VacantLand only; other Prisma errors still flow
+ * to the application's central error handler.
+ */
+router.use((error, req, res, next) => {
+  const missingVacantTable =
+    error?.code === 'P2021' &&
+    /(?:^|[."'])VacantLand(?:$|[."'])/i.test(String(error?.meta?.table || ''));
+  if (!missingVacantTable) return next(error);
+  return res.status(503).json({
+    code: 'VACANT_LAND_SCHEMA_PENDING',
+    message: 'سجل الأراضي الشاغرة بانتظار تهيئة جدول قاعدة البيانات. بقية الوحدات تعمل دون تغيير؛ يُرجى مراجعة مسؤول المنصة.',
+  });
+});
+
 export default router;
