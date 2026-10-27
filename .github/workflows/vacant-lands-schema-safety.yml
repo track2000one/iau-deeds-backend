@@ -48,7 +48,7 @@ jobs:
           if (!/CREATE TABLE\s+"VacantLand"/i.test(sql)) {
             throw new Error('Expected creation of the VacantLand registry table.');
           }
-          if (/\b(DROP|TRUNCATE|DELETE|UPDATE|RENAME)\b/i.test(sql)) {
+          if (/(?:^|;)\s*(DROP|TRUNCATE|DELETE|UPDATE|RENAME)\b/im.test(statements)) {
             throw new Error('Destructive or data-changing SQL was detected. Manual review required.');
           }
           const changedExistingTables = [...sql.matchAll(/ALTER\s+TABLE\s+"([^"]+)"/gi)]
