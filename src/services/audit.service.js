@@ -1,4 +1,5 @@
 import { prisma } from '../prisma.js';
+import { Prisma } from '@prisma/client';
 
 const SENSITIVE_KEYS = new Set([
   'password',
@@ -17,6 +18,10 @@ const MAX_JSON_LENGTH = 40_000;
 
 export const sanitizeAuditData = (value, depth = 0) => {
   if (value === null || value === undefined) return value;
+  // Prisma Decimal/Date are class instances. Enumerating their internals injects
+  // a constructor function into JSON and silently prevents audit-log writes.
+  if (value instanceof Prisma.Decimal) return value.toString();
+  if (value instanceof Date) return value.toISOString();
   if (depth > 6) return '[MAX_DEPTH]';
 
   if (Array.isArray(value)) {

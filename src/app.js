@@ -5,6 +5,7 @@ import morgan from 'morgan';
 
 import healthRoutes from './routes/health.routes.js';
 import deedsRoutes from './routes/deeds.routes.js';
+import vacantLandsRoutes from './routes/vacant-lands.routes.js';
 import attachmentsRoutes from './routes/attachments.routes.js';
 import uploadsRoutes from './routes/uploads.routes.js';
 import recordsRoutes from './routes/records.routes.js';
@@ -101,6 +102,14 @@ app.use(
   auditTrail('deeds'),
   requirePermission('deeds'),
   deedsRoutes
+);
+
+app.use(
+  '/api/vacant-lands',
+  requireAuth,
+  auditTrail('vacant_lands'),
+  requirePermission('vacant_lands'),
+  vacantLandsRoutes
 );
 
 app.use(

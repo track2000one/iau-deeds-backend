@@ -77,6 +77,15 @@ enum InvestmentOpportunityStatus {
   CANCELLED
 }
 
+enum VacantLandStatus {
+  DRAFT
+  UNDER_REVIEW
+  VERIFIED_VACANT
+  PARTIALLY_OCCUPIED
+  OCCUPIED
+  ALLOCATED
+}
+
 enum AppUserRole {
   admin
   employee
@@ -171,6 +180,7 @@ model Deed {
   investmentSiteDeeds InvestmentSiteDeed[]
   siteInspections     SiteInspection[]
   buildings           MosqueBuilding[]
+  vacantLands         VacantLand[]
 }
 
 model InvestmentSite {
@@ -2453,5 +2463,45 @@ model TransactionFollowUpBackupRun {
   @@index([status])
   @@index([startedAt])
   @@index([completedAt])
+  @@index([createdAt])
+}
+
+ 
+// Property administration registry. This is not the investment-opportunity module.
+model VacantLand {
+  id                  String           @id @default(cuid())
+  code                String           @unique
+  name                String
+  campus              String
+  deedId              String
+  deed                Deed             @relation(fields: [deedId], references: [id], onDelete: Restrict)
+  locationDescription String?
+  approximateArea     Decimal          @db.Decimal(18, 2)
+  verifiedVacantArea  Decimal?         @db.Decimal(18, 2)
+  status              VacantLandStatus @default(DRAFT)
+  currentUse          String?
+  allocationPurpose   String?
+  latitude            Decimal?         @db.Decimal(10, 7)
+  longitude           Decimal?         @db.Decimal(10, 7)
+  geometryGeoJson     Json?
+  geometrySourceName  String?
+  geometryUpdatedAt   DateTime?
+  geometryUpdatedByName String?
+  inspectionDate      DateTime?
+  inspectionNote      String?
+  notes               String?
+  createdById         String?
+  createdByName       String?
+  updatedById         String?
+  updatedByName       String?
+  verifiedById        String?
+  verifiedByName      String?
+  verifiedAt          DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  @@index([deedId])
+  @@index([campus])
+  @@index([status])
   @@index([createdAt])
 }
