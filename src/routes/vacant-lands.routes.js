@@ -121,6 +121,12 @@ router.post('/', async (req, res, next) => {
     if (input.status === 'VERIFIED_VACANT' && !isAdmin(req)) {
       return res.status(403).json({ message: 'اعتماد الشغور متاح للمسؤول فقط' });
     }
+    if (input.verifiedVacantArea != null && (input.status !== 'VERIFIED_VACANT' || !isAdmin(req))) {
+      return res.status(403).json({ message: 'المساحة الشاغرة المعتمدة لا تسجل إلا بواسطة المسؤول عند التحقق' });
+    }
+    if (input.status === 'VERIFIED_VACANT' && !input.inspectionDate) {
+      return res.status(400).json({ message: 'تاريخ المعاينة مطلوب قبل اعتماد الشغور' });
+    }
     if (!(await assertDeed(input.deedId, res))) return;
     const who = actor(req);
     const item = await prisma.vacantLand.create({
@@ -150,6 +156,12 @@ router.put('/:id', async (req, res, next) => {
     const input = schema.parse(req.body);
     if (input.status === 'VERIFIED_VACANT' && !isAdmin(req)) {
       return res.status(403).json({ message: 'اعتماد الشغور متاح للمسؤول فقط' });
+    }
+    if (input.verifiedVacantArea != null && (input.status !== 'VERIFIED_VACANT' || !isAdmin(req))) {
+      return res.status(403).json({ message: 'المساحة الشاغرة المعتمدة لا تسجل إلا بواسطة المسؤول عند التحقق' });
+    }
+    if (input.status === 'VERIFIED_VACANT' && !input.inspectionDate) {
+      return res.status(400).json({ message: 'تاريخ المعاينة مطلوب قبل اعتماد الشغور' });
     }
     if (!(await assertDeed(input.deedId, res))) return;
     const who = actor(req);
