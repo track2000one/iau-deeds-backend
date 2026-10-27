@@ -130,6 +130,8 @@ const getDescription = ({ action, moduleName, status }) => {
 export const auditTrail = (moduleName) => {
   return async (req, res, next) => {
     const method = req.method.toUpperCase();
+    // A preview is read-only; don't record it as an actual create operation.
+    if (moduleName === 'vacant_lands' && method === 'POST' && req.path === '/import/preview') return next();
     const action =
       moduleName === 'uploads' && method === 'POST'
         ? 'upload'
