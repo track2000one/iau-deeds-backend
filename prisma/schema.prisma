@@ -2484,6 +2484,9 @@ model VacantLand {
   latitude            Decimal?         @db.Decimal(10, 7)
   longitude           Decimal?         @db.Decimal(10, 7)
   geometryGeoJson     Json?
+  geometrySourceName  String?
+  geometryUpdatedAt   DateTime?
+  geometryUpdatedByName String?
   inspectionDate      DateTime?
   inspectionNote      String?
   notes               String?
