@@ -37,6 +37,7 @@ jobs:
       NODE_ENV: test
       DATABASE_URL: postgresql://vacant_test:vacant_test_password@localhost:5432/vacant_test_db?schema=public
       JWT_SECRET: local-ephemeral-github-action-ci-secret-only-long-enough-2026
+      VACANT_LANDS_INTEGRATION: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
