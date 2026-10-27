@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { Prisma } from '@prisma/client';
 import { validateVacantGeometry } from '../services/vacantGeometry.service.js';
+import { previewVacantImport, commitVacantImport, deedRelationships } from '../services/vacant-lands-linkage.service.js';
 
 const router = Router();
 
@@ -67,6 +68,31 @@ const assertDeed = async (deedId, res) => {
   if (!deed) { res.status(400).json({ message: 'يجب ربط الموقع بصك موجود في سجل الصكوك' }); return false; }
   return true;
 };
+
+// Shared deed identity is the source of truth for all three property modules.
+router.get('/deed-relations/:deedId', async (req, res, next) => {
+  try {
+    const result = await deedRelationships(req.params.deedId, req.authUser);
+    if (!result) return res.status(404).json({ message: 'رقم الصك غير موجود' });
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+router.post('/import/preview', async (req, res, next) => {
+  try {
+    res.json(await previewVacantImport(req.body));
+  } catch (error) { replyError(error, res, next); }
+});
+
+router.post('/import/commit', async (req, res, next) => {
+  try {
+    if (req.authUser?.role !== 'admin') {
+      return res.status(403).json({ message: 'اعتماد الاستيراد الجماعي متاح للمسؤول فقط' });
+    }
+    const result = await commitVacantImport(req.body, req.authUser);
+    res.status(result.committed ? 201 : 409).json(result);
+  } catch (error) { replyError(error, res, next); }
+});
 
 router.get('/deed-options', async (req, res, next) => {
   try {
