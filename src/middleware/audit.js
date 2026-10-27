@@ -20,11 +20,13 @@ const moduleLabels = {
   archive: 'الأرشفة',
   users: 'المستخدمون',
   investments: 'المساحات والفرص الاستثمارية',
+  vacant_lands: 'الأراضي الشاغرة',
   central_buildings: 'السجل المركزي للمباني',
 };
 
 const prismaModelByModule = {
   deeds: 'deed',
+  vacant_lands: 'vacantLand',
   attachments: 'attachment',
   archive: 'archiveDocument',
   users: 'appUser',
