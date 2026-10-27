@@ -43,6 +43,8 @@ jobs:
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
           const sql = fs.readFileSync('/tmp/vacant-land-schema-diff.sql', 'utf8');
+          const statements = sql.split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n');
+          console.log('Prisma schema diff (SQL statements only):\n' + statements.slice(0, 16000));
           if (!/CREATE TABLE\s+"VacantLand"/i.test(sql)) {
             throw new Error('Expected creation of the VacantLand registry table.');
           }
