@@ -129,6 +129,72 @@ test('creator-only edits, admin verification requires inspection date', async ()
   created.length = 0;
 });
 
+
+test('GeoJSON boundaries remain linked to the deed and approval is cleared when boundaries change', async () => {
+  const first = {
+    type: 'Feature', properties: {},
+    geometry: { type: 'Polygon', coordinates: [[
+      [50.18, 26.39], [50.181, 26.39], [50.181, 26.391], [50.18, 26.391], [50.18, 26.39],
+    ]] },
+  };
+  const second = {
+    type: 'Feature', properties: {},
+    geometry: { type: 'Polygon', coordinates: [[
+      [50.18, 26.39], [50.182, 26.39], [50.182, 26.391], [50.18, 26.391], [50.18, 26.39],
+    ]] },
+  };
+  const code = 'GIS-' + unique;
+  const initial = await request('/api/vacant-lands', 'POST', owner,
+    payload(code, { approximateArea: 20000, geometryGeoJson: first, geometrySourceName: 'doc.kml' }));
+  assert.equal(initial.status, 201, JSON.stringify(initial.data));
+  created.push(initial.data.id);
+  const id = initial.data.id;
+  assert.equal(initial.data.deedId, deed.id);
+  assert.equal(initial.data.geometrySourceName, 'doc.kml');
+  assert.equal(initial.data.geometryGeoJson.geometry.type, 'Polygon');
+  assert.ok(Number(initial.data.latitude) > 26.39);
+
+  const approved = await request('/api/vacant-lands/' + id, 'PUT', admin,
+    payload(code, {
+      approximateArea: 20000, geometryGeoJson: initial.data.geometryGeoJson,
+      geometrySourceName: 'doc.kml', status: 'VERIFIED_VACANT',
+      inspectionDate: '2026-10-27T12:00:00.000Z',
+      verifiedVacantArea: 7500,
+    }));
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  assert.equal(approved.data.verifiedByName, admin.username);
+
+  const unsafe = await request('/api/vacant-lands/' + id, 'PUT', admin,
+    payload(code, {
+      approximateArea: 20000, geometryGeoJson: second,
+      status: 'VERIFIED_VACANT', inspectionDate: '2026-10-27T12:00:00.000Z', verifiedVacantArea: 7500,
+    }));
+  assert.equal(unsafe.status, 409);
+
+  const revision = await request('/api/vacant-lands/' + id, 'PUT', admin,
+    payload(code, {
+      approximateArea: 20000, geometryGeoJson: second, geometrySourceName: 'revision.kmz',
+      status: 'UNDER_REVIEW', verifiedVacantArea: null,
+    }));
+  assert.equal(revision.status, 200, JSON.stringify(revision.data));
+  assert.equal(revision.data.status, 'UNDER_REVIEW');
+  assert.equal(revision.data.verifiedAt, null);
+  assert.equal(revision.data.verifiedVacantArea, null);
+  assert.equal(revision.data.geometryUpdatedByName, admin.username);
+  assert.equal(revision.data.geometrySourceName, 'revision.kmz');
+
+  const invalidPolygon = await request('/api/vacant-lands/' + id, 'PUT', admin,
+    payload(code, {
+      approximateArea: 20000, status: 'UNDER_REVIEW',
+      geometryGeoJson: {
+        type: 'Polygon',
+        coordinates: [[[50.18, 26.39], [50.181, 26.391], [50.18, 26.391], [50.181, 26.39], [50.18, 26.39]]],
+      },
+    }));
+  assert.equal(invalidPolygon.status, 400);
+});
+
+
 } else {
   test('vacant-lands integration tests require a disposable PostgreSQL instance', { skip: true }, () => {});
 }
