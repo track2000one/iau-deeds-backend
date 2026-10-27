@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
+import { Prisma } from '@prisma/client';
+import { validateVacantGeometry } from '../services/vacantGeometry.service.js';
 
 const router = Router();
 
@@ -31,6 +33,8 @@ const schema = z.object({
   status: status.default('DRAFT'),
   currentUse: optionalText(500),
   allocationPurpose: optionalText(500),
+  geometryGeoJson: z.unknown().optional(),
+  geometrySourceName: optionalText(255),
   latitude: optionalNumber(-90, 90),
   longitude: optionalNumber(-180, 180),
   inspectionDate: z.coerce.date().optional().nullable(),
@@ -129,9 +133,19 @@ router.post('/', async (req, res, next) => {
     }
     if (!(await assertDeed(input.deedId, res))) return;
     const who = actor(req);
+    const geometry = Object.hasOwn(input, 'geometryGeoJson') ? validateVacantGeometry(input.geometryGeoJson) : undefined;
+    if (geometry && input.status === 'VERIFIED_VACANT') {
+      return res.status(409).json({ message: 'احفظ الحدود أولًا بحالة قيد التحقق ثم اعتمد الشغور في إجراء مستقل' });
+    }
     const item = await prisma.vacantLand.create({
       data: {
         ...input,
+        ...(geometry !== undefined ? {
+          geometryGeoJson: geometry ? geometry.feature : Prisma.DbNull,
+          ...(geometry ? { latitude: geometry.centroid.latitude, longitude: geometry.centroid.longitude } : {}),
+          geometryUpdatedAt: geometry ? new Date() : null,
+          geometryUpdatedByName: geometry ? who.name : null,
+        } : {}),
         createdById: who.id,
         createdByName: who.name,
         updatedById: who.id,
@@ -168,11 +182,25 @@ router.put('/:id', async (req, res, next) => {
     }
     if (!(await assertDeed(input.deedId, res))) return;
     const who = actor(req);
+    const geometry = Object.hasOwn(input, 'geometryGeoJson') ? validateVacantGeometry(input.geometryGeoJson) : undefined;
+    const geometryChanged = geometry !== undefined && JSON.stringify(current.geometryGeoJson ?? null) !== JSON.stringify(geometry?.feature ?? null);
+    if (geometryChanged && input.status === 'VERIFIED_VACANT') {
+      return res.status(409).json({ message: 'تغيير حدود موقع يستلزم إعادته إلى قيد التحقق قبل اعتماده مرة أخرى' });
+    }
     const verified = input.status === 'VERIFIED_VACANT';
     const item = await prisma.vacantLand.update({
       where: { id: current.id },
       data: {
         ...input,
+        ...(geometry !== undefined ? {
+          geometryGeoJson: geometry ? geometry.feature : Prisma.DbNull,
+          ...(geometry ? { latitude: geometry.centroid.latitude, longitude: geometry.centroid.longitude } : (geometryChanged ? { latitude: null, longitude: null } : {})),
+          ...(geometryChanged ? {
+            geometryUpdatedAt: new Date(),
+            geometryUpdatedByName: who.name,
+            geometrySourceName: geometry ? input.geometrySourceName || null : null,
+          } : {}),
+        } : {}),
         updatedById: who.id,
         updatedByName: who.name,
         ...(
