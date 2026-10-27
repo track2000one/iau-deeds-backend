@@ -183,7 +183,9 @@ router.put('/:id', async (req, res, next) => {
     if (!(await assertDeed(input.deedId, res))) return;
     const who = actor(req);
     const geometry = Object.hasOwn(input, 'geometryGeoJson') ? validateVacantGeometry(input.geometryGeoJson) : undefined;
-    const geometryChanged = geometry !== undefined && JSON.stringify(current.geometryGeoJson ?? null) !== JSON.stringify(geometry?.feature ?? null);
+    // PostgreSQL jsonb reorders object keys; compare canonical coordinate rings, not serialized objects.
+    const oldGeometry = current.geometryGeoJson?.type === 'Feature' ? current.geometryGeoJson.geometry : current.geometryGeoJson;
+    const geometryChanged = geometry !== undefined && JSON.stringify(oldGeometry?.coordinates ?? null) !== JSON.stringify(geometry?.feature.geometry.coordinates ?? null);
     if (geometryChanged && input.status === 'VERIFIED_VACANT') {
       return res.status(409).json({ message: 'تغيير حدود موقع يستلزم إعادته إلى قيد التحقق قبل اعتماده مرة أخرى' });
     }
