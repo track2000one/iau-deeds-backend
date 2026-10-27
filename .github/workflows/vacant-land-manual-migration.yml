@@ -1,0 +1,67 @@
+name: Vacant Land Manual Migration Smoke Test
+
+on:
+  pull_request:
+    paths:
+      - 'prisma/manual/20261027-create-vacant-land-only.sql'
+      - 'src/routes/vacant-lands.routes.js'
+      - 'tests/vacant-land-schema-smoke.mjs'
+      - '.github/workflows/vacant-land-manual-migration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-safe-manual-schema:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: vacant_land_ci
+          POSTGRES_USER: vacant_ci
+          POSTGRES_PASSWORD: temporary_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vacant_ci -d vacant_land_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://vacant_ci:temporary_ci_password@localhost:5432/vacant_land_ci?schema=public
+      JWT_SECRET: integration-only-ci-test-secret-2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install and generate Prisma client
+        run: npm ci
+      - name: Provision disposable test schema
+        run: npx prisma db push
+      - name: Simulate legacy schema - test database only
+        run: |
+          printf 'DROP TABLE public."VacantLand"; DROP TYPE public."VacantLandStatus";' |
+            npx prisma db execute --stdin --schema prisma/schema.prisma
+      - name: Reject destructive migration statements
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const sql = fs.readFileSync('prisma/manual/20261027-create-vacant-land-only.sql', 'utf8');
+          const commands = sql.split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n');
+          if (!/CREATE TABLE public\."VacantLand"/.test(commands)) throw Error('VacantLand table not created');
+          if (/\bDROP\s+(TABLE|SCHEMA|TYPE|INDEX|COLUMN)\b|\bTRUNCATE\b|\bDELETE\s+FROM\b|\bUPDATE\s+public\./i.test(commands)) {
+            throw Error('Destructive SQL detected');
+          }
+          const createdTables = [...commands.matchAll(/CREATE TABLE\s+public\."([^"]+)"/g)].map((x) => x[1]);
+          if (createdTables.length !== 1 || createdTables[0] !== 'VacantLand') throw Error('Unexpected table creation');
+          console.log('Migration modifies only the new VacantLand table and status type.');
+          NODE
+      - name: Execute reviewed SQL on disposable test database
+        run: npx prisma db execute --file prisma/manual/20261027-create-vacant-land-only.sql --schema prisma/schema.prisma
+      - name: Verify Prisma CRUD and deed foreign key
+        run: node tests/vacant-land-schema-smoke.mjs
