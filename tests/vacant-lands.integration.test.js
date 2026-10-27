@@ -219,7 +219,7 @@ test('bulk import previews exact deed-number identity and commits only clean bat
   assert.equal(imported.status, 201, JSON.stringify(imported.data));
   assert.equal(imported.data.count, 1);
   created.push(imported.data.records[0].id);
-  const stored = await prisma.vacantLand.findUnique({ where: { code: valid.code } });
+  const stored = await prisma.vacantLand.findUnique({ where: { code: valid.code.toUpperCase() } });
   assert.equal(stored.deedId, deed.id);
   assert.equal(stored.status, 'DRAFT');
   assert.equal(stored.verifiedVacantArea, null);
