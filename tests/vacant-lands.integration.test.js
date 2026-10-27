@@ -51,6 +51,7 @@ const payload = (code, overrides = {}) => ({
   ...overrides,
 });
 
+if (process.env.VACANT_LANDS_INTEGRATION === '1') {
 before(async () => {
   process.env.JWT_SECRET ||= 'vacant-lands-integration-test-secret-2026-really-long';
   deed = await prisma.deed.create({
@@ -127,3 +128,7 @@ test('creator-only edits, admin verification requires inspection date', async ()
   assert.equal((await request('/api/vacant-lands/' + id, 'DELETE', admin)).status, 204);
   created.length = 0;
 });
+
+} else {
+  test('vacant-lands integration tests require a disposable PostgreSQL instance', { skip: true }, () => {});
+}
