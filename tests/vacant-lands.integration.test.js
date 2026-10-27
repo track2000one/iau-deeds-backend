@@ -195,6 +195,85 @@ test('GeoJSON boundaries remain linked to the deed and approval is cleared when 
 });
 
 
+test('bulk import previews exact deed-number identity and commits only clean batches as drafts', async () => {
+  const prefix = 'BULK-' + unique;
+  const valid = {
+    code: prefix + '-01', name: 'موقع أولي', campus: 'الحرم الجامعي الشرقي',
+    deedNumber: deed.deedNumber, approximateArea: 1200,
+    latitude: 26.391, longitude: 50.19,
+    sourceReference: 'بيان حصر أولي - صفحة 3',
+  };
+  const bad = { ...valid, code: prefix + '-02', deedNumber: 'غير-موجود-' + unique };
+  const preview = await request('/api/vacant-lands/import/preview', 'POST', owner, { rows: [valid, bad] });
+  assert.equal(preview.status, 200, JSON.stringify(preview.data));
+  assert.equal(preview.data.ready, 1);
+  assert.equal(preview.data.blocked, 1);
+  assert.equal(preview.data.rows[0].linkedDeed.id, deed.id);
+  const denied = await request('/api/vacant-lands/import/commit', 'POST', owner, { rows: [valid] });
+  assert.equal(denied.status, 403);
+  const rejected = await request('/api/vacant-lands/import/commit', 'POST', admin, { rows: [valid, bad] });
+  assert.equal(rejected.status, 409, JSON.stringify(rejected.data));
+  const notWritten = await prisma.vacantLand.count({ where: { code: valid.code } });
+  assert.equal(notWritten, 0, 'atomic commit must not write an incomplete batch');
+  const imported = await request('/api/vacant-lands/import/commit', 'POST', admin, { rows: [valid] });
+  assert.equal(imported.status, 201, JSON.stringify(imported.data));
+  assert.equal(imported.data.count, 1);
+  created.push(imported.data.records[0].id);
+  const stored = await prisma.vacantLand.findUnique({ where: { code: valid.code } });
+  assert.equal(stored.deedId, deed.id);
+  assert.equal(stored.status, 'DRAFT');
+  assert.equal(stored.verifiedVacantArea, null);
+  assert.equal(stored.createdByName, admin.username);
+  const repeat = await request('/api/vacant-lands/import/preview', 'POST', admin, { rows: [valid] });
+  assert.equal(repeat.data.blocked, 1);
+  const duplicates = await request('/api/vacant-lands/import/preview', 'POST', owner, { rows: [valid, valid] });
+  assert.equal(duplicates.data.blocked, 2);
+});
+
+test('deed link resolves central buildings and additional investment-site deeds read-only', async () => {
+  let building;
+  let site;
+  let area;
+  let opportunity;
+  try {
+    building = await prisma.mosqueBuilding.create({ data: {
+      buildingNumber: 'VL-BUILD-' + unique,
+      name: 'مبنى مرتبط بالصك',
+      deedId: deed.id,
+    } });
+    site = await prisma.investmentSite.create({
+      data: {
+        code: 'VL-INV-' + unique, name: 'موقع استثماري متعدد الصكوك',
+        deedLinks: { create: { deedId: deed.id, isPrimary: true } },
+      },
+    });
+    area = await prisma.investmentArea.create({ data: {
+      siteId: site.id, areaNumber: 1, areaCode: 'VL-AREA-' + unique,
+    } });
+    opportunity = await prisma.investmentOpportunity.create({ data: {
+      areaId: area.id, opportunityNumber: 'VL-OP-' + unique, title: 'فرصة مسجلة لدى الإدارة المختصة',
+    } });
+    const adminResult = await request('/api/vacant-lands/deed-relations/' + deed.id, 'GET', admin);
+    assert.equal(adminResult.status, 200, JSON.stringify(adminResult.data));
+    assert.equal(adminResult.data.deed.deedNumber, deed.deedNumber);
+    assert.ok(adminResult.data.buildings.some((x) => x.id === building.id));
+    const match = adminResult.data.investmentSites.find((x) => x.id === site.id);
+    assert.ok(match, 'additional deed links must resolve as well as primary deed links');
+    assert.ok(match.areas[0].opportunities.some((x) => x.id === opportunity.id));
+    const limited = await request('/api/vacant-lands/deed-relations/' + deed.id, 'GET', owner);
+    assert.equal(limited.status, 200);
+    assert.equal(limited.data.permissions.buildingsVisible, false);
+    assert.equal(limited.data.permissions.investmentsVisible, false);
+    assert.deepEqual(limited.data.buildings, []);
+    assert.deepEqual(limited.data.investmentSites, []);
+  } finally {
+    if (opportunity) await prisma.investmentOpportunity.delete({ where: { id: opportunity.id } });
+    if (area) await prisma.investmentArea.delete({ where: { id: area.id } });
+    if (site) await prisma.investmentSite.delete({ where: { id: site.id } });
+    if (building) await prisma.mosqueBuilding.delete({ where: { id: building.id } });
+  }
+});
+
 } else {
   test('vacant-lands integration tests require a disposable PostgreSQL instance', { skip: true }, () => {});
 }
