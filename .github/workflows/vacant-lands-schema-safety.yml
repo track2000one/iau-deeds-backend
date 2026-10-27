@@ -1,0 +1,58 @@
+name: Vacant Lands Schema Safety
+
+on:
+  pull_request:
+    paths:
+      - 'prisma/schema.prisma'
+      - '.github/workflows/vacant-lands-schema-safety.yml'
+  push:
+    branches:
+      - feat/vacant-lands-registry-20261027
+    paths:
+      - 'prisma/schema.prisma'
+      - '.github/workflows/vacant-lands-schema-safety.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-additive-schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Generate a read-only SQL diff against main
+        env:
+          DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
+        run: |
+          git show origin/main:prisma/schema.prisma > /tmp/iau-main-schema.prisma
+          npx prisma migrate diff \
+            --from-schema-datamodel /tmp/iau-main-schema.prisma \
+            --to-schema-datamodel prisma/schema.prisma \
+            --script > /tmp/vacant-land-schema-diff.sql
+      - name: Block destructive and unrelated schema changes
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const sql = fs.readFileSync('/tmp/vacant-land-schema-diff.sql', 'utf8');
+          if (!/CREATE TABLE\s+"VacantLand"/i.test(sql)) {
+            throw new Error('Expected creation of the VacantLand registry table.');
+          }
+          if (/\b(DROP|TRUNCATE|DELETE|UPDATE|RENAME)\b/i.test(sql)) {
+            throw new Error('Destructive or data-changing SQL was detected. Manual review required.');
+          }
+          const changedExistingTables = [...sql.matchAll(/ALTER\s+TABLE\s+"([^"]+)"/gi)]
+            .map((match) => match[1]).filter((name) => name !== 'VacantLand');
+          if (changedExistingTables.length) {
+            throw new Error('Unrelated tables modified: ' + changedExistingTables.join(', '));
+          }
+          console.log('Additive schema change only. Still requires backup and production readiness review.');
+          NODE
