@@ -150,6 +150,9 @@ router.put('/:id', async (req, res, next) => {
   try {
     const current = await prisma.vacantLand.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'الموقع غير موجود' });
+    if (!isAdmin(req) && current.createdById !== req.authUser?.id) {
+      return res.status(403).json({ message: 'يُسمح بتعديل أو حذف المواقع التي أنشأتها فقط' });
+    }
     if (current.status === 'VERIFIED_VACANT' && !isAdmin(req)) {
       return res.status(403).json({ message: 'الموقع المعتمد لا يعدله إلا المسؤول' });
     }
@@ -188,6 +191,9 @@ router.delete('/:id', async (req, res, next) => {
   try {
     const current = await prisma.vacantLand.findUnique({ where: { id: req.params.id } });
     if (!current) return res.status(404).json({ message: 'الموقع غير موجود' });
+    if (!isAdmin(req) && current.createdById !== req.authUser?.id) {
+      return res.status(403).json({ message: 'يُسمح بتعديل أو حذف المواقع التي أنشأتها فقط' });
+    }
     if (current.status === 'VERIFIED_VACANT' && !isAdmin(req)) {
       return res.status(403).json({ message: 'الموقع المعتمد لا يحذفه إلا المسؤول' });
     }
