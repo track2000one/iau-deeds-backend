@@ -1,0 +1,55 @@
+name: Vacant Lands Backend Validation
+
+on:
+  push:
+    branches:
+      - feat/vacant-lands-registry-20261027
+  pull_request:
+    paths:
+      - 'src/routes/vacant-lands.routes.js'
+      - 'src/app.js'
+      - 'prisma/schema.prisma'
+      - 'tests/vacant-lands.integration.test.js'
+      - '.github/workflows/vacant-lands-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vacant_test
+          POSTGRES_PASSWORD: vacant_test_password
+          POSTGRES_DB: vacant_test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vacant_test -d vacant_test_db"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://vacant_test:vacant_test_password@localhost:5432/vacant_test_db?schema=public
+      JWT_SECRET: local-ephemeral-github-action-ci-secret-only-long-enough-2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Validate Prisma schema
+        run: npx prisma validate
+      - name: Initialize disposable test database
+        run: npx prisma db push
+      - name: Check route syntax
+        run: node --check src/routes/vacant-lands.routes.js
+      - name: Test vacant land API against isolated PostgreSQL
+        run: node --test tests/vacant-lands.integration.test.js
