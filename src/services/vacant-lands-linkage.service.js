@@ -31,22 +31,37 @@ export const importRequestSchema = z.object({
 }).strict();
 
 const readCandidates = async (db, rows) => {
-  const [deeds, existing] = await Promise.all([
-    db.deed.findMany({ select: { id: true, deedNumber: true, propertyDescription: true } }),
-    db.vacantLand.findMany({
+  // The deed registry can be verified even while the VacantLand table is waiting
+  // for its separately approved, backed-up production migration.
+  const deeds = await db.deed.findMany({
+    select: { id: true, deedNumber: true, propertyDescription: true },
+  });
+  let existing = [];
+  let schemaReady = true;
+  try {
+    existing = await db.vacantLand.findMany({
       where: { code: { in: rows.map((r) => r?.code).filter((x) => typeof x === 'string') } },
       select: { id: true, code: true, deedId: true },
-    }),
-  ]);
+    });
+  } catch (error) {
+    // Only P2021 for the missing new table is recoverable in read-only preview.
+    // Never treat a database outage, missing deed table or other Prisma failure
+    // as permission to commit data without complete duplicate checks.
+    if (error?.code !== 'P2021'
+      || !/(?:^|[."'])VacantLand(?:$|[."'])/i.test(String(error?.meta?.table || ''))) {
+      throw error;
+    }
+    schemaReady = false;
+  }
   const deedsByKey = new Map();
   for (const deed of deeds) {
     const key = normalizeDeedNumber(deed.deedNumber);
     if (!deedsByKey.has(key)) deedsByKey.set(key, []);
     deedsByKey.get(key).push(deed);
   }
-  return { deedsByKey, existingByCode: new Map(existing.map((r) => [r.code.toUpperCase(), r])) };
+  return { schemaReady, deedsByKey,
+    existingByCode: new Map(existing.map((r) => [r.code.toUpperCase(), r])) };
 };
-
 export async function previewVacantImport(body, db = prisma) {
   const { rows } = importRequestSchema.parse(body);
   const parsed = rows.map((row) => importRowSchema.safeParse(row));
@@ -74,6 +89,7 @@ export async function previewVacantImport(body, db = prisma) {
     if (matches.length > 1) issues.push('رقم الصك ملتبس بين عدة سجلات، يلزم معالجته');
     if (codeCounts.get(row.code) > 1) issues.push('رمز الموقع مكرر داخل ملف الاستيراد');
     if (lookup.existingByCode.has(row.code)) issues.push('رمز الموقع موجود مسبقًا في الأراضي الشاغرة');
+    if (!lookup.schemaReady) issues.push('جدول الأراضي الشاغرة بانتظار التهيئة؛ لا يمكن التأكد من التكرار أو حفظ الدفعة بعد');
     return {
       rowNumber: index + 1, code: row.code, name: row.name,
       campus: row.campus, approximateArea: row.approximateArea,
@@ -87,6 +103,8 @@ export async function previewVacantImport(body, db = prisma) {
   });
   return {
     total: result.length,
+    schemaReady: lookup.schemaReady,
+    deedMatched: result.filter((r) => r.linkedDeed !== null).length,
     ready: result.filter((r) => r.status === 'READY').length,
     blocked: result.filter((r) => r.status !== 'READY').length,
     rows: result,
