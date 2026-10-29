@@ -7,6 +7,8 @@ on:
   pull_request:
     paths:
       - 'src/routes/vacant-lands.routes.js'
+      - 'src/services/vacant-lands-linkage.service.js'
+      - 'tests/vacant-land-preflight-no-table.mjs'
       - 'src/app.js'
       - 'prisma/schema.prisma'
       - 'tests/vacant-lands.integration.test.js'
@@ -54,3 +56,9 @@ jobs:
         run: node --check src/routes/vacant-lands.routes.js
       - name: Test vacant land API against isolated PostgreSQL
         run: node --test tests/vacant-lands.integration.test.js
+      - name: Simulate missing VacantLand table in disposable database only
+        run: |
+          printf 'DROP TABLE public."VacantLand"; DROP TYPE public."VacantLandStatus";' |
+            npx prisma db execute --stdin --schema prisma/schema.prisma
+      - name: Verify read-only deed preflight and blocked commits before migration
+        run: node tests/vacant-land-preflight-no-table.mjs
