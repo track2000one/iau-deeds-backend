@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import healthRoutes from './routes/health.routes.js';
 import deedsRoutes from './routes/deeds.routes.js';
 import vacantLandsRoutes from './routes/vacant-lands.routes.js';
+import campusSurveyTeamRoutes from './routes/campus-survey-team.routes.js';
 import attachmentsRoutes from './routes/attachments.routes.js';
 import uploadsRoutes from './routes/uploads.routes.js';
 import recordsRoutes from './routes/records.routes.js';
@@ -89,6 +90,7 @@ app.use('/api/mosques/public', mosquesPublicRoutes);
 
 app.use('/api/audit', requireAuth, requireAdmin, auditRoutes);
 app.use('/api/users', requireAuth, auditTrail('users'), usersRoutes);
+app.use('/api/campus-survey-team', requireAuth, auditTrail('campus_survey_team'), campusSurveyTeamRoutes);
 app.use(
   '/api/organization-units',
   requireAuth,
