@@ -44,3 +44,14 @@ This feature branch is intentionally a **draft, not production-ready**.
 - The supervision tab shows separate **per-account work counts** and **campus-wide reference totals**.
 - The read-only `GET /api/campus-survey-team/work-report/:code` returns building, vacant-land, and inspection records attributable to the selected linked account; leader/admin can see staff summaries, members only their own.
 - Pre-existing inspections store usernames rather than stable account IDs. Renamed usernames and unlinked inspections require manual attribution/scope review. Counts and reports are not formal completeness verification.
+
+## Central building registry: mandatory founding fields for assigned team members
+- Team member accounts must establish buildings in the **existing** `السجل المركزي للمباني` (not a duplicate registry).
+- Required for staff-created/edited records: building code, building/site name, district, assigned campus, latitude, longitude, and an integer number of floors >= 1; the existing deed-link requirement is preserved.
+- Campus is resolved from the active authenticated assignment; the browser displays it read-only, and the API rejects cross-campus create/update even if a request is tampered with.
+- Staff building listing, photo access, and edits are scoped to the assigned campus; bulk/single building delete is blocked for team members.
+- Creator remains linked to the authenticated account ID for reliable user activity reporting.
+- No automatic changes to old building records, and general non-team building flows retain their historical input rules.
+- Unit tests added: `tests/survey-building-scope.test.js` (not run in this conversation).
+- **Important unresolved boundary:** campus string and coordinate validity do not prove that a building sits inside university property. Verify official deed and GIS polygon/KML campus boundaries; private residences outside West Campus are explicitly excluded.
+- **Important deployment dependency:** the new survey team table must exist and each account be linked before granting editing rights. Tests and migration must run in Staging first.
