@@ -21,6 +21,14 @@ const normalizeArabic = (value) => String(value || '')
   .replace(/\s+/g, ' ')
   .trim();
 
+export const surveyCampusAliases = (campusCode) => campusAliases[campusCode] || [];
+
+export const assertSurveyCampusAccess = (assignment, campusValue) => {
+  if (assignment && !surveyCampusMatches(assignment.campusCode, campusValue)) {
+    throw surveyError('المبنى يقع خارج نطاق الحرم الجامعي المكلف به', 403);
+  }
+};
+
 export const surveyCampusMatches = (campusCode, input) =>
   (campusAliases[campusCode] || []).some((name) => normalizeArabic(name) === normalizeArabic(input));
 
