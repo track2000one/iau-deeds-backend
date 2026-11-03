@@ -104,6 +104,90 @@ router.patch('/:code', async (req, res, next) => {
   }
 });
 
+// Read-only detailed work report. Restricted to leader/admin or the member's own account.
+router.get('/work-report/:code', async (req, res, next) => {
+  try {
+    const viewer = await identity(req);
+    const code = String(req.params.code || '').toUpperCase();
+    if (!viewer || (viewer.role === 'member' && viewer.code !== code)) return deny(res);
+    const member = await prisma.surveyTeamAssignment.findUnique({ where: { code } });
+    if (!member || member.role !== 'member') return res.status(404).json({ message: 'الموظف المكلف غير موجود' });
+    if (!member.userId) return res.status(409).json({ message: 'يجب ربط التكليف بحساب الموظف قبل استخراج تقرير أعماله' });
+    const account = await prisma.appUser.findUnique({
+      where: { id: member.userId }, select: { id: true, username: true },
+    });
+    if (!account) return res.status(409).json({ message: 'حساب الموظف المرتبط بالتكليف غير موجود' });
+
+    const campuses = CAMPUS_NAMES[member.campusCode] || [member.campusName];
+    const [buildings, inspections, vacantResult] = await Promise.all([
+      prisma.mosqueBuilding.findMany({
+        where: { createdBy: account.id, campusLocation: { in: campuses } },
+        select: {
+          id: true, buildingNumber: true, name: true, campusLocation: true,
+          floorsCount: true, createdAt: true, deed: { select: { deedNumber: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.siteInspection.findMany({
+        where: { createdBy: account.username },
+        select: {
+          id: true, inspectionNumber: true, title: true, siteName: true,
+          siteType: true, visitDate: true, workflowStatus: true,
+          observations: true, recommendedAction: true,
+          building: { select: { buildingNumber: true, campusLocation: true } },
+          deed: { select: { deedNumber: true } },
+        },
+        orderBy: { visitDate: 'desc' },
+      }),
+      prisma.vacantLand.findMany({
+        where: { createdById: account.id, campus: { in: campuses } },
+        select: {
+          id: true, code: true, name: true, campus: true, status: true,
+          approximateArea: true, createdAt: true, notes: true,
+          deed: { select: { deedNumber: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }).then((rows) => ({ rows, available: true })).catch((err) => {
+        if (err?.code === 'P2021') return { rows: [], available: false };
+        throw err;
+      }),
+    ]);
+    const activities = [
+      ...buildings.map((b) => ({
+        type: 'building', identifier: b.buildingNumber, title: b.name || 'مبنى',
+        location: b.campusLocation || '', date: b.createdAt,
+        deedNumber: b.deed?.deedNumber || null,
+        details: b.floorsCount == null ? '' : 'عدد الأدوار: ' + b.floorsCount,
+        inAssignedCampus: true,
+      })),
+      ...inspections.map((i) => ({
+        type: 'inspection', identifier: i.inspectionNumber, title: i.title,
+        location: i.siteName, date: i.visitDate,
+        deedNumber: i.deed?.deedNumber || null,
+        details: [i.observations, i.recommendedAction].filter(Boolean).join(' | '),
+        // Inspections unlinked to a campus building require manual scope verification.
+        inAssignedCampus: Boolean(i.building?.campusLocation && campuses.includes(i.building.campusLocation)),
+      })),
+      ...vacantResult.rows.map((l) => ({
+        type: 'vacant_land', identifier: l.code, title: l.name,
+        location: l.campus, date: l.createdAt,
+        deedNumber: l.deed?.deedNumber || null,
+        details: ['المساحة التقريبية: ' + l.approximateArea + ' م²', l.notes].filter(Boolean).join(' | '),
+        inAssignedCampus: true,
+      })),
+    ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    res.json({
+      memberName: member.fullName, username: account.username,
+      campus: member.campusName, counts: {
+        buildings: buildings.length, inspections: inspections.length,
+        vacantLands: vacantResult.available ? vacantResult.rows.length : null,
+      },
+      vacantLandsTableAvailable: vacantResult.available, activities,
+      disclaimer: 'السجلات منسوبة إلى الحساب وفق البيانات المتاحة. المعاينات غير المرتبطة بمبنى داخل الحرم تحتاج تحققًا من نطاقها، ولا تمثل هذه البيانات إثبات اكتمال الحصر.',
+    });
+  } catch (err) { next(err); }
+});
+
 // Reference counts are not completion percentages. Existing legacy records may have other campus spellings.
 router.get('/metrics', async (req, res, next) => {
   try {
