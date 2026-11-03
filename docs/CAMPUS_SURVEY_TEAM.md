@@ -36,3 +36,11 @@ Private houses outside the Western Campus are NOT university property and must n
 10. Do not deploy to Production or merge without explicit authorization.
 
 This feature branch is intentionally a **draft, not production-ready**.
+
+## Unified field-inspections experience
+- No duplicate survey-team item in the main navigation: staff supervision is a tab inside **المعاينات الميدانية**.
+- Inspection table reports now show the authenticated creator username on every row, support filtering by creator, and include a staff activity summary with detailed site visits, observations, and recommended actions.
+- Individual inspection reports distinguish **the user who entered the record** (`createdBy`) from **the person who performed the inspection** (`inspectorName`).
+- The supervision tab shows separate **per-account work counts** and **campus-wide reference totals**.
+- The read-only `GET /api/campus-survey-team/work-report/:code` returns building, vacant-land, and inspection records attributable to the selected linked account; leader/admin can see staff summaries, members only their own.
+- Pre-existing inspections store usernames rather than stable account IDs. Renamed usernames and unlinked inspections require manual attribution/scope review. Counts and reports are not formal completeness verification.
