@@ -2506,3 +2506,23 @@ model VacantLand {
   @@index([status])
   @@index([createdAt])
 }
+
+// Field survey team management. Account binding is explicit and does not grant
+// access to property records until scope-enforcement middleware is deployed.
+model SurveyTeamAssignment {
+  code        String    @id
+  fullName    String
+  role        String    @default("member")
+  campusCode  String?
+  campusName  String?
+  userId      String?   @unique
+  status      String    @default("pending")
+  notes       String?
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([campusCode])
+  @@index([status])
+}

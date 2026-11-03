@@ -6,6 +6,7 @@ import { prisma } from '../prisma.js';
 import { uploadBufferToGoogleDrive, downloadGoogleDriveFile, deleteGoogleDriveFile } from '../services/googleDrive.js';
 import { hashPassword } from '../security/auth.js';
 import { canManageOwnedRecord, ownedRecordWhere } from '../security/record-ownership.js';
+import { getSurveyBuildingMember, validateSurveyBuilding, surveyCampusAliases, assertSurveyCampusAccess } from '../services/surveyBuildingScope.service.js';
 import { sendMosquePersonnelActivationEmail } from '../services/email.service.js';
 import { archiveMosqueLeavesForRemovedPersonnel } from '../services/mosqueLeaveLifecycle.service.js';
 
@@ -1474,9 +1475,10 @@ router.get('/buildings/:id/photos/:photoId/content', async (req, res, next) => {
       return res.status(403).json({ message: 'لا تملك صلاحية عرض صور المباني' });
     }
     const building = await prisma.mosqueBuilding.findUnique({
-      where: { id: req.params.id }, select: { photos: true },
+      where: { id: req.params.id }, select: { photos: true, campusLocation: true },
     });
     if (!building) return res.status(404).json({ message: 'المبنى غير موجود' });
+    assertSurveyCampusAccess(await getSurveyBuildingMember(req.authUser), building.campusLocation);
     const photo = storedBuildingPhotos(building.photos).find((item) => item.id === req.params.photoId);
     if (!photo?.fileId) return res.status(404).json({ message: 'الصورة غير موجودة' });
     const file = await downloadGoogleDriveFile(photo.fileId);
@@ -1492,9 +1494,10 @@ router.post('/buildings/:id/photos', requireBuildingMediaUploadRole, buildingPho
   try {
     const building = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
-      select: { id: true, buildingNumber: true, createdBy: true, photos: true },
+      select: { id: true, buildingNumber: true, createdBy: true, photos: true, campusLocation: true },
     });
     if (!building) return res.status(404).json({ message: 'المبنى غير موجود' });
+    assertSurveyCampusAccess(await getSurveyBuildingMember(req.authUser), building.campusLocation);
     if (!canManageOwnedRecord(req.authUser, building)) {
       return res.status(403).json({ message: 'إضافة الصور متاحة لمنشئ السجل أو المسؤول فقط' });
     }
@@ -1546,9 +1549,10 @@ router.delete('/buildings/:id/photos/:photoId', requireBuildingRegistryRole('can
   try {
     const building = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
-      select: { id: true, createdBy: true, photos: true },
+      select: { id: true, createdBy: true, photos: true, campusLocation: true },
     });
     if (!building) return res.status(404).json({ message: 'المبنى غير موجود' });
+    assertSurveyCampusAccess(await getSurveyBuildingMember(req.authUser), building.campusLocation);
     if (!canManageOwnedRecord(req.authUser, building)) {
       return res.status(403).json({ message: 'حذف الصور متاح لمنشئ السجل أو المسؤول فقط' });
     }
@@ -1739,6 +1743,10 @@ router.get('/buildings', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
     if (!hasRegistryPermission(req, 'canView') && !['head', 'supervisor'].includes(context.role)) return res.json([]);
+    const teamAssignment = await getSurveyBuildingMember(req.authUser);
+    const assignedCampusFilter = teamAssignment
+      ? { campusLocation: { in: surveyCampusAliases(teamAssignment.campusCode) } }
+      : {};
 
     const pendingOnly = String(req.query.pending || '').toLowerCase() === 'true';
     if (pendingOnly) {
@@ -1746,6 +1754,7 @@ router.get('/buildings', async (req, res, next) => {
       const pageSize = Math.min(60, Math.max(6, Number.parseInt(String(req.query.pageSize || '24'), 10) || 24));
       const search = String(req.query.search || '').trim();
       const where = {
+        ...assignedCampusFilter,
         buildingNumber: { startsWith: 'IMP-' },
         ...(search ? {
           OR: [
@@ -1787,7 +1796,7 @@ router.get('/buildings', async (req, res, next) => {
     }
 
     const rows = await prisma.mosqueBuilding.findMany({
-      where: { NOT: { buildingNumber: { startsWith: 'IMP-' } } },
+      where: { ...assignedCampusFilter, NOT: { buildingNumber: { startsWith: 'IMP-' } } },
       include: {
         deed: {
           select: {
@@ -1813,7 +1822,14 @@ router.get('/buildings', async (req, res, next) => {
 
 router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res, next) => {
   try {
-    const input = buildingSchema.parse(req.body);
+    const surveyAssignment = await getSurveyBuildingMember(req.authUser);
+    const input = validateSurveyBuilding({
+      input: buildingSchema.parse(req.body),
+      assignment: surveyAssignment,
+    });
+    if (surveyAssignment && input.buildingNumber.startsWith('IMP-')) {
+      return res.status(400).json({ message: 'يجب اعتماد رقم مبنى فعلي، ولا يمكن تأسيس سجل حصر برمز استيراد مؤقت' });
+    }
     const pendingImport = input.buildingNumber.startsWith('IMP-');
     if (!pendingImport) await assertBuildingDeed(input.deedId);
 
@@ -1847,12 +1863,17 @@ router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res
 
 router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req, res, next) => {
   try {
-    const input = buildingSchema.parse(req.body);
+    const parsed = buildingSchema.parse(req.body);
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
-      select: { id: true, deedId: true, buildingNumber: true, createdBy: true },
+      select: { id: true, deedId: true, buildingNumber: true, createdBy: true, campusLocation: true },
     });
     if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
+    const input = validateSurveyBuilding({
+      input: parsed,
+      assignment: await getSurveyBuildingMember(req.authUser),
+      existingCampus: current.campusLocation,
+    });
     if (!canManageOwnedRecord(req.authUser, current)) {
       return res.status(403).json({ message: 'لا يسمح بتعديل مبنى أنشأه مستخدم آخر؛ تواصل مع المسؤول.' });
     }
@@ -1860,6 +1881,9 @@ router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req,
     const deedId = input.deedId || current.deedId;
     const effectiveBuildingNumber = input.buildingNumber || current.buildingNumber;
     const pendingImport = effectiveBuildingNumber.startsWith('IMP-');
+    if (pendingImport && await getSurveyBuildingMember(req.authUser)) {
+      return res.status(400).json({ message: 'يجب تحويل المبنى المستورد إلى سجل فعلي قبل إدخاله ضمن أعمال الحصر' });
+    }
     if (!pendingImport) await assertBuildingDeed(deedId);
 
     // The creator must still match when the database performs the write.
@@ -1892,6 +1916,9 @@ router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req,
 
 router.delete('/buildings/pending-imports/all', requireBuildingRegistryRole('canDelete'), async (req, res, next) => {
   try {
+    if (await getSurveyBuildingMember(req.authUser)) {
+      return res.status(403).json({ message: 'حذف مجموعات المباني غير متاح لأعضاء فريق الحصر' });
+    }
     const pendingWhere = {
       buildingNumber: { startsWith: 'IMP-' },
       notes: { contains: '[[IAU_BUILDING_IMPORT_PENDING_V1]]' },
@@ -1929,6 +1956,9 @@ router.delete('/buildings/pending-imports/all', requireBuildingRegistryRole('can
 
 router.delete('/buildings/:id', requireBuildingRegistryRole('canDelete'), async (req, res, next) => {
   try {
+    if (await getSurveyBuildingMember(req.authUser)) {
+      return res.status(403).json({ message: 'حذف مباني الحصر الميداني متاح لمسؤول النظام فقط؛ اطلب تصحيح السجل بدل حذفه' });
+    }
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
       include: { _count: { select: { sites: true, siteInspections: true } } },
