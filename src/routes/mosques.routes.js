@@ -1409,6 +1409,12 @@ const requireBuildingRegistryRole = (action) => (req, res, next) => {
   return requireRoles('head')(req, res, next);
 };
 
+// Users who can create a building may also upload its initial media; ownership is always checked separately.
+const requireBuildingMediaUploadRole = (req, res, next) => {
+  if (hasRegistryPermission(req, 'canAdd') || hasRegistryPermission(req, 'canEdit')) return next();
+  return requireRoles('head')(req, res, next);
+};
+
 const enrichBuildingCreators = async (buildings) => {
   const userIds = [...new Set(buildings.map((building) => building.createdBy).filter(Boolean))];
   if (!userIds.length) return buildings.map((building) => ({ ...building, createdByName: null }));
@@ -1482,7 +1488,7 @@ router.get('/buildings/:id/photos/:photoId/content', async (req, res, next) => {
 });
 
 // Creator or administrator may upload multiple images; append rather than replacing older photos.
-router.post('/buildings/:id/photos', requireBuildingRegistryRole('canEdit'), buildingPhotoUpload.array('photos', BUILDING_PHOTO_MAX_FILES), async (req, res, next) => {
+router.post('/buildings/:id/photos', requireBuildingMediaUploadRole, buildingPhotoUpload.array('photos', BUILDING_PHOTO_MAX_FILES), async (req, res, next) => {
   try {
     const building = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
@@ -1632,7 +1638,7 @@ router.get('/buildings/:id/documents/:documentId/content', async (req, res, next
   } catch (error) { next(error); }
 });
 
-router.post('/buildings/:id/documents', requireBuildingRegistryRole('canEdit'),
+router.post('/buildings/:id/documents', requireBuildingMediaUploadRole,
   buildingDocumentUpload.array('documents', BUILDING_DOCUMENT_MAX_FILES), async (req, res, next) => {
   try {
     const building = await prisma.mosqueBuilding.findUnique({
