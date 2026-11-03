@@ -6,6 +6,7 @@ import { prisma } from '../prisma.js';
 import { uploadBufferToGoogleDrive, downloadGoogleDriveFile, deleteGoogleDriveFile } from '../services/googleDrive.js';
 import { hashPassword } from '../security/auth.js';
 import { canManageOwnedRecord, ownedRecordWhere } from '../security/record-ownership.js';
+import { getSurveyBuildingMember, validateSurveyBuilding } from '../services/surveyBuildingScope.service.js';
 import { sendMosquePersonnelActivationEmail } from '../services/email.service.js';
 import { archiveMosqueLeavesForRemovedPersonnel } from '../services/mosqueLeaveLifecycle.service.js';
 
@@ -1658,7 +1659,14 @@ router.get('/buildings', async (req, res, next) => {
 
 router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res, next) => {
   try {
-    const input = buildingSchema.parse(req.body);
+    const surveyAssignment = await getSurveyBuildingMember(req.authUser);
+    const input = validateSurveyBuilding({
+      input: buildingSchema.parse(req.body),
+      assignment: surveyAssignment,
+    });
+    if (surveyAssignment && input.buildingNumber.startsWith('IMP-')) {
+      return res.status(400).json({ message: 'يجب اعتماد رقم مبنى فعلي، ولا يمكن تأسيس سجل حصر برمز استيراد مؤقت' });
+    }
     const pendingImport = input.buildingNumber.startsWith('IMP-');
     if (!pendingImport) await assertBuildingDeed(input.deedId);
 
@@ -1692,12 +1700,17 @@ router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res
 
 router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req, res, next) => {
   try {
-    const input = buildingSchema.parse(req.body);
+    const parsed = buildingSchema.parse(req.body);
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
-      select: { id: true, deedId: true, buildingNumber: true, createdBy: true },
+      select: { id: true, deedId: true, buildingNumber: true, createdBy: true, campusLocation: true },
     });
     if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
+    const input = validateSurveyBuilding({
+      input: parsed,
+      assignment: await getSurveyBuildingMember(req.authUser),
+      existingCampus: current.campusLocation,
+    });
     if (!canManageOwnedRecord(req.authUser, current)) {
       return res.status(403).json({ message: 'لا يسمح بتعديل مبنى أنشأه مستخدم آخر؛ تواصل مع المسؤول.' });
     }
