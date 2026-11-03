@@ -33,6 +33,19 @@ const identity = async (req) => {
 };
 const deny = (res) => res.status(403).json({ message: 'غير مخول بالاطلاع على تكليفات الحصر' });
 
+// Visible to the current account regardless of dashboard permission.
+// Used by the central registry to lock the team member to their assigned campus.
+router.get('/my-assignment', async (req, res, next) => {
+  try {
+    if (isAdmin(req)) return res.json(null);
+    const assignment = await prisma.surveyTeamAssignment.findFirst({
+      where: { userId: req.authUser.id, role: 'member' },
+      select: { code: true, campusName: true, campusCode: true, status: true },
+    });
+    res.json(assignment || null);
+  } catch (err) { next(err); }
+});
+
 // Never grant access based on a person's name; an administrator must bind the actual account ID.
 router.get('/', async (req, res, next) => {
   try {
