@@ -32,5 +32,7 @@ jobs:
           node --check src/routes/investment-areas.routes.js
           node --check src/routes/attachments.routes.js
           node --check src/routes/uploads.routes.js
+          node --check src/routes/mosques.routes.js
+          node --check src/server.js
       - name: Run tests
         run: npm test

@@ -1409,6 +1409,12 @@ const requireBuildingRegistryRole = (action) => (req, res, next) => {
   return requireRoles('head')(req, res, next);
 };
 
+// Users who can create a building may also upload its initial media; ownership is always checked separately.
+const requireBuildingMediaUploadRole = (req, res, next) => {
+  if (hasRegistryPermission(req, 'canAdd') || hasRegistryPermission(req, 'canEdit')) return next();
+  return requireRoles('head')(req, res, next);
+};
+
 const enrichBuildingCreators = async (buildings) => {
   const userIds = [...new Set(buildings.map((building) => building.createdBy).filter(Boolean))];
   if (!userIds.length) return buildings.map((building) => ({ ...building, createdByName: null }));
@@ -1482,7 +1488,7 @@ router.get('/buildings/:id/photos/:photoId/content', async (req, res, next) => {
 });
 
 // Creator or administrator may upload multiple images; append rather than replacing older photos.
-router.post('/buildings/:id/photos', requireBuildingRegistryRole('canEdit'), buildingPhotoUpload.array('photos', BUILDING_PHOTO_MAX_FILES), async (req, res, next) => {
+router.post('/buildings/:id/photos', requireBuildingMediaUploadRole, buildingPhotoUpload.array('photos', BUILDING_PHOTO_MAX_FILES), async (req, res, next) => {
   try {
     const building = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
@@ -1516,6 +1522,9 @@ router.post('/buildings/:id/photos', requireBuildingRegistryRole('canEdit'), bui
         fileName: uploaded.fileName,
         mimeType: uploaded.mimeType,
         uploadedAt: new Date().toISOString(),
+        uploadedBy: req.authUser.id,
+        uploadedByName: req.authUser.username || null,
+        isPrimary: photos.length === 0,
       };
       photos.push(photo);
       try {
@@ -1547,12 +1556,158 @@ router.delete('/buildings/:id/photos/:photoId', requireBuildingRegistryRole('can
     const photo = photos.find((item) => item.id === req.params.photoId);
     if (!photo) return res.status(404).json({ message: 'الصورة غير موجودة' });
     const remaining = photos.filter((item) => item.id !== req.params.photoId);
+    if (photo.isPrimary && remaining.length) remaining[0] = { ...remaining[0], isPrimary: true };
     await prisma.mosqueBuilding.update({ where: { id: building.id }, data: { photos: remaining } });
     if (photo.fileId) {
       try { await deleteGoogleDriveFile(photo.fileId); }
       catch (error) { console.warn('Could not remove old private building photo:', error?.message); }
     }
     res.json({ photos: remaining });
+  } catch (error) { next(error); }
+});
+
+
+// Each building has one cover photo; existing legacy photos without a flag remain valid.
+router.patch('/buildings/:id/photos/:photoId/primary', requireBuildingRegistryRole('canEdit'), async (req, res, next) => {
+  try {
+    const building = await prisma.mosqueBuilding.findUnique({
+      where: { id: req.params.id }, select: { id: true, createdBy: true, photos: true },
+    });
+    if (!building) return res.status(404).json({ message: 'المبنى غير موجود' });
+    if (!canManageOwnedRecord(req.authUser, building)) {
+      return res.status(403).json({ message: 'تحديد الصورة الرئيسية متاح لمنشئ السجل أو المسؤول فقط' });
+    }
+    const photos = storedBuildingPhotos(building.photos);
+    if (!photos.some((item) => item.id === req.params.photoId)) {
+      return res.status(404).json({ message: 'الصورة غير موجودة' });
+    }
+    const updated = photos.map((item) => ({ ...item, isPrimary: item.id === req.params.photoId }));
+    await prisma.mosqueBuilding.update({ where: { id: building.id }, data: { photos: updated } });
+    res.json({ photos: updated });
+  } catch (error) { next(error); }
+});
+
+const BUILDING_DOCUMENT_MAX_FILES = 8;
+const BUILDING_DOCUMENT_MAX_TOTAL = 40;
+const BUILDING_DOCUMENT_MAX_BYTES = 12 * 1024 * 1024;
+const buildingDocumentTypes = new Map([
+  ['application/pdf', '.pdf'],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],
+]);
+const buildingDocumentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: BUILDING_DOCUMENT_MAX_BYTES, files: BUILDING_DOCUMENT_MAX_FILES },
+  fileFilter: (_req, file, callback) => {
+    const suffix = buildingDocumentTypes.get(file.mimetype);
+    if (!suffix || !file.originalname.toLowerCase().endsWith(suffix)) {
+      return callback(new Error('يُسمح بمستندات PDF وDOCX وXLSX فقط (12 ميجابايت للملف).'));
+    }
+    callback(null, true);
+  },
+});
+const storedBuildingDocuments = (value) => Array.isArray(value) ? value : [];
+const validBuildingDocument = (file) => {
+  const signature = file.buffer;
+  if (file.mimetype === 'application/pdf') {
+    return signature.length >= 5 && signature.toString('ascii', 0, 5) === '%PDF-';
+  }
+  return signature.length >= 4 && signature[0] === 0x50 && signature[1] === 0x4b &&
+    [0x03, 0x05, 0x07].includes(signature[2]);
+};
+
+// Private document download; never exposes Google Drive file IDs in public URLs.
+router.get('/buildings/:id/documents/:documentId/content', async (req, res, next) => {
+  try {
+    const role = await getModuleRole(req);
+    if (!hasRegistryPermission(req, 'canView') && !['head', 'supervisor'].includes(role.role)) {
+      return res.status(403).json({ message: 'لا تملك صلاحية عرض مرفقات المبنى' });
+    }
+    const building = await prisma.mosqueBuilding.findUnique({
+      where: { id: req.params.id }, select: { documents: true },
+    });
+    if (!building) return res.status(404).json({ message: 'المبنى غير موجود' });
+    const document = storedBuildingDocuments(building.documents).find((item) => item.id === req.params.documentId);
+    if (!document?.fileId) return res.status(404).json({ message: 'المرفق غير موجود' });
+    const file = await downloadGoogleDriveFile(document.fileId);
+    res.setHeader('Content-Type', document.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', "attachment; filename*=UTF-8''" + encodeURIComponent(document.fileName || 'document'));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(file.buffer);
+  } catch (error) { next(error); }
+});
+
+router.post('/buildings/:id/documents', requireBuildingMediaUploadRole,
+  buildingDocumentUpload.array('documents', BUILDING_DOCUMENT_MAX_FILES), async (req, res, next) => {
+  try {
+    const building = await prisma.mosqueBuilding.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, buildingNumber: true, createdBy: true, documents: true },
+    });
+    if (!building) return res.status(404).json({ message: 'المبنى غير موجود' });
+    if (!canManageOwnedRecord(req.authUser, building)) {
+      return res.status(403).json({ message: 'رفع المرفقات متاح لمنشئ السجل أو المسؤول فقط' });
+    }
+    if (building.buildingNumber.startsWith('IMP-')) {
+      return res.status(409).json({ message: 'اعتمد المبنى المستورد أولًا' });
+    }
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ message: 'اختر ملفًا واحدًا على الأقل' });
+    if (storedBuildingDocuments(building.documents).length + files.length > BUILDING_DOCUMENT_MAX_TOTAL) {
+      return res.status(400).json({ message: 'الحد الأعلى 40 مرفقًا للمبنى' });
+    }
+    if (files.some((file) => !validBuildingDocument(file))) {
+      return res.status(400).json({ message: 'محتوى الملف غير متوافق مع صيغته' });
+    }
+    const documents = [...storedBuildingDocuments(building.documents)];
+    for (const file of files) {
+      const uploaded = await uploadBufferToGoogleDrive(file, {
+        fileName: 'central-building-document-' + building.buildingNumber + '-' + file.originalname,
+        makePublic: false,
+      });
+      const document = {
+        id: crypto.randomUUID(),
+        fileId: uploaded.driveFileId,
+        fileName: uploaded.fileName,
+        mimeType: uploaded.mimeType,
+        fileSize: file.size,
+        uploadedAt: new Date().toISOString(),
+        uploadedBy: req.authUser.id,
+        uploadedByName: req.authUser.username || null,
+      };
+      documents.push(document);
+      try {
+        await prisma.mosqueBuilding.update({ where: { id: building.id }, data: { documents } });
+      } catch (error) {
+        documents.pop();
+        await deleteGoogleDriveFile(uploaded.driveFileId).catch(() => {});
+        throw error;
+      }
+    }
+    res.status(201).json({ documents });
+  } catch (error) { next(error); }
+});
+
+router.delete('/buildings/:id/documents/:documentId', requireBuildingRegistryRole('canEdit'), async (req, res, next) => {
+  try {
+    const building = await prisma.mosqueBuilding.findUnique({
+      where: { id: req.params.id }, select: { id: true, createdBy: true, documents: true },
+    });
+    if (!building) return res.status(404).json({ message: 'المبنى غير موجود' });
+    if (!canManageOwnedRecord(req.authUser, building)) {
+      return res.status(403).json({ message: 'حذف المرفقات متاح لمنشئ السجل أو المسؤول فقط' });
+    }
+    const documents = storedBuildingDocuments(building.documents);
+    const document = documents.find((item) => item.id === req.params.documentId);
+    if (!document) return res.status(404).json({ message: 'المرفق غير موجود' });
+    const remaining = documents.filter((item) => item.id !== req.params.documentId);
+    await prisma.mosqueBuilding.update({ where: { id: building.id }, data: { documents: remaining } });
+    if (document.fileId) {
+      try { await deleteGoogleDriveFile(document.fileId); }
+      catch (error) { console.warn('Could not delete private building document:', error?.message); }
+    }
+    res.json({ documents: remaining });
   } catch (error) { next(error); }
 });
 
@@ -1782,8 +1937,8 @@ router.delete('/buildings/:id', requireBuildingRegistryRole('canDelete'), async 
     if (!canManageOwnedRecord(req.authUser, current)) {
       return res.status(403).json({ message: 'لا يسمح بحذف مبنى أنشأه مستخدم آخر؛ تواصل مع المسؤول.' });
     }
-    if (storedBuildingPhotos(current.photos).length) {
-      return res.status(409).json({ message: 'احذف صور المبنى أولًا قبل حذف سجله.' });
+    if (storedBuildingPhotos(current.photos).length || storedBuildingDocuments(current.documents).length) {
+      return res.status(409).json({ message: 'احذف صور المبنى ومرفقاته أولًا قبل حذف سجله.' });
     }
     if (current._count.sites > 0 || current._count.siteInspections > 0) {
       return res.status(409).json({

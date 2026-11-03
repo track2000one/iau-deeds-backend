@@ -16,6 +16,10 @@ import { prisma } from './prisma.js';
 const port = Number(process.env.PORT || 8080);
 
 const startServer = async () => {
+  // Only the optional central-building documents column is added.  Never use
+  // prisma db push here: it may reconcile unrelated schemas in production.
+  // IF NOT EXISTS makes repeat deploys safe; existing records are untouched.
+  await prisma.$executeRawUnsafe('ALTER TABLE "MosqueBuilding" ADD COLUMN IF NOT EXISTS "documents" JSONB');
   await ensureBootstrapAdmin();
   await ensureOrganizationStorage();
   await ensureOfficialMosqueSites();
