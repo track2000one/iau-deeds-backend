@@ -123,7 +123,29 @@ router.get('/metrics', async (req, res, next) => {
           throw error;
         }),
       ]);
-      return { code: member.code, buildings, inspections, vacantLands, countsAreProvisional: true };
+      // Author-attributed counts are distinct from campus-wide existing-record totals.
+      // Buildings and vacant lands use account IDs, whereas legacy inspections store username.
+      const account = member.userId ? await prisma.appUser.findUnique({
+        where: { id: member.userId }, select: { username: true },
+      }) : null;
+      const [employeeBuildings, employeeInspections, employeeVacantLands] = member.userId && account
+        ? await Promise.all([
+          prisma.mosqueBuilding.count({ where: { ...buildingWhere, createdBy: member.userId } }),
+          prisma.siteInspection.count({ where: { createdBy: account.username } }),
+          prisma.vacantLand.count({
+            where: { campus: { in: names }, createdById: member.userId },
+          }).catch((error) => {
+            if (error?.code === 'P2021') return null;
+            throw error;
+          }),
+        ])
+        : [null, null, null];
+      return {
+        code: member.code, buildings, inspections, vacantLands,
+        employeeBuildings, employeeInspections, employeeVacantLands,
+        accountUsername: account?.username || null,
+        countsAreProvisional: true,
+      };
     }));
     res.json(metrics);
   } catch (err) { next(err); }
