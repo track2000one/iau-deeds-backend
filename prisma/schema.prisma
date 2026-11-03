@@ -1033,6 +1033,7 @@ model MosqueBuilding {
   approvedAlternative String?
   notes               String?
   photos              Json?
+  documents           Json?    // Private building documents; independent of photo gallery
   createdBy           String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
