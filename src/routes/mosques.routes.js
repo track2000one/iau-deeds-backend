@@ -2070,9 +2070,19 @@ const validateWomenVisitScope = (site, visitScope) => {
   throw error;
 };
 
+// A standalone women's prayer room already has its own site record and uses
+// the shared checklist once. Only genuinely additional checks are needed.
+const STANDALONE_WOMEN_ADDITIONAL_CHECKLIST = [
+  { category: 'الخصوصية', title: 'سلامة الحواجز والستائر وتحقيق الخصوصية المناسبة', details: { section: 'women' } },
+  { category: 'الإتاحة', title: 'فتح المصلى وجاهزيته وإتاحته أثناء أوقات الصلاة', details: { section: 'women' } },
+];
+const isStandaloneWomenPrayerRoom = (site) => site?.siteType === 'prayer_room' && site.prayerRoomGender === 'women';
+
 const newFieldChecklist = ({ site = null, visitScope = 'whole_site' } = {}) => [
   ...FIELD_VISIT_CHECKLIST,
-  ...(shouldIncludeWomenSection(site, visitScope) ? WOMEN_PRAYER_AREA_CHECKLIST : []),
+  ...(isStandaloneWomenPrayerRoom(site)
+    ? STANDALONE_WOMEN_ADDITIONAL_CHECKLIST
+    : shouldIncludeWomenSection(site, visitScope) ? WOMEN_PRAYER_AREA_CHECKLIST : []),
 ].map((item) => ({
   ...item,
   status: 'not_checked',
