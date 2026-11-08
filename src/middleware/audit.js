@@ -30,6 +30,31 @@ const prismaModelByModule = {
   attachments: 'attachment',
   archive: 'archiveDocument',
   users: 'appUser',
+  site_inspections: 'siteInspection',
+  transaction_follow_up: 'transactionFollowUp',
+  contracts_followup: 'contractFollowUp',
+  assets: 'asset',
+};
+
+const mosqueModelsByResource = {
+  buildings: 'mosqueBuilding',
+  sites: 'mosqueSite',
+  'field-tours': 'mosqueFieldTour',
+  'field-visits': 'mosqueFieldVisit',
+  personnel: 'mosquePersonnel',
+  requests: 'mosqueRequest',
+  tickets: 'mosqueTicket',
+  leaves: 'mosqueLeave',
+  jobs: 'mosqueJobApplication',
+  'quran-warehouses': 'mosqueQuranWarehouse',
+  'improvement-goals': 'mosqueImprovementGoal',
+  'completion-tasks': 'mosqueCompletionTask',
+};
+
+const transactionModelsByResource = {
+  risks: 'transactionFollowUpRiskRegister',
+  'preventive-actions': 'transactionFollowUpPreventiveAction',
+  'improvement-plans': 'transactionFollowUpImprovementPlan',
 };
 
 const recordsModelByResource = {
@@ -58,6 +83,52 @@ const getEntityInfo = (moduleName, req) => {
     };
   }
 
+  if (moduleName === 'mosques' && mosqueModelsByResource[parts[0]]) {
+    return {
+      entity: parts[0],
+      entityId: parts[1] || null,
+      prismaModel: mosqueModelsByResource[parts[0]],
+    };
+  }
+
+  if (moduleName === 'contracts_followup') {
+    return {
+      entity: 'contract',
+      entityId: parts[0] || null,
+      prismaModel: 'contractFollowUp',
+      lookupKey: 'contractKey',
+    };
+  }
+
+  if (moduleName === 'assets' && req.baseUrl?.endsWith('/cycles')) {
+    return {
+      entity: 'asset_cycle',
+      entityId: parts[0] || null,
+      prismaModel: 'assetUpdateCycle',
+    };
+  }
+
+  if (moduleName === 'transaction_follow_up') {
+    if (parts[0] === 'directives' && transactionModelsByResource[parts[1]]) {
+      return {
+        entity: parts[1],
+        entityId: parts[2] || null,
+        prismaModel: transactionModelsByResource[parts[1]],
+      };
+    }
+    if (parts[0] === 'archived') {
+      return { entity: 'transaction', entityId: parts[1] || null, prismaModel: 'transactionFollowUp' };
+    }
+    if (parts[0] === 'reports' || parts[0] === 'alerts' || parts[0] === 'directives') {
+      return { entity: parts[0], entityId: null, prismaModel: null };
+    }
+    return {
+      entity: 'transaction',
+      entityId: parts[0] || null,
+      prismaModel: 'transactionFollowUp',
+    };
+  }
+
   if (moduleName === 'records') {
     return {
       entity: parts[0] || 'record',
@@ -81,12 +152,12 @@ const getEntityInfo = (moduleName, req) => {
   };
 };
 
-const readPreviousData = async ({ prismaModel, entityId }) => {
+const readPreviousData = async ({ prismaModel, entityId, lookupKey = 'id' }) => {
   if (!prismaModel || !entityId || !prisma[prismaModel]) return null;
 
   try {
     return await prisma[prismaModel].findUnique({
-      where: { id: entityId },
+      where: { [lookupKey]: entityId },
     });
   } catch {
     return null;
@@ -98,6 +169,13 @@ const getEntityLabel = (value) => {
 
   return (
     value.buildingNumber ||
+    value.trackingNumber ||
+    value.transactionNumber ||
+    value.inspectionNumber ||
+    value.tourNumber ||
+    value.assetNumber ||
+    value.subject ||
+    value.siteName ||
     value.name ||
     value.deedNumber ||
     value.documentNumber ||
@@ -203,7 +281,7 @@ export const auditTrail = (moduleName) => {
             : undefined,
         metadata: {
           method,
-          path: req.originalUrl,
+          path: String(req.originalUrl || req.path).split('?')[0],
           statusCode: res.statusCode,
           requestBody:
             action === 'delete'
