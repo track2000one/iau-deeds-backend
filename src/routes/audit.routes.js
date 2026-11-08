@@ -14,6 +14,8 @@ const RIYADH_OFFSET = '+03:00';
 const querySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
+  sortBy: z.enum(['createdAt', 'username', 'action', 'module', 'status']).default('createdAt'),
+  sortDir: z.enum(['asc', 'desc']).default('desc'),
   action: z.string().trim().max(100).optional(),
   module: z.string().trim().max(100).optional(),
   status: z.enum(['success', 'failed']).optional(),
@@ -73,6 +75,8 @@ const buildWhere = (query) => {
   }
   return where;
 };
+
+const getOrderBy = (query) => [{ [query.sortBy]: query.sortDir }, { id: 'desc' }];
 
 const nowRiyadh = () => {
   const today = new Date(Date.now() + 3 * 3600000).toISOString().slice(0, 10);
@@ -242,7 +246,7 @@ router.get('/export', async (req, res, next) => {
       while (!res.destroyed) {
         const batch = await prisma.auditLog.findMany({
           where,
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          orderBy: getOrderBy(query),
           take: BATCH_SIZE,
           ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
           select: {
@@ -273,7 +277,7 @@ router.get('/export', async (req, res, next) => {
     while (rows.length - 1 < total) {
       const batch = await prisma.auditLog.findMany({
         where,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        orderBy: getOrderBy(query),
         take: BATCH_SIZE,
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
         select: {
@@ -319,7 +323,7 @@ router.get('/print-report', async (req, res, next) => {
     }
     const records = await prisma.auditLog.findMany({
       where,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      orderBy: getOrderBy(query),
       take: MAX_PRINT_ROWS,
       select: {
         createdAt: true, username: true, action: true, module: true,
@@ -408,7 +412,7 @@ router.get('/', async (req, res, next) => {
     const [items, total] = await Promise.all([
       prisma.auditLog.findMany({
         where,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        orderBy: getOrderBy(query),
         skip,
         take: query.limit,
       }),
