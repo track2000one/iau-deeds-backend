@@ -4,6 +4,7 @@ import { z } from 'zod';
 import XLSX from 'xlsx';
 import { prisma } from '../prisma.js';
 import { createAuditLog, getClientIp } from '../services/audit.service.js';
+import { renderAuditUserPrintReport } from '../services/auditUserPrintReport.js';
 
 const router = Router();
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -308,96 +309,38 @@ router.get('/export', async (req, res, next) => {
   }
 });
 
-// A clean Arabic print view for Save as PDF; all included rows match the selected filters.
+// Each user receives a self-contained report section with audited activity, filters and sorting.
 router.get('/print-report', async (req, res, next) => {
   try {
     const query = parseQuery(req, res);
     if (!query) return;
+
     const where = buildWhere(query);
-    const total = await prisma.auditLog.count({ where });
     const MAX_PRINT_ROWS = 3000;
+    const total = await prisma.auditLog.count({ where });
     if (total > MAX_PRINT_ROWS) {
       return res.status(413).json({
-        message: `التقرير يحتوي ${total} سجلًا. لتجهيز PDF واضح، يرجى تضييق الفترة أو المستخدم إلى ${MAX_PRINT_ROWS} سجل كحد أقصى، أو تصدير التقرير كاملًا بصيغة Excel/CSV.`,
+        message: `التقرير يحتوي ${total} سجلًا. يرجى تحديد موظف أو فترة زمنية أو نوع عملية بحيث لا يتجاوز تقرير PDF عدد ${MAX_PRINT_ROWS} سجل، أو استخدام تصدير Excel/CSV.`,
       });
     }
-    const records = await prisma.auditLog.findMany({
+
+    const items = await prisma.auditLog.findMany({
       where,
       orderBy: getOrderBy(query),
       take: MAX_PRINT_ROWS,
       select: {
-        createdAt: true, username: true, action: true, module: true,
-        entityLabel: true, entityId: true, status: true, ipAddress: true, description: true,
+        userId: true, username: true, userEmail: true, userRole: true,
+        createdAt: true, action: true, module: true,
+        entityLabel: true, entityId: true, status: true,
+        ipAddress: true, description: true, errorMessage: true,
+        previousData: true, newData: true,
       },
     });
-    const escapeHtml = (value) => String(value ?? '')
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    const actionLabels = {
-      login: 'دخول', logout: 'خروج', create: 'إضافة', update: 'تعديل',
-      delete: 'حذف', upload: 'رفع مرفق', export: 'تصدير',
-    };
-    const moduleLabels = {
-      auth: 'المصادقة', users: 'المستخدمون', deeds: 'الصكوك',
-      vacant_lands: 'الأراضي الشاغرة', central_buildings: 'السجل المركزي للمباني',
-      transaction_follow_up: 'نظام المتابعة', mosques: 'المساجد والمصليات',
-      accounting_transformation: 'التحول المحاسبي', assets: 'الأصول',
-      site_inspections: 'المعاينات الميدانية', archive: 'الأرشفة',
-      investments: 'الاستثمارات', audit: 'الرقابة', records: 'السجلات',
-    };
-    const columns = ['التاريخ والوقت', 'المستخدم', 'العملية', 'القسم', 'السجل', 'الحالة', 'عنوان IP', 'الوصف'];
-    const rowHtml = records.map((item) => {
-      const values = [
-        riyadhDateTime(item.createdAt), item.username || 'غير معروف',
-        actionLabels[item.action] || item.action,
-        moduleLabels[item.module] || item.module,
-        item.entityLabel || item.entityId || '—',
-        item.status === 'success' ? 'ناجحة' : 'فاشلة',
-        item.ipAddress || '—', item.description || '',
-      ];
-      return `<tr>${values.map((v) => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`;
-    }).join('');
-    const criteria = [
-      query.from ? `من: ${query.from}` : '',
-      query.to ? `إلى: ${query.to}` : '',
-      query.userId ? 'مستخدم محدد' : '',
-      query.action ? `العملية: ${query.action}` : '',
-      query.module ? `القسم: ${query.module}` : '',
-      query.status ? `الحالة: ${query.status}` : '',
-      query.search ? `بحث: ${query.search}` : '',
-    ].filter(Boolean).map(escapeHtml).join(' | ') || 'جميع السجلات';
-    const html = `<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>تقرير نشاط المستخدمين - إدارة أوقاف وأملاك الجامعة</title>
-<style>
-@page{size:A4 landscape;margin:11mm}
-*{box-sizing:border-box}body{font-family:Tahoma,Arial,sans-serif;color:#142944;background:#fff;margin:0;font-size:11px}
-header{border-bottom:3px solid #17456e;padding:10px 0 14px;margin-bottom:12px}
-h1,h2,h3{margin:0 0 7px}h1{font-size:17px}h2{font-size:14px}h3{font-size:13px}
-.meta{display:flex;flex-wrap:wrap;gap:12px;margin:7px 0;color:#455a70}.criteria{border:1px solid #d9e3eb;background:#f5f8fb;padding:10px;margin:10px 0;border-radius:5px}
-table{width:100%;border-collapse:collapse;table-layout:fixed;direction:rtl}
-th,td{border:1px solid #c9d5df;padding:6px 5px;overflow-wrap:anywhere;vertical-align:top}
-thead th{background:#e8f0f7;color:#1b3952;font-weight:bold}tbody tr:nth-child(even){background:#f7f9fb}
-th:nth-child(1){width:15%}th:nth-child(2){width:11%}th:nth-child(3){width:8%}
-th:nth-child(4){width:12%}th:nth-child(5){width:14%}th:nth-child(6){width:7%}
-th:nth-child(7){width:11%}th:nth-child(8){width:22%}
-thead{display:table-header-group}tr{break-inside:avoid;page-break-inside:avoid}
-footer{border-top:1px solid #bccdda;padding:10px 0;margin-top:18px;font-size:10px;color:#5e7082}
-.toolbar{position:sticky;top:0;background:#eaf3fa;padding:10px;text-align:left;border-bottom:1px solid #abc;z-index:3}
-button{padding:9px 18px;background:#17456e;color:white;border:0;border-radius:6px;cursor:pointer}
-@media print{.toolbar{display:none}thead{display:table-header-group}}
-</style></head><body>
-<div class="toolbar"><button onclick="window.print()">طباعة التقرير / حفظ PDF</button></div>
-<header><h1>جامعة الإمام عبدالرحمن بن فيصل</h1><h2>إدارة أوقاف وأملاك الجامعة</h2>
-<h3>تقرير سجل نشاط المستخدمين والرقابة على العمليات</h3>
-<div class="meta"><span>عدد العمليات: ${records.length}</span><span>تاريخ إصدار التقرير: ${escapeHtml(riyadhDateTime(new Date()))}</span><span>التوقيت: الرياض (UTC+03:00)</span></div>
-</header><div class="criteria"><strong>معايير التصفية:</strong> ${criteria}</div>
-<table><thead><tr>${columns.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead><tbody>${rowHtml || '<tr><td colspan="8">لا توجد عمليات مطابقة للتصفية</td></tr>'}</tbody></table>
-<footer>تقرير إداري خاص بصاحب الصلاحية، مبني على السجلات الموثقة داخل النظام. لا يشمل الأنشطة التي لم يجر تسجيلها.</footer>
-</body></html>`;
-    res.setHeader('Cache-Control', 'no-store, private');
+    const html = renderAuditUserPrintReport({ items, query });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.type('html').send(html);
-    void exportAuditAccess(req, 'pdf-print', query, records.length);
+    void exportAuditAccess(req, 'pdf-print', query, items.length);
   } catch (error) {
     next(error);
   }
