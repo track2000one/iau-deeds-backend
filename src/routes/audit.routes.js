@@ -156,16 +156,29 @@ router.get('/stats', async (req, res, next) => {
 
 router.get('/filters', async (_req, res, next) => {
   try {
-    const [users, actions, modules] = await Promise.all([
+    const [auditUsers, registeredUsers, actions, modules] = await Promise.all([
       prisma.auditLog.findMany({
         where: { userId: { not: null } },
         distinct: ['userId'],
         select: { userId: true, username: true, userEmail: true },
         orderBy: { username: 'asc' },
       }),
+      prisma.appUser.findMany({
+        select: { id: true, username: true, email: true },
+        orderBy: { username: 'asc' },
+      }),
       prisma.auditLog.findMany({ distinct: ['action'], select: { action: true }, orderBy: { action: 'asc' } }),
       prisma.auditLog.findMany({ distinct: ['module'], select: { module: true }, orderBy: { module: 'asc' } }),
     ]);
+    const usersById = new Map(auditUsers.filter((u) => u.userId).map((u) => [u.userId, u]));
+    for (const user of registeredUsers) {
+      usersById.set(user.id, {
+        userId: user.id, username: user.username, userEmail: user.email,
+      });
+    }
+    const users = Array.from(usersById.values()).sort((a, b) =>
+      (a.username || '').localeCompare(b.username || '', 'ar')
+    );
     res.json({
       users,
       actions: actions.map((item) => item.action),
@@ -211,7 +224,27 @@ router.get('/users-summary', async (req, res, next) => {
         user.userEmail = row.userEmail || user.userEmail;
       }
     }
-    const users = Array.from(summaries.values()).sort((a, b) => b.total - a.total);
+    const registeredUsers = await prisma.appUser.findMany({
+      where: query.userId ? { id: query.userId } : undefined,
+      select: { id: true, username: true, email: true },
+    });
+    for (const registered of registeredUsers) {
+      if (!summaries.has(registered.id)) {
+        summaries.set(registered.id, {
+          userId: registered.id, username: registered.username,
+          userEmail: registered.email, total: 0, login: 0, logout: 0,
+          create: 0, update: 0, delete: 0, upload: 0,
+          failed: 0, lastActivityAt: null,
+        });
+      } else {
+        const summary = summaries.get(registered.id);
+        summary.username = registered.username;
+        summary.userEmail = registered.email;
+      }
+    }
+    const users = Array.from(summaries.values()).sort((a, b) =>
+      b.total - a.total || a.username.localeCompare(b.username, 'ar')
+    );
     res.json({ users, totalUsers: users.length });
   } catch (error) {
     next(error);
@@ -336,7 +369,13 @@ router.get('/print-report', async (req, res, next) => {
         previousData: true, newData: true,
       },
     });
-    const html = renderAuditUserPrintReport({ items, query });
+    const requestedUser = query.userId && items.length === 0
+      ? await prisma.appUser.findUnique({
+          where: { id: query.userId },
+          select: { id: true, username: true, email: true },
+        })
+      : null;
+    const html = renderAuditUserPrintReport({ items, query, requestedUser });
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.type('html').send(html);
