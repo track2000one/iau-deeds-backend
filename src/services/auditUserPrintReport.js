@@ -179,7 +179,9 @@ const styles = [
   '@media print{.toolbar{display:none}.user-section{break-before:page;page-break-before:always}.user-section.single-user{break-before:auto;page-break-before:auto}}',
 ].join('\n');
 
-export const renderAuditUserPrintReport = ({ items, query, requestedUser = null }) => {
+export const renderAuditUserPrintReport = ({
+  items, query, requestedUser = null, registeredUsers = [],
+}) => {
   const groups = groupRecords(items);
   if (!groups.length && requestedUser) {
     groups.push({
@@ -189,6 +191,22 @@ export const renderAuditUserPrintReport = ({ items, query, requestedUser = null 
       items: [],
     });
   }
+  for (const user of registeredUsers) {
+    const found = groups.find((group) =>
+      group.id === user.id ||
+      (group.email && group.email.toLowerCase() === user.email.toLowerCase())
+    );
+    if (found) {
+      found.id = user.id;
+      found.username = user.username;
+      found.email = user.email;
+    } else {
+      groups.push({
+        id: user.id, username: user.username, email: user.email, items: [],
+      });
+    }
+  }
+  groups.sort((a, b) => a.username.localeCompare(b.username, 'ar'));
   const single = groups.length === 1;
   const total = items.length;
   const selectedCriteria = [
