@@ -586,6 +586,71 @@ router.get('/me', requireAuth, async (req, res) => {
   });
 });
 
+// Audit meaningful navigation to platform sections; do not track clicks, text input or search queries.
+const auditedSections = [
+  ['/accounting-transformation', 'accounting_transformation', 'التحول المحاسبي'],
+  ['/contracts/follow-up', 'contracts_followup', 'متابعة العقود'],
+  ['/site-inspections', 'site_inspections', 'المعاينات الميدانية'],
+  ['/follow-up', 'transaction_follow_up', 'نظام المتابعة'],
+  ['/lands/vacant', 'vacant_lands', 'الأراضي الشاغرة'],
+  ['/lands', 'records', 'الأراضي والمباني'],
+  ['/deeds', 'deeds', 'الصكوك'],
+  ['/mosques', 'mosques', 'المساجد والمصليات'],
+  ['/investments', 'investments', 'الاستثمارات'],
+  ['/assets', 'assets', 'وحدة الأصول'],
+  ['/archive', 'archive', 'الأرشفة'],
+  ['/audit', 'audit', 'سجل العمليات'],
+  ['/admin', 'users', 'إدارة المستخدمين'],
+  ['/reports', 'reports', 'التقارير'],
+  ['/search', 'search', 'البحث والاستعلام'],
+  ['/', 'dashboard', 'الصفحة الرئيسية'],
+];
+
+router.post('/activity', requireAuth, async (req, res, next) => {
+  try {
+    const rawPath = req.body?.pathname;
+    if (typeof rawPath !== 'string' || rawPath.length > 180 || !rawPath.startsWith('/') ||
+      rawPath.includes('?') || rawPath.includes('#') || rawPath.includes('\\')) {
+      return res.status(400).json({ message: 'مسار الصفحة غير صالح' });
+    }
+    const section = auditedSections.find(([prefix]) =>
+      prefix === '/' ? rawPath === '/' :
+        rawPath === prefix || rawPath.startsWith(prefix + '/')
+    );
+    if (!section) return res.status(204).send();
+
+    const [, module, title] = section;
+    const duplicate = await prisma.auditLog.findFirst({
+      where: {
+        userId: req.authUser.id,
+        action: 'view',
+        module,
+        entityId: rawPath,
+        createdAt: { gte: new Date(Date.now() - 10000) },
+      },
+      select: { id: true },
+    });
+    if (duplicate) return res.status(204).send();
+
+    await createAuditLog({
+      user: req.authUser,
+      action: 'view',
+      module,
+      entity: 'page',
+      entityId: rawPath,
+      entityLabel: title,
+      description: `فتح صفحة ضمن ${title}`,
+      status: 'success',
+      metadata: { pathname: rawPath, source: 'platform-navigation' },
+      ipAddress: getClientIp(req),
+      userAgent: req.headers['user-agent'],
+    });
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/logout', requireAuth, async (req, res) => {
   await createAuditLog({
     user: req.authUser,
