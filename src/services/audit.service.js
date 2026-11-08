@@ -1,18 +1,8 @@
 import { prisma } from '../prisma.js';
 import { Prisma } from '@prisma/client';
 
-const SENSITIVE_KEYS = new Set([
-  'password',
-  'passwordHash',
-  'token',
-  'accessToken',
-  'refreshToken',
-  'authorization',
-  'jwt',
-  'secret',
-  'clientSecret',
-  'privateKey',
-]);
+const SENSITIVE_KEY_PATTERN =
+  /password|passwd|passphrase|passcode|passwordhash|token|authorization|cookie|secret|private.?key|api.?key|jwt|credential|session.?token|refresh.?token/i;
 
 const MAX_JSON_LENGTH = 40_000;
 
@@ -22,6 +12,7 @@ export const sanitizeAuditData = (value, depth = 0) => {
   // a constructor function into JSON and silently prevents audit-log writes.
   if (value instanceof Prisma.Decimal) return value.toString();
   if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'bigint') return value.toString();
   if (depth > 6) return '[MAX_DEPTH]';
 
   if (Array.isArray(value)) {
@@ -34,7 +25,7 @@ export const sanitizeAuditData = (value, depth = 0) => {
     const output = {};
 
     for (const [key, item] of Object.entries(value)) {
-      if (SENSITIVE_KEYS.has(key)) {
+      if (SENSITIVE_KEY_PATTERN.test(key)) {
         output[key] = '[REDACTED]';
         continue;
       }
