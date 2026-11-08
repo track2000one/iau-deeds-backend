@@ -145,7 +145,7 @@ const renderUser = (group, index) => {
     badge('زيارة الأقسام', c.view) + badge('العمليات الفاشلة', c.failed) +
     '</div><h3>العمليات بالتفصيل</h3><table class="details-table"><thead><tr>' +
     header.map((value) => '<th>' + escapeHtml(value) + '</th>').join('') +
-    '</tr></thead><tbody>' + rows + '</tbody></table></section>';
+    '</tr></thead><tbody>' + (rows || '<tr><td colspan="8">لا توجد عمليات مسجلة ضمن معايير التقرير.</td></tr>') + '</tbody></table></section>';
 };
 
 const styles = [
@@ -179,8 +179,16 @@ const styles = [
   '@media print{.toolbar{display:none}.user-section{break-before:page;page-break-before:always}.user-section.single-user{break-before:auto;page-break-before:auto}}',
 ].join('\n');
 
-export const renderAuditUserPrintReport = ({ items, query }) => {
+export const renderAuditUserPrintReport = ({ items, query, requestedUser = null }) => {
   const groups = groupRecords(items);
+  if (!groups.length && requestedUser) {
+    groups.push({
+      id: requestedUser.id,
+      username: requestedUser.username,
+      email: requestedUser.email,
+      items: [],
+    });
+  }
   const single = groups.length === 1;
   const total = items.length;
   const selectedCriteria = [
