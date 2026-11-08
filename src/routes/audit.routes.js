@@ -375,7 +375,17 @@ router.get('/print-report', async (req, res, next) => {
           select: { id: true, username: true, email: true },
         })
       : null;
-    const html = renderAuditUserPrintReport({ items, query, requestedUser });
+    // On an unfiltered full report, include registered users with no recorded activity.
+    // On filtered reports, keep only matching profiles, preventing irrelevant blank sections.
+    const includeAllRegistered = !query.userId && !query.action && !query.module &&
+      !query.status && !query.search && !query.from && !query.to;
+    const registeredUsers = includeAllRegistered
+      ? await prisma.appUser.findMany({
+          select: { id: true, username: true, email: true },
+          orderBy: { username: 'asc' },
+        })
+      : [];
+    const html = renderAuditUserPrintReport({ items, query, requestedUser, registeredUsers });
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.type('html').send(html);
