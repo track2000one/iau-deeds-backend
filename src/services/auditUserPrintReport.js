@@ -44,7 +44,7 @@ const normalize = (value) => {
 };
 
 const changeDetails = (item) => {
-  if (item.action === 'failed' && item.errorMessage) return item.errorMessage;
+  if (item.status === 'failed' && item.errorMessage) return item.errorMessage;
   if (item.action === 'update') {
     const before = normalize(item.previousData);
     const after = normalize(item.newData);
@@ -56,7 +56,7 @@ const changeDetails = (item) => {
       );
       if (fields.length) {
         const sample = fields.slice(0, 4).map((key) =>
-          key + ': ' + formatPreview(before[key]) + ' ← ' + formatPreview(after[key])
+          key + ': قبل (' + formatPreview(before[key]) + ')، بعد (' + formatPreview(after[key]) + ')'
         );
         if (fields.length > 4) sample.push('و' + (fields.length - 4) + ' حقول أخرى');
         return sample.join('؛ ');
