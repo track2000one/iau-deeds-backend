@@ -2469,6 +2469,9 @@ router.patch('/field-tours/:id', requireRoles('head', 'supervisor'), async (req,
       status: z.enum(['scheduled', 'in_progress', 'completed', 'postponed', 'cancelled']),
       notes: z.string().trim().max(5000).optional().nullable(),
     }).parse(req.body);
+    if (input.status === 'completed' && !current.visits.length) {
+      return res.status(409).json({ message: 'لا يمكن اعتماد جولة مكتملة دون وجود زيارة ميدانية مرتبطة بها. الجولات الخالية من الزيارات مستبعدة من مؤشرات الإنجاز.' });
+    }
     if (input.status === 'completed' && current.visits.some((visit) => !['completed', 'closed'].includes(visit.workflowStatus))) {
       return res.status(409).json({ message: 'لا يمكن إكمال الجولة قبل اكتمال جميع الزيارات التابعة لها، بما فيها زيارة مصلى النساء عند وجودها.' });
     }
@@ -2818,6 +2821,25 @@ router.delete('/field-visits/:id', requireRoles('head', 'supervisor'), async (re
     await prisma.$transaction(async (tx) => {
       await tx.mosqueFieldVisitItem.deleteMany({ where: { visitId: current.id } });
       await tx.mosqueFieldVisit.delete({ where: { id: current.id } });
+      // Reconcile the parent tour after a visit is permanently removed.
+      // In particular, never leave a zero-visit tour marked as completed.
+      if (current.tourId) {
+        const remainingVisits = await tx.mosqueFieldVisit.findMany({
+          where: { tourId: current.tourId },
+          select: { workflowStatus: true },
+        });
+        const nextTourStatus = remainingVisits.length === 0
+          ? 'scheduled'
+          : remainingVisits.every((visit) => ['completed', 'closed'].includes(visit.workflowStatus))
+            ? 'completed'
+            : remainingVisits.some((visit) => visit.workflowStatus !== 'planned')
+              ? 'in_progress'
+              : 'scheduled';
+        await tx.mosqueFieldTour.updateMany({
+          where: { id: current.tourId, status: { notIn: ['cancelled', 'postponed'] } },
+          data: { status: nextTourStatus },
+        });
+      }
     });
     try {
       await prisma.auditLog.create({ data: {
