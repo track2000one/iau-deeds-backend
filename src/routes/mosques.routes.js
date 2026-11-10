@@ -2212,6 +2212,39 @@ const fieldVisitHasExecutionData = (visit) => Boolean(
   )
 );
 
+// Creator identity is read from the immutable createdBy field, never from assignee or editor.
+const enrichFieldRecordActors = async (records, entity, editActions) => {
+  const rows = Array.isArray(records) ? records : [records].filter(Boolean);
+  if (!rows.length) return [];
+  const ids = [...new Set(rows.map((row) => row.id).filter(Boolean))];
+  const creatorIds = [...new Set(rows.map((row) => row.createdBy).filter(Boolean))];
+  const [creators, edits] = await Promise.all([
+    creatorIds.length ? prisma.appUser.findMany({
+      where: { id: { in: creatorIds } },
+      select: { id: true, username: true },
+    }) : Promise.resolve([]),
+    ids.length ? prisma.auditLog.findMany({
+      where: { module: 'mosques', entity, entityId: { in: ids }, action: { in: editActions }, status: 'success' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { entityId: true, userId: true, username: true, createdAt: true },
+    }) : Promise.resolve([]),
+  ]);
+  const names = new Map(creators.map((user) => [user.id, user.username]));
+  const latestEdit = new Map();
+  for (const edit of edits) {
+    if (edit.entityId && !latestEdit.has(edit.entityId)) latestEdit.set(edit.entityId, edit);
+  }
+  return rows.map((row) => {
+    const edit = latestEdit.get(row.id);
+    return {
+      ...row,
+      createdByName: names.get(row.createdBy) || (row.createdBy ? 'مستخدم سابق أو غير متاح' : null),
+      lastEditedByName: edit ? (edit.username || names.get(edit.userId) || 'مستخدم غير متاح') : null,
+      lastEditedAt: edit?.createdAt || null,
+    };
+  });
+};
+
 const fieldTourAccessState = (req, tour) => {
   const isSystemAdmin = req.authUser?.role === 'admin';
   const isUnitHead = req.mosqueRole?.role === 'head';
@@ -2282,7 +2315,8 @@ router.get('/field-tours', requireRoles('head', 'supervisor'), async (req, res, 
       },
       orderBy: [{ scheduledDate: 'desc' }, { createdAt: 'desc' }],
     });
-    res.json(tours.map((tour) => ({ ...tour, ...fieldTourAccessState(req, tour) })));
+    const attributedTours = await enrichFieldRecordActors(tours, 'MosqueFieldTour', ['UPDATE_MOSQUE_FIELD_TOUR', 'CANCEL_MOSQUE_FIELD_TOUR']);
+    res.json(attributedTours.map((tour) => ({ ...tour, ...fieldTourAccessState(req, tour) })));
   } catch (error) { next(error); }
 });
 
@@ -2452,7 +2486,8 @@ router.post('/field-tours', requireRoles('head', 'supervisor'), async (req, res,
       });
     }));
 
-    res.status(201).json({ ...created, ...fieldTourAccessState(req, created) });
+    const [attributedTour] = await enrichFieldRecordActors([created], 'MosqueFieldTour', ['UPDATE_MOSQUE_FIELD_TOUR', 'CANCEL_MOSQUE_FIELD_TOUR']);
+    res.status(201).json({ ...attributedTour, ...fieldTourAccessState(req, created) });
   } catch (error) { next(error); }
 });
 
@@ -2481,7 +2516,27 @@ router.patch('/field-tours/:id', requireRoles('head', 'supervisor'), async (req,
     if (!isSystemAdmin && !isUnitHead && !isOwner) {
       return res.status(403).json({ message: 'هذه الجولة أنشأها مستخدم آخر؛ يمكنك عرضها فقط ولا تملك صلاحية تعديلها أو إلغائها.' });
     }
-    const updated = await prisma.mosqueFieldTour.update({ where: { id: current.id }, data: { status: input.status, notes: input.notes === undefined ? current.notes : input.notes } });
+    const updated = await prisma.$transaction(async (tx) => {
+      const nextTour = await tx.mosqueFieldTour.update({
+        where: { id: current.id },
+        data: { status: input.status, notes: input.notes === undefined ? current.notes : input.notes },
+      });
+      await tx.auditLog.create({ data: {
+        userId: req.authUser?.id || null,
+        username: req.authUser?.username || req.authUser?.email || null,
+        userEmail: req.authUser?.email || null,
+        userRole: req.authUser?.role || null,
+        action: 'UPDATE_MOSQUE_FIELD_TOUR',
+        module: 'mosques',
+        entity: 'MosqueFieldTour',
+        entityId: current.id,
+        entityLabel: current.tourNumber,
+        description: 'تحديث الجولة الميدانية',
+        previousData: { status: current.status },
+        newData: { status: nextTour.status },
+      } });
+      return nextTour;
+    });
     if (input.status === 'cancelled' && current.status !== 'cancelled') {
       try {
         await prisma.auditLog.create({ data: {
@@ -2502,7 +2557,8 @@ router.patch('/field-tours/:id', requireRoles('head', 'supervisor'), async (req,
         console.warn('Unable to audit field tour cancellation:', auditError?.message || auditError);
       }
     }
-    res.json({ ...updated, ...fieldTourAccessState(req, { ...current, ...updated }) });
+    const [attributedTour] = await enrichFieldRecordActors([{ ...current, ...updated }], 'MosqueFieldTour', ['UPDATE_MOSQUE_FIELD_TOUR', 'CANCEL_MOSQUE_FIELD_TOUR']);
+    res.json({ ...attributedTour, ...fieldTourAccessState(req, { ...current, ...updated }) });
   } catch (error) { next(error); }
 });
 
@@ -2628,7 +2684,8 @@ router.get('/field-visits', requireRoles('head', 'supervisor'), async (req, res,
       include: fieldVisitInclude,
       orderBy: [{ visitDate: 'desc' }, { createdAt: 'desc' }],
     });
-    res.json(records.map((record) => ({ ...record, ...fieldVisitAccessState(req, record) })));
+    const attributedVisits = await enrichFieldRecordActors(records, 'MosqueFieldVisit', ['UPDATE_MOSQUE_FIELD_VISIT']);
+    res.json(attributedVisits.map((record) => ({ ...record, ...fieldVisitAccessState(req, record) })));
   } catch (error) { next(error); }
 });
 
@@ -2638,7 +2695,8 @@ router.get('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
     const scope = await fieldSiteScope(req, context);
     const record = await prisma.mosqueFieldVisit.findFirst({ where: { id: req.params.id, ...scope }, include: fieldVisitInclude });
     if (!record) return res.status(404).json({ message: 'الزيارة الميدانية غير موجودة' });
-    res.json({ ...record, ...fieldVisitAccessState(req, record) });
+    const [attributedVisit] = await enrichFieldRecordActors([record], 'MosqueFieldVisit', ['UPDATE_MOSQUE_FIELD_VISIT']);
+    res.json({ ...attributedVisit, ...fieldVisitAccessState(req, record) });
   } catch (error) { next(error); }
 });
 
@@ -2689,7 +2747,8 @@ router.post('/field-visits', requireRoles('head', 'supervisor'), async (req, res
       },
       include: fieldVisitInclude,
     });
-    res.status(201).json(record);
+    const [attributedVisit] = await enrichFieldRecordActors([record], 'MosqueFieldVisit', ['UPDATE_MOSQUE_FIELD_VISIT']);
+    res.status(201).json(attributedVisit);
   } catch (error) { next(error); }
 });
 
@@ -2741,7 +2800,7 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
     }
     const record = await prisma.$transaction(async (tx) => {
       await tx.mosqueFieldVisitItem.deleteMany({ where: { visitId: current.id } });
-      return tx.mosqueFieldVisit.update({
+      const updatedVisit = await tx.mosqueFieldVisit.update({
         where: { id: current.id },
         data: {
           tourId: input.tourId || null,
@@ -2764,6 +2823,21 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
         },
         include: fieldVisitInclude,
       });
+      await tx.auditLog.create({ data: {
+        userId: req.authUser?.id || null,
+        username: req.authUser?.username || req.authUser?.email || null,
+        userEmail: req.authUser?.email || null,
+        userRole: req.authUser?.role || null,
+        action: 'UPDATE_MOSQUE_FIELD_VISIT',
+        module: 'mosques',
+        entity: 'MosqueFieldVisit',
+        entityId: current.id,
+        entityLabel: current.visitNumber,
+        description: 'تعديل بيانات الزيارة الميدانية',
+        previousData: { tourId: current.tourId, siteId: current.siteId, workflowStatus: current.workflowStatus },
+        newData: { tourId: updatedVisit.tourId, siteId: updatedVisit.siteId, workflowStatus: updatedVisit.workflowStatus },
+      } });
+      return updatedVisit;
     });
     if (record.tourId) {
       const siblingVisits = await prisma.mosqueFieldVisit.findMany({
@@ -2780,7 +2854,8 @@ router.put('/field-visits/:id', requireRoles('head', 'supervisor'), async (req, 
         data: { status: nextTourStatus },
       });
     }
-    res.json(record);
+    const [attributedVisit] = await enrichFieldRecordActors([record], 'MosqueFieldVisit', ['UPDATE_MOSQUE_FIELD_VISIT']);
+    res.json(attributedVisit);
   } catch (error) { next(error); }
 });
 
