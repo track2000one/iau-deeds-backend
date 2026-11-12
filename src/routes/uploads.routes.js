@@ -59,6 +59,7 @@ const uploadSchema = z.object({
   attachmentType: z
     .enum([
       'deed_image',
+      'survey_document',
       'plan_image',
       'location_image',
       'contract_image',
@@ -80,6 +81,18 @@ router.post('/', upload.single('file'), async (req, res, next) => {
       return;
     }
 
+    // For direct uploads from an existing deed, reject invalid IDs before creating
+    // files in Drive. Other legacy upload flows remain unchanged.
+    if (parsed.entityType === 'deed' && parsed.entityId) {
+      const deed = await prisma.deed.findUnique({
+        where: { id: parsed.entityId },
+        select: { id: true },
+      });
+      if (!deed) {
+        return res.status(404).json({ message: 'الصك المطلوب غير موجود، ولم يتم رفع الملف.' });
+      }
+    }
+
     const uploaded = await uploadBufferToGoogleDrive(req.file, {
       fileName: req.body.fileName,
     });
@@ -87,19 +100,31 @@ router.post('/', upload.single('file'), async (req, res, next) => {
     let attachment = null;
 
     if (parsed.entityType && parsed.entityId) {
-      attachment = await prisma.attachment.create({
-        data: {
-          entityType: parsed.entityType,
-          entityId: parsed.entityId,
-          attachmentType: parsed.attachmentType,
-          title: parsed.title || uploaded.fileName,
-          driveUrl: uploaded.driveUrl,
-          driveFileId: uploaded.driveFileId,
-          mimeType: uploaded.mimeType,
-          notes: parsed.notes || null,
-          createdBy: parsed.createdBy || null,
-        },
-      });
+      try {
+        attachment = await prisma.attachment.create({
+          data: {
+            entityType: parsed.entityType,
+            entityId: parsed.entityId,
+            attachmentType: parsed.attachmentType,
+            title: parsed.title || uploaded.fileName,
+            driveUrl: uploaded.driveUrl,
+            driveFileId: uploaded.driveFileId,
+            mimeType: uploaded.mimeType,
+            notes: parsed.notes || null,
+            createdBy: req.authUser?.id || parsed.createdBy || null,
+          },
+        });
+      } catch (error) {
+        // Prevent orphaned Drive files if the database record cannot be saved.
+        if (uploaded.driveFileId) {
+          try {
+            await deleteGoogleDriveFile(uploaded.driveFileId);
+          } catch (cleanupError) {
+            console.error('Unable to remove orphaned Drive upload:', cleanupError);
+          }
+        }
+        throw error;
+      }
     }
 
     res.status(201).json({
