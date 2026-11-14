@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
+import { errorHandler } from '../src/middleware/errorHandler.js';
 import {
   recordOperationalResponse,
   getOperationalSnapshot,
@@ -81,6 +82,30 @@ test('HTTP telemetry is bounded, request-ID tagged, sampled and does not log sec
     assert.ok(!recorded.includes('sensitive-record'));
     assert.ok(!recorded.includes('another'));
     assert.ok(!recorded.includes('authorization'));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    resetOperationalMetricsForTests();
+  }
+});
+
+test('unexpected HTTP errors use generic messages and a correlatable request id', async () => {
+  resetOperationalMetricsForTests();
+  const app = express();
+  app.use(createOperationalMonitoringMiddleware({ saveAudit: async () => true }));
+  app.get('/api/deeds/throw', () => {
+    throw new Error('INTERNAL_DATABASE_PASSWORD_DO_NOT_EXPOSE');
+  });
+  app.use(errorHandler);
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/deeds/throw`);
+    assert.equal(response.status, 500);
+    const body = await response.json();
+    assert.ok(body.requestId);
+    assert.equal(body.requestId, response.headers.get('x-request-id'));
+    assert.ok(!JSON.stringify(body).includes('INTERNAL_DATABASE_PASSWORD_DO_NOT_EXPOSE'));
+    assert.match(body.message, /حدث خطأ داخلي/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     resetOperationalMetricsForTests();
