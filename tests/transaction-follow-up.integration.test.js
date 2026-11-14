@@ -226,6 +226,30 @@ if (enabled) {
     assert.ok(ids.includes(otherRecord.id));
   });
 
+  test('monitoring report requires admin rights and excludes request secrets', async () => {
+    const path = origin + '/api/audit/monitoring';
+    const unauthenticated = await fetch(path);
+    assert.equal(unauthenticated.status, 401);
+    const normal = await fetch(path, {
+      headers: { authorization: 'Bearer ' + signAccessToken(assignee) },
+    });
+    assert.equal(normal.status, 403);
+    const authorized = await fetch(path, {
+      headers: { authorization: 'Bearer ' + signAccessToken(administrator) },
+    });
+    assert.equal(authorized.status, 200);
+    assert.equal(authorized.headers.get('cache-control'), 'no-store');
+    const data = await authorized.json();
+    assert.equal(data.latest15Minutes.windowMinutes, 15);
+    assert.equal(data.latest15Minutes.processScope, true);
+    assert.equal(data.persistentLast24Hours.exactCounts, false);
+    assert.equal(Array.isArray(data.recentAuditedIncidents), true);
+    const json = JSON.stringify(data);
+    assert.equal(json.includes('passwordHash'), false);
+    assert.equal(json.includes('authorization'), false);
+    assert.equal(json.includes('DATABASE_URL'), false);
+  });
+
   test('only supervisor can delete transaction and removal is persisted', async () => {
     const deleted = await request('/' + otherRecord.id, 'DELETE', administrator);
     assert.equal(deleted.status, 204, JSON.stringify(deleted.data));

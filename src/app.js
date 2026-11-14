@@ -46,6 +46,7 @@ import {
   requireUploadPermission,
 } from './middleware/auth.js';
 import { auditTrail } from './middleware/audit.js';
+import { createOperationalMonitoringMiddleware } from './services/operationalMonitoring.service.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 
 export const app = express();
@@ -74,7 +75,14 @@ app.use(
   })
 );
 app.use(express.json({ limit: '10mb' }));
-app.use(morgan('dev'));
+app.use(createOperationalMonitoringMiddleware());
+// Log only the API module, never raw URLs/query strings or record identifiers.
+app.use(morgan((tokens, req, res) => {
+  const segments = String(req.path || '').split('/').filter(Boolean);
+  const candidate = segments[0] === 'api' ? segments[1] : 'other';
+  const module = /^[a-z][a-z0-9-]{0,39}$/.test(candidate || '') ? candidate : 'other';
+  return `${tokens.method(req, res)} /api/${module} ${tokens.status(req, res)} ${tokens['response-time'](req, res)}ms`;
+}));
 
 app.get('/', (_req, res) => {
   res.json({

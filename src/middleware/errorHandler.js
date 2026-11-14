@@ -60,8 +60,16 @@ export function notFound(_req, res) {
   res.status(404).json({ message: 'المسار غير موجود' });
 }
 
-export function errorHandler(err, _req, res, _next) {
-  console.error(err);
+export function errorHandler(err, req, res, _next) {
+  const httpStatus = Number(err?.statusCode || err?.status || 500);
+  // Do not put stack traces, SQL errors, credentials, paths or internal error
+  // messages in responses or production logs.
+  console.error('API request error', {
+    requestId: req.requestId || null,
+    status: httpStatus,
+    errorType: String(err?.name || 'Error').slice(0, 80),
+    code: typeof err?.code === 'string' ? err.code.slice(0, 35) : undefined,
+  });
 
   if (err instanceof ZodError) {
     const friendlyIssues = (err.issues || []).map((issue) => ({
@@ -90,9 +98,13 @@ export function errorHandler(err, _req, res, _next) {
     }
   }
 
-  const status = err.statusCode || err.status || 500;
-
+  const status = Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus <= 599
+    ? httpStatus : 500;
+  const safeMessage = status >= 500
+    ? 'حدث خطأ داخلي في الخادم. يرجى المحاولة لاحقًا أو تزويد الدعم برقم الطلب.'
+    : (err.message || 'تعذر إكمال العملية');
   return res.status(status).json({
-    message: err.message || 'حدث خطأ في الخادم',
+    message: safeMessage,
+    ...(status >= 500 && req.requestId ? { requestId: req.requestId } : {}),
   });
 }

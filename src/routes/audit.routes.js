@@ -4,6 +4,7 @@ import { z } from 'zod';
 import XLSX from 'xlsx';
 import { prisma } from '../prisma.js';
 import { createAuditLog, getClientIp } from '../services/audit.service.js';
+import { getOperationalSnapshot } from '../services/operationalMonitoring.service.js';
 import { renderAuditUserPrintReport } from '../services/auditUserPrintReport.js';
 
 const router = Router();
@@ -121,6 +122,46 @@ const exportAuditAccess = (req, format, filters, exportedCount) =>
     ipAddress: getClientIp(req),
     userAgent: req.headers['user-agent'],
   });
+
+// Only administrators reach this router (requireAuth + requireAdmin in app.js).
+// History is sampled and persistent; live counters are exact but process-local.
+router.get('/monitoring', async (_req, res, next) => {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const kinds = ['authentication_failed', 'access_denied', 'server_error'];
+    const where = { action: { in: kinds }, createdAt: { gte: since } };
+    const [groups, samples] = await Promise.all([
+      prisma.auditLog.groupBy({
+        by: ['action'], where, _count: { _all: true },
+      }),
+      prisma.auditLog.findMany({
+        where, orderBy: { createdAt: 'desc' }, take: 25,
+        select: {
+          id: true, createdAt: true, action: true, module: true,
+          username: true, metadata: true,
+        },
+      }),
+    ]);
+    const persistedSamples = Object.fromEntries(kinds.map((action) => [action, 0]));
+    groups.forEach((item) => {
+      if (Object.hasOwn(persistedSamples, item.action)) {
+        persistedSamples[item.action] = item._count._all;
+      }
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      latest15Minutes: getOperationalSnapshot(),
+      persistentLast24Hours: {
+        since: since.toISOString(),
+        sampleCounts: persistedSamples,
+        exactCounts: false,
+      },
+      recentAuditedIncidents: samples,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.get('/stats', async (req, res, next) => {
   try {
