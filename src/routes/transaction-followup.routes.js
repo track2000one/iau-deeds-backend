@@ -1592,11 +1592,14 @@ const canActOnRecord = (req, record) =>
     record.currentAssigneeUserId === req.authUser?.id
   );
 
+// Editing the master transaction belongs to the original creator (or supervisor).
+// The current assignee may still record actions and upload attachments through
+// the separate, more narrowly scoped endpoints.
 const canEditRecordMaster = (req, record) =>
   hasFollowUpPermission(req, 'canEdit') &&
   (
     isSupervisor(req) ||
-    record.currentAssigneeUserId === req.authUser?.id
+    (record.createdById != null && record.createdById === req.authUser?.id)
   );
 
 const canDeleteRecord = (req) =>

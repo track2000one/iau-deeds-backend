@@ -36,3 +36,47 @@ jobs:
           node --check src/server.js
       - name: Run tests
         run: npm test
+
+
+  integration:
+    name: Isolated PostgreSQL access and reporting checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: iau_ci_test
+          POSTGRES_PASSWORD: local_ci_test_password
+          POSTGRES_DB: iau_deeds_integration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U iau_ci_test -d iau_deeds_integration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      # Disposable, local GitHub Actions service. Never point this job to Railway.
+      DATABASE_URL: postgresql://iau_ci_test:local_ci_test_password@127.0.0.1:5432/iau_deeds_integration_test?schema=public
+      JWT_SECRET: local-only-follow-up-integration-secret-2026-never-production
+      FOLLOW_UP_INTEGRATION_TEST: '1'
+      VACANT_LANDS_INTEGRATION: '1'
+      NODE_ENV: test
+      FRONTEND_URL: http://127.0.0.1:4173
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Confirm disposable local database target
+        run: |
+          node --input-type=module -e "const u=new URL(process.env.DATABASE_URL);if(u.hostname!=='127.0.0.1'||u.pathname!=='/iau_deeds_integration_test')process.exit(1)"
+      - name: Create schema only in the isolated service
+        run: npx prisma db push --skip-generate
+      - name: Exercise real JWT authorization, creator rights and report scoping
+        run: node --test tests/transaction-follow-up.integration.test.js
+      - name: Exercise vacant land record ownership and deed links
+        run: node --test tests/vacant-lands.integration.test.js
