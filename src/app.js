@@ -46,6 +46,7 @@ import {
   requireUploadPermission,
 } from './middleware/auth.js';
 import { auditTrail } from './middleware/audit.js';
+import { createOperationalMonitoringMiddleware } from './services/operationalMonitoring.service.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 
 export const app = express();
@@ -74,6 +75,7 @@ app.use(
   })
 );
 app.use(express.json({ limit: '10mb' }));
+app.use(createOperationalMonitoringMiddleware());
 app.use(morgan('dev'));
 
 app.get('/', (_req, res) => {
