@@ -3,6 +3,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
+import { normalizeBuildingNumber } from '../utils/normalizeBuildingNumber.js';
 import { uploadBufferToGoogleDrive, downloadGoogleDriveFile, deleteGoogleDriveFile } from '../services/googleDrive.js';
 import { hashPassword } from '../security/auth.js';
 import { canManageOwnedRecord, ownedRecordWhere } from '../security/record-ownership.js';
@@ -1741,9 +1742,12 @@ router.get('/building-deeds', async (req, res, next) => {
 // The lookup covers the database, including rows hidden by client-side filters.
 router.get('/buildings/number-usage', requireBuildingRegistryRole('canView'), async (req, res, next) => {
   try {
-    const buildingNumber = z.string().trim().min(1).max(100).parse(req.query.number);
-    const matches = await prisma.mosqueBuilding.findMany({
-      where: { buildingNumber: { equals: buildingNumber, mode: 'insensitive' } },
+    const requestedNumber = z.string().trim().min(1).max(100).parse(req.query.number);
+    const buildingNumber = normalizeBuildingNumber(requestedNumber);
+    if (!buildingNumber) return res.status(400).json({ message: 'أدخل رقم مبنى صحيحًا، وليس مسافات فقط.' });
+    // Include legacy identifiers such as "A 70", "a70" and Arabic numerals.
+    // Do not rely on a simple equality filter, which would omit older variants.
+    const candidates = await prisma.mosqueBuilding.findMany({
       select: {
         id: true,
         buildingNumber: true,
@@ -1752,10 +1756,16 @@ router.get('/buildings/number-usage', requireBuildingRegistryRole('canView'), as
         deed: { select: { id: true, deedNumber: true } },
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: 100,
     });
+    const allMatches = candidates.filter(
+      (item) => normalizeBuildingNumber(item.buildingNumber) === buildingNumber,
+    );
     res.setHeader('Cache-Control', 'no-store');
-    res.json({ buildingNumber, matches, truncated: matches.length === 100 });
+    res.json({
+      buildingNumber,
+      matches: allMatches.slice(0, 100),
+      truncated: allMatches.length > 100,
+    });
   } catch (error) { next(error); }
 });
 
@@ -1835,24 +1845,39 @@ router.get('/buildings', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// Master records may share a building number only if their registered deeds differ.
-// Keep this check in the API as well as the database composite unique constraint.
-// Pending IMP- records can have no deed; keep their numbers distinct too.
-const assertBuildingNumberAvailableForDeed = async (buildingNumber, deedId, excludeId = null) => {
-  const duplicate = await prisma.mosqueBuilding.findFirst({
+// Treat different spacing, case and numeral systems as one building number.
+// Existing legacy rows are compared in memory to avoid changing production data.
+const assertBuildingNumberAvailableForDeed = async (db, buildingNumber, deedId, excludeId = null) => {
+  const candidateRows = await db.mosqueBuilding.findMany({
     where: {
-      buildingNumber: { equals: buildingNumber, mode: 'insensitive' },
       deedId: deedId || null,
       ...(excludeId ? { id: { not: excludeId } } : {}),
     },
-    select: { id: true },
+    select: { id: true, buildingNumber: true, name: true },
   });
+  const canonicalNumber = normalizeBuildingNumber(buildingNumber);
+  const duplicate = candidateRows.find(
+    (item) => normalizeBuildingNumber(item.buildingNumber) === canonicalNumber,
+  );
   if (duplicate) {
-    const error = new Error('رقم المبنى مستخدم مسبقًا ضمن الصك المحدد؛ يُسمح بالتكرار فقط عند اختلاف الصك.');
+    const error = new Error(
+      `رقم المبنى ${canonicalNumber} مسجل مسبقًا ضمن الصك المحدد باسم «${duplicate.name || canonicalNumber}». تختلف الصياغة والمسافات فقط؛ عدّل السجل الموجود بدلًا من تكراره.`,
+    );
     error.statusCode = 409;
     throw error;
   }
 };
+
+// Prevent concurrent requests using alternate spacing from bypassing the check.
+// The advisory lock lasts only for this transaction; no schema/data migration.
+const withUniqueBuildingNumberForDeed = (number, deedId, excludeId, write) =>
+  prisma.$transaction(async (tx) => {
+    const canonicalNumber = normalizeBuildingNumber(number);
+    const lockKey = `IAU-BUILDING:${deedId || 'PENDING'}:${canonicalNumber}`;
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+    await assertBuildingNumberAvailableForDeed(tx, canonicalNumber, deedId, excludeId);
+    return write(tx, canonicalNumber);
+  }, { timeout: 15000 });
 
 const handleBuildingNumberWriteError = (error, res, next) => {
   // A second concurrent request can pass the application check: rely on the
@@ -1868,13 +1893,18 @@ const handleBuildingNumberWriteError = (error, res, next) => {
 router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res, next) => {
   try {
     const input = buildingSchema.parse(req.body);
-    const pendingImport = input.buildingNumber.startsWith('IMP-');
+    const canonicalNumber = normalizeBuildingNumber(input.buildingNumber);
+    if (!canonicalNumber || canonicalNumber.length > 100) {
+      return res.status(400).json({ message: 'رقم المبنى غير صالح بعد إزالة المسافات.' });
+    }
+    const pendingImport = canonicalNumber.startsWith('IMP-');
     if (!pendingImport) await assertBuildingDeed(input.deedId);
-    await assertBuildingNumberAvailableForDeed(input.buildingNumber, input.deedId);
 
-    const building = await prisma.mosqueBuilding.create({
+    const building = await withUniqueBuildingNumberForDeed(
+      canonicalNumber, input.deedId, null, (tx, buildingNumber) => tx.mosqueBuilding.create({
       data: {
         ...input,
+        buildingNumber,
         operationalStatus: input.operationalStatus || 'active',
         coverageStatus: input.coverageStatus || 'unassessed',
         creationFeasibility: input.creationFeasibility || 'under_study',
@@ -1895,7 +1925,7 @@ router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res
           },
         },
       },
-    });
+    }));
     res.status(201).json(building);
   } catch (error) { handleBuildingNumberWriteError(error, res, next); }
 });
@@ -1913,16 +1943,21 @@ router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req,
     }
 
     const deedId = input.deedId || current.deedId;
-    const effectiveBuildingNumber = input.buildingNumber || current.buildingNumber;
+    const effectiveBuildingNumber = normalizeBuildingNumber(input.buildingNumber || current.buildingNumber);
+    if (!effectiveBuildingNumber || effectiveBuildingNumber.length > 100) {
+      return res.status(400).json({ message: 'رقم المبنى غير صالح بعد إزالة المسافات.' });
+    }
     const pendingImport = effectiveBuildingNumber.startsWith('IMP-');
     if (!pendingImport) await assertBuildingDeed(deedId);
-    await assertBuildingNumberAvailableForDeed(effectiveBuildingNumber, deedId, current.id);
 
     // The creator must still match when the database performs the write.
-    const updated = await prisma.mosqueBuilding.updateMany({
-      where: ownedRecordWhere(req.authUser, req.params.id),
-      data: { ...input, deedId },
-    });
+    const updated = await withUniqueBuildingNumberForDeed(
+      effectiveBuildingNumber, deedId, current.id,
+      (tx, buildingNumber) => tx.mosqueBuilding.updateMany({
+        where: ownedRecordWhere(req.authUser, req.params.id),
+        data: { ...input, buildingNumber, deedId },
+      }),
+    );
     if (!updated.count) return res.status(403).json({ message: 'لا تملك صلاحية تعديل هذا المبنى' });
     const building = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
