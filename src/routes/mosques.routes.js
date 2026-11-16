@@ -1811,11 +1811,42 @@ router.get('/buildings', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Master records may share a building number only if their registered deeds differ.
+// Keep this check in the API as well as the database composite unique constraint.
+// Pending IMP- records can have no deed; keep their numbers distinct too.
+const assertBuildingNumberAvailableForDeed = async (buildingNumber, deedId, excludeId = null) => {
+  const duplicate = await prisma.mosqueBuilding.findFirst({
+    where: {
+      buildingNumber: { equals: buildingNumber, mode: 'insensitive' },
+      deedId: deedId || null,
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true },
+  });
+  if (duplicate) {
+    const error = new Error('رقم المبنى مستخدم مسبقًا ضمن الصك المحدد؛ يُسمح بالتكرار فقط عند اختلاف الصك.');
+    error.statusCode = 409;
+    throw error;
+  }
+};
+
+const handleBuildingNumberWriteError = (error, res, next) => {
+  // A second concurrent request can pass the application check: rely on the
+  // PostgreSQL composite unique constraint as the authoritative final guard.
+  if (error?.code === 'P2002') {
+    return res.status(409).json({
+      message: 'رقم المبنى مستخدم مسبقًا ضمن الصك المحدد؛ يُسمح بالتكرار فقط عند اختلاف الصك.',
+    });
+  }
+  return next(error);
+};
+
 router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res, next) => {
   try {
     const input = buildingSchema.parse(req.body);
     const pendingImport = input.buildingNumber.startsWith('IMP-');
     if (!pendingImport) await assertBuildingDeed(input.deedId);
+    await assertBuildingNumberAvailableForDeed(input.buildingNumber, input.deedId);
 
     const building = await prisma.mosqueBuilding.create({
       data: {
@@ -1842,7 +1873,7 @@ router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res
       },
     });
     res.status(201).json(building);
-  } catch (error) { next(error); }
+  } catch (error) { handleBuildingNumberWriteError(error, res, next); }
 });
 
 router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req, res, next) => {
@@ -1861,6 +1892,7 @@ router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req,
     const effectiveBuildingNumber = input.buildingNumber || current.buildingNumber;
     const pendingImport = effectiveBuildingNumber.startsWith('IMP-');
     if (!pendingImport) await assertBuildingDeed(deedId);
+    await assertBuildingNumberAvailableForDeed(effectiveBuildingNumber, deedId, current.id);
 
     // The creator must still match when the database performs the write.
     const updated = await prisma.mosqueBuilding.updateMany({
@@ -1887,7 +1919,7 @@ router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req,
       },
     });
     res.json(building);
-  } catch (error) { next(error); }
+  } catch (error) { handleBuildingNumberWriteError(error, res, next); }
 });
 
 router.delete('/buildings/pending-imports/all', requireBuildingRegistryRole('canDelete'), async (req, res, next) => {
