@@ -183,6 +183,67 @@ if (enabled) {
     assert.equal(denied.status, 400);
   });
 
+  test('different whitespace/case forms become one stored identifier and block same-deed repeats', async () => {
+    const number = 'A70-' + suffix;
+    const fresh = await request('/buildings', 'POST', input(' A 70 - ' + suffix, deeds[0].id));
+    assert.equal(fresh.status, 409, JSON.stringify(fresh.body));
+    assert.match(fresh.body.message, /المسافات/);
+
+    const lookup = await request('/buildings/number-usage?number=' +
+      encodeURIComponent('a 70 - ' + suffix), 'GET');
+    assert.equal(lookup.status, 200, JSON.stringify(lookup.body));
+    assert.equal(lookup.body.buildingNumber, number);
+    assert.equal(lookup.body.matches.length, 2);
+
+    const arabicNumerals = await request('/buildings', 'POST',
+      input('a٧٠-' + suffix, deeds[0].id));
+    assert.equal(arabicNumerals.status, 409);
+  });
+
+  test('legacy pre-normalization numbers are detected without rewriting past rows', async () => {
+    const oldNumber = 'LEGACY70-' + suffix;
+    const first = await request('/buildings', 'POST', input(oldNumber, deeds[0].id));
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    buildings.push(first.body);
+    const originalStoredVariant = ' L E G A C Y 70 - ' + suffix;
+    await prisma.mosqueBuilding.update({
+      where: { id: first.body.id },
+      data: { buildingNumber: originalStoredVariant },
+    });
+    const lookup = await request('/buildings/number-usage?number=' +
+      encodeURIComponent('legacy70-' + suffix), 'GET');
+    assert.equal(lookup.status, 200);
+    assert.equal(lookup.body.matches.length, 1);
+    assert.equal(lookup.body.matches[0].buildingNumber, originalStoredVariant);
+
+    const denied = await request('/buildings', 'POST', input(oldNumber, deeds[0].id));
+    assert.equal(denied.status, 409, JSON.stringify(denied.body));
+    const differentDeed = await request('/buildings', 'POST',
+      input(' lEgAcy 70- ' + suffix, deeds[1].id));
+    assert.equal(differentDeed.status, 201, JSON.stringify(differentDeed.body));
+    buildings.push(differentDeed.body);
+    assert.equal(differentDeed.body.buildingNumber, oldNumber);
+    const unchanged = await prisma.mosqueBuilding.findUnique({ where: { id: first.body.id } });
+    assert.equal(unchanged.buildingNumber, originalStoredVariant);
+  });
+
+  test('simultaneous writes with alternative whitespace cannot create two records under one deed', async () => {
+    const number = 'R70-' + suffix;
+    const responses = await Promise.all([
+      request('/buildings', 'POST', input(' R 70 - ' + suffix, deeds[0].id)),
+      request('/buildings', 'POST', input('r70-' + suffix, deeds[0].id)),
+    ]);
+    assert.deepEqual(responses.map((x) => x.status).sort(), [201, 409],
+      JSON.stringify(responses));
+    const successful = responses.find((item) => item.status === 201);
+    buildings.push(successful.body);
+    assert.equal(successful.body.buildingNumber, number);
+    const stored = await prisma.mosqueBuilding.findMany({
+      where: { deedId: deeds[0].id, buildingNumber: number },
+    });
+    assert.equal(stored.length, 1);
+  });
+
   test('the same pending import number cannot be inserted twice without a deed', async () => {
     const number = 'IMP-CI-' + suffix;
     const pending = await request('/buildings', 'POST', input(number, null));
