@@ -1874,7 +1874,7 @@ const withUniqueBuildingNumberForDeed = (number, deedId, excludeId, write) =>
   prisma.$transaction(async (tx) => {
     const canonicalNumber = normalizeBuildingNumber(number);
     const lockKey = `IAU-BUILDING:${deedId || 'PENDING'}:${canonicalNumber}`;
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
     await assertBuildingNumberAvailableForDeed(tx, canonicalNumber, deedId, excludeId);
     return write(tx, canonicalNumber);
   }, { timeout: 15000 });
