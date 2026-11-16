@@ -1735,6 +1735,30 @@ router.get('/building-deeds', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// The UI reads this before creating a central building. It returns only the
+// registered building/deed pairs, so a repeated number under a *different*
+// deed is clearly distinguished from an existing record under the same deed.
+// The lookup covers the database, including rows hidden by client-side filters.
+router.get('/buildings/number-usage', requireBuildingRegistryRole('canView'), async (req, res, next) => {
+  try {
+    const buildingNumber = z.string().trim().min(1).max(100).parse(req.query.number);
+    const matches = await prisma.mosqueBuilding.findMany({
+      where: { buildingNumber: { equals: buildingNumber, mode: 'insensitive' } },
+      select: {
+        id: true,
+        buildingNumber: true,
+        name: true,
+        deedId: true,
+        deed: { select: { id: true, deedNumber: true } },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 100,
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ buildingNumber, matches, truncated: matches.length === 100 });
+  } catch (error) { next(error); }
+});
+
 router.get('/buildings', async (req, res, next) => {
   try {
     const context = await getModuleRole(req);
