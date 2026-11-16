@@ -137,6 +137,12 @@ if (enabled) {
     assert.equal(insensitive.body.matches.length, 2);
     const missing = await request('/buildings/number-usage', 'GET');
     assert.equal(missing.status, 400);
+    const denied = await fetch(baseUrl + '/api/mosques/buildings/number-usage?number=' +
+      encodeURIComponent(number));
+    assert.equal(denied.status, 401, 'An unauthenticated caller may not enumerate building/deed links');
+    const noHits = await request('/buildings/number-usage?number=CI-NONEXISTENT-' + suffix, 'GET');
+    assert.equal(noHits.status, 200);
+    assert.deepEqual(noHits.body.matches, []);
   });
 
   test('creating a repeated number within the same deed returns a meaningful conflict', async () => {
