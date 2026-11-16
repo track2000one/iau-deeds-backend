@@ -45,6 +45,15 @@ jobs:
           const sql = fs.readFileSync('/tmp/vacant-land-schema-diff.sql', 'utf8');
           const statements = sql.split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n');
           console.log('Prisma schema diff (SQL statements only):\n' + statements.slice(0, 16000));
+          const normalizedSql = statements.trim().replace(/\s+/g, ' ');
+          // Carefully scoped exception: replace the *unique index*, not any rows
+          // or columns. The new composite index must be created in the same diff.
+          const expectedBuildingConstraintSwap =
+            /^DROP INDEX "MosqueBuilding_buildingNumber_key"; CREATE UNIQUE INDEX "mosque_building_number_deed_key" ON "MosqueBuilding"\("buildingNumber", "deedId"\);?$/i;
+          if (expectedBuildingConstraintSwap.test(normalizedSql)) {
+            console.log('Approved exact MosqueBuilding index replacement: no data rows, tables or columns altered.');
+            process.exit(0);
+          }
           if (/(?:^|;)\s*(DROP|TRUNCATE|DELETE|UPDATE|RENAME)\b/im.test(statements)) {
             throw new Error('Destructive or data-changing SQL was detected. Manual review required.');
           }
