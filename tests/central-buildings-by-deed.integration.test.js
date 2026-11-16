@@ -119,6 +119,32 @@ if (enabled) {
       new Set(deeds.map((deed) => deed.id)));
   });
 
+  test('read-only number lookup lists both deed links before save, without any private fields', async () => {
+    const number = buildings[0].buildingNumber;
+    const lookup = await request('/buildings/number-usage?number=' + encodeURIComponent(number), 'GET');
+    assert.equal(lookup.status, 200, JSON.stringify(lookup.body));
+    assert.equal(lookup.body.matches.length, 2);
+    const ids = lookup.body.matches.map((item) => item.deedId);
+    assert.deepEqual(new Set(ids), new Set(deeds.map((deed) => deed.id)));
+    assert.ok(lookup.body.matches.every((item) => item.deed?.deedNumber));
+    assert.ok(lookup.body.matches.every((item) => !('createdBy' in item)));
+    assert.ok(lookup.body.matches.every((item) => !('photos' in item)));
+    assert.ok(lookup.body.matches.every((item) => !('documents' in item)));
+    assert.equal(lookup.body.truncated, false);
+
+    const insensitive = await request('/buildings/number-usage?number=' + encodeURIComponent(number.toLowerCase()), 'GET');
+    assert.equal(insensitive.status, 200);
+    assert.equal(insensitive.body.matches.length, 2);
+    const missing = await request('/buildings/number-usage', 'GET');
+    assert.equal(missing.status, 400);
+    const denied = await fetch(baseUrl + '/api/mosques/buildings/number-usage?number=' +
+      encodeURIComponent(number));
+    assert.equal(denied.status, 401, 'An unauthenticated caller may not enumerate building/deed links');
+    const noHits = await request('/buildings/number-usage?number=CI-NONEXISTENT-' + suffix, 'GET');
+    assert.equal(noHits.status, 200);
+    assert.deepEqual(noHits.body.matches, []);
+  });
+
   test('creating a repeated number within the same deed returns a meaningful conflict', async () => {
     const number = buildings[0].buildingNumber;
     const duplicate = await request('/buildings', 'POST',
