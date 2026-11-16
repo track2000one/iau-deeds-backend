@@ -8,7 +8,7 @@ import { signAccessToken } from '../src/security/auth.js';
 // This is deliberately opt-in and must only run against the disposable GitHub
 // Actions PostgreSQL service. It never connects to Railway production.
 const enabled = process.env.CENTRAL_BUILDINGS_INTEGRATION_TEST === '1';
-const suffix = randomUUID().slice(0, 12);
+const suffix = randomUUID().slice(0, 12).toUpperCase();
 let server;
 let baseUrl;
 let owner;
