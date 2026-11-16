@@ -62,6 +62,7 @@ jobs:
       JWT_SECRET: local-only-follow-up-integration-secret-2026-never-production
       FOLLOW_UP_INTEGRATION_TEST: '1'
       VACANT_LANDS_INTEGRATION: '1'
+      CENTRAL_BUILDINGS_INTEGRATION_TEST: '1'
       NODE_ENV: test
       FRONTEND_URL: http://127.0.0.1:4173
     steps:
@@ -80,3 +81,5 @@ jobs:
         run: node --test tests/transaction-follow-up.integration.test.js
       - name: Exercise vacant land record ownership and deed links
         run: node --test tests/vacant-lands.integration.test.js
+      - name: Check central building number uniqueness per deed (isolated database)
+        run: node --test tests/central-buildings-by-deed.integration.test.js

@@ -1003,7 +1003,7 @@ model AssetExcelTemplate {
 // ============================================================
 model MosqueBuilding {
   id                  String   @id @default(cuid())
-  buildingNumber      String   @unique
+  buildingNumber      String
   name                String?
   deedId              String?
   campusLocation      String?
@@ -1042,6 +1042,9 @@ model MosqueBuilding {
   sites           MosqueSite[]
   siteInspections SiteInspection[]
 
+  // A building number may occur under different deeds; prevent duplicates per deed.
+  // deedId is nullable only for legacy/pending-import records.
+  @@unique([buildingNumber, deedId], map: "mosque_building_number_deed_key")
   @@index([deedId])
   @@index([region])
   @@index([city])
