@@ -498,7 +498,7 @@ const buildingSchema = z.object({
   buildingType: z.string().trim().max(100).optional().nullable(),
   primaryUse: z.string().trim().max(200).optional().nullable(),
   ownershipType: z.string().trim().max(100).optional().nullable(),
-  operationalStatus: z.enum(['active', 'maintenance', 'under_construction', 'temporarily_closed', 'out_of_service']).optional(),
+  operationalStatus: z.enum(['active', 'maintenance', 'under_construction', 'temporarily_closed', 'out_of_service', 'not_existing', 'other']).optional(),
   constructionYear: z.coerce.number().int().min(1800).max(2200).optional().nullable(),
   floorsCount: z.coerce.number().int().nonnegative().max(300).optional().nullable(),
   basementFloorsCount: z.coerce.number().int().nonnegative().max(50).optional().nullable(),

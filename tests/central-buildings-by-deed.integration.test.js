@@ -244,6 +244,27 @@ if (enabled) {
     assert.equal(stored.length, 1);
   });
 
+  test('non-existing and other operating statuses can be saved and edited', async () => {
+    const number = 'NONEXIST-' + suffix;
+    const created = await request('/buildings', 'POST', {
+      ...input(number, deeds[0].id, 'مبنى تجريبي غير قائم'),
+      operationalStatus: 'not_existing',
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.equal(created.body.operationalStatus, 'not_existing');
+    buildings.push(created.body);
+
+    const updated = await request('/buildings/' + created.body.id, 'PUT', {
+      ...input(number, deeds[0].id, 'مبنى تجريبي غير قائم'),
+      operationalStatus: 'other',
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.operationalStatus, 'other');
+
+    const saved = await prisma.mosqueBuilding.findUnique({ where: { id: created.body.id } });
+    assert.equal(saved.operationalStatus, 'other');
+  });
+
   test('the same pending import number cannot be inserted twice without a deed', async () => {
     const number = 'IMP-CI-' + suffix;
     const pending = await request('/buildings', 'POST', input(number, null));
