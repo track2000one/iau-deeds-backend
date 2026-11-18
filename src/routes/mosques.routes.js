@@ -4,6 +4,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { normalizeBuildingNumber } from '../utils/normalizeBuildingNumber.js';
+import { createAuditLog } from '../services/audit.service.js';
 import { uploadBufferToGoogleDrive, downloadGoogleDriveFile, deleteGoogleDriveFile } from '../services/googleDrive.js';
 import { hashPassword } from '../security/auth.js';
 import { canManageOwnedRecord, ownedRecordWhere } from '../security/record-ownership.js';
@@ -518,6 +519,19 @@ const buildingSchema = z.object({
   approvedAlternative: z.string().trim().optional().nullable(),
   notes: z.string().trim().max(5000).optional().nullable(),
 });
+
+// Client-created timestamps are never authoritative. The creation timestamp
+// is stamped by the server. Only system admins may correct registrationAt.
+const parseBuildingRegistrationTime = (value) => {
+  const parsed = z.string().datetime({ offset: true }).parse(value);
+  const result = new Date(parsed);
+  if (!Number.isFinite(result.getTime())) {
+    const error = new Error('تاريخ ووقت التسجيل غير صالحين');
+    error.statusCode = 400;
+    throw error;
+  }
+  return result;
+};
 
 const assertBuildingDeed = async (deedId) => {
   if (!deedId) {
@@ -1892,6 +1906,12 @@ const handleBuildingNumberWriteError = (error, res, next) => {
 
 router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res, next) => {
   try {
+    // Even admins must not spoof the automatic time during initial creation.
+    if (Object.hasOwn(req.body || {}, 'registrationAt') ||
+        Object.hasOwn(req.body || {}, 'createdAt') ||
+        Object.hasOwn(req.body || {}, 'updatedAt')) {
+      return res.status(403).json({ message: 'يُسجَّل تاريخ ووقت إنشاء المبنى تلقائيًا من الخادم، ولا يمكن إدخالهما يدويًا عند الإضافة.' });
+    }
     const input = buildingSchema.parse(req.body);
     const canonicalNumber = normalizeBuildingNumber(input.buildingNumber);
     if (!canonicalNumber || canonicalNumber.length > 100) {
@@ -1909,6 +1929,7 @@ router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res
         coverageStatus: input.coverageStatus || 'unassessed',
         creationFeasibility: input.creationFeasibility || 'under_study',
         createdBy: req.authUser.id,
+        registrationAt: new Date(), // authoritative server timestamp
       },
       include: {
         deed: {
@@ -1932,10 +1953,22 @@ router.post('/buildings', requireBuildingRegistryRole('canAdd'), async (req, res
 
 router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req, res, next) => {
   try {
+    if (Object.hasOwn(req.body || {}, 'createdAt') ||
+        Object.hasOwn(req.body || {}, 'updatedAt')) {
+      return res.status(403).json({ message: 'لا يمكن تعديل التاريخ الأصلي للإنشاء أو تاريخ التحديث التلقائي.' });
+    }
+    const requestedRegistrationAt = Object.hasOwn(req.body || {}, 'registrationAt')
+      ? req.body.registrationAt : undefined;
+    if (requestedRegistrationAt !== undefined && req.authUser?.role !== 'admin') {
+      return res.status(403).json({ message: 'تعديل تاريخ ووقت تسجيل المبنى متاح للمسؤول فقط.' });
+    }
+    const registrationAt = requestedRegistrationAt !== undefined
+      ? parseBuildingRegistrationTime(requestedRegistrationAt)
+      : undefined;
     const input = buildingSchema.parse(req.body);
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
-      select: { id: true, deedId: true, buildingNumber: true, createdBy: true },
+      select: { id: true, deedId: true, buildingNumber: true, createdBy: true, createdAt: true, registrationAt: true },
     });
     if (!current) return res.status(404).json({ message: 'المبنى غير موجود' });
     if (!canManageOwnedRecord(req.authUser, current)) {
@@ -1955,10 +1988,28 @@ router.put('/buildings/:id', requireBuildingRegistryRole('canEdit'), async (req,
       effectiveBuildingNumber, deedId, current.id,
       (tx, buildingNumber) => tx.mosqueBuilding.updateMany({
         where: ownedRecordWhere(req.authUser, req.params.id),
-        data: { ...input, buildingNumber, deedId },
+        data: {
+          ...input, buildingNumber, deedId,
+          ...(registrationAt !== undefined ? { registrationAt } : {}),
+        },
       }),
     );
     if (!updated.count) return res.status(403).json({ message: 'لا تملك صلاحية تعديل هذا المبنى' });
+    if (registrationAt !== undefined &&
+        registrationAt.getTime() !== (current.registrationAt || current.createdAt).getTime()) {
+      await createAuditLog({
+        user: req.authUser,
+        action: 'update',
+        module: 'central_buildings',
+        entity: 'MosqueBuilding',
+        entityId: current.id,
+        entityLabel: effectiveBuildingNumber,
+        description: 'تصحيح تاريخ ووقت تسجيل المبنى بواسطة المسؤول',
+        previousData: { registrationAt: (current.registrationAt || current.createdAt).toISOString() },
+        newData: { registrationAt: registrationAt.toISOString() },
+        metadata: { originalCreatedAtUnchanged: true },
+      });
+    }
     const building = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
       include: {
