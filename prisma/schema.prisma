@@ -1036,6 +1036,9 @@ model MosqueBuilding {
   documents           Json?    // Private building documents; independent of photo gallery
   createdBy           String?
   createdAt           DateTime @default(now())
+  // Editable registration timestamp for authorized admins only; legacy records
+  // fall back to createdAt. Keep createdAt immutable for audit provenance.
+  registrationAt      DateTime?
   updatedAt           DateTime @updatedAt
 
   deed            Deed?            @relation(fields: [deedId], references: [id], onDelete: Restrict)
