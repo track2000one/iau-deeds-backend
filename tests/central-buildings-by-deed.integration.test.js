@@ -265,6 +265,91 @@ if (enabled) {
     assert.equal(saved.operationalStatus, 'other');
   });
 
+  test('registration date/time is server-stamped, readonly for employees and editable by admins with an audit record', async () => {
+    const admin = await prisma.appUser.create({
+      data: {
+        username: 'time-admin-' + suffix,
+        email: 'time-admin-' + suffix + '@example.invalid',
+        passwordHash: 'synthetic-test-only',
+        isActive: true,
+        role: 'admin',
+      },
+    });
+    try {
+      const number = 'TIMECI-' + suffix;
+      const forgedCreate = await request('/buildings', 'POST', {
+        ...input(number, deeds[0].id),
+        registrationAt: '2020-01-01T00:00:00.000Z',
+      });
+      assert.equal(forgedCreate.status, 403, 'Client must not forge the initial registration timestamp');
+
+      const start = Date.now();
+      const created = await request('/buildings', 'POST', input(number, deeds[0].id));
+      const finish = Date.now();
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      buildings.push(created.body);
+      assert.ok(created.body.registrationAt, 'Backend must stamp new records');
+      const stamped = new Date(created.body.registrationAt).getTime();
+      assert.ok(stamped >= start - 1000 && stamped <= finish + 1000,
+        'Server timestamp must match actual creation time');
+
+      const immutableCreatedAt = created.body.createdAt;
+      const impersonation = await request('/buildings/' + created.body.id, 'PUT', {
+        ...input(number, deeds[0].id),
+        registrationAt: '2020-01-01T00:00:00.000Z',
+      });
+      assert.equal(impersonation.status, 403, 'Owner with edit permissions cannot change registration time');
+
+      const normalUpdate = await request('/buildings/' + created.body.id, 'PUT', {
+        ...input(number, deeds[0].id, 'تعديل عادي لا يغير التاريخ'),
+      });
+      assert.equal(normalUpdate.status, 200, JSON.stringify(normalUpdate.body));
+      assert.equal(new Date(normalUpdate.body.registrationAt).getTime(), stamped);
+
+      const adminPut = await fetch(baseUrl + '/api/mosques/buildings/' + created.body.id, {
+        method: 'PUT',
+        headers: {
+          authorization: 'Bearer ' + signAccessToken(admin),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...input(number, deeds[0].id),
+          registrationAt: '2026-04-15T09:35:00.000Z',
+        }),
+      });
+      assert.equal(adminPut.status, 200, await adminPut.text().catch(() => ''));
+      const after = await prisma.mosqueBuilding.findUnique({ where: { id: created.body.id } });
+      assert.equal(after.registrationAt.toISOString(), '2026-04-15T09:35:00.000Z');
+      assert.equal(after.createdAt.toISOString(), immutableCreatedAt,
+        'Original audit creation timestamp must not change');
+      const audit = await prisma.auditLog.findFirst({
+        where: {
+          module: 'central_buildings', entity: 'MosqueBuilding',
+          entityId: created.body.id,
+          description: 'تصحيح تاريخ ووقت تسجيل المبنى بواسطة المسؤول',
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      assert.ok(audit, 'Administrator corrections must leave an audit event');
+      assert.equal(audit.userId, admin.id);
+
+      const forgedOriginal = await fetch(baseUrl + '/api/mosques/buildings/' + created.body.id, {
+        method: 'PUT',
+        headers: {
+          authorization: 'Bearer ' + signAccessToken(admin),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...input(number, deeds[0].id),
+          createdAt: '2022-01-01T00:00:00.000Z',
+        }),
+      });
+      assert.equal(forgedOriginal.status, 403);
+    } finally {
+      await prisma.appUser.delete({ where: { id: admin.id } });
+    }
+  });
+
   test('the same pending import number cannot be inserted twice without a deed', async () => {
     const number = 'IMP-CI-' + suffix;
     const pending = await request('/buildings', 'POST', input(number, null));
