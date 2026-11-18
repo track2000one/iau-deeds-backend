@@ -69,11 +69,16 @@ jobs:
             // Explicit, narrow allowance for the unrelated, optional building-documents schema extension.
             // Other unrelated schema changes still fail this check.
             const normalized = statements.trim().replace(/\s+/g, ' ');
-            const allowlisted = /^ALTER TABLE "MosqueBuilding" ADD COLUMN "documents" JSONB;?$/i;
-            if (!allowlisted.test(normalized)) {
-              throw new Error('Expected VacantLand creation or the allowlisted optional MosqueBuilding.documents column only.');
+            // Exact allowlist: the registration timestamp is optional,
+            // does not rewrite existing rows and preserves createdAt.
+            const allowed = [
+              /^ALTER TABLE "MosqueBuilding" ADD COLUMN "documents" JSONB;?$/i,
+              /^ALTER TABLE "MosqueBuilding" ADD COLUMN "registrationAt" TIMESTAMP\(3\);?$/i,
+            ];
+            if (!allowed.some((pattern) => pattern.test(normalized))) {
+              throw new Error('Unexpected schema change: only approved nullable MosqueBuilding columns are allowed.');
             }
-            console.log('Only nullable MosqueBuilding.documents added; VacantLand schema untouched.');
+            console.log('Approved nullable MosqueBuilding column addition; no data rows or unrelated tables modified.');
           }
           console.log('Additive schema change only; backup and staging verification required.');
           NODE
