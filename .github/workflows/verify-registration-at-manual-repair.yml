@@ -1,0 +1,98 @@
+name: Verify safe registrationAt manual repair
+
+on:
+  pull_request:
+    paths:
+      - 'prisma/manual/20261118-add-mosque-building-registration-at-only.sql'
+      - '.github/workflows/verify-registration-at-manual-repair.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-additive-repair:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: registration_at_ci
+          POSTGRES_USER: registration_ci
+          POSTGRES_PASSWORD: disposable_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U registration_ci -d registration_at_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://registration_ci:disposable_test_only@localhost:5432/registration_at_ci?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies and Prisma client
+        run: npm ci
+      - name: Reject any SQL except the exact approved ADD COLUMN statement
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const sql = fs.readFileSync('prisma/manual/20261118-add-mosque-building-registration-at-only.sql', 'utf8');
+          const statement = sql.split('\n')
+            .filter((line) => !line.trimStart().startsWith('--'))
+            .join(' ').replace(/\s+/g, ' ').trim();
+          const expected = 'ALTER TABLE public."MosqueBuilding" ADD COLUMN IF NOT EXISTS "registrationAt" TIMESTAMP(3);';
+          if (statement !== expected) {
+            throw new Error('Refusing unexpected schema or data changes: ' + statement);
+          }
+          console.log('Exact additive and idempotent SQL only.');
+          NODE
+      - name: Create disposable test schema (NEVER production)
+        run: npx prisma db push
+      - name: Simulate legacy database with missing registrationAt on disposable Postgres
+        run: |
+          printf 'ALTER TABLE public."MosqueBuilding" DROP COLUMN "registrationAt";' |
+            npx prisma db execute --stdin --schema prisma/schema.prisma
+      - name: Seed existing legacy row without registrationAt
+        run: |
+          node --input-type=module <<'NODE'
+          import { PrismaClient } from '@prisma/client';
+          const prisma = new PrismaClient();
+          try {
+            await prisma.$executeRaw`INSERT INTO public."MosqueBuilding" ("id", "buildingNumber", "createdAt", "updatedAt") VALUES ('legacy-reg-ci', 'LEGACY-REG-CI', TIMESTAMP '2026-01-02 03:04:05.123', TIMESTAMP '2026-01-02 03:04:05.123')`;
+          } finally {
+            await prisma.$disconnect();
+          }
+          NODE
+      - name: Apply exact migration twice to verify idempotence
+        run: |
+          npx prisma db execute --file prisma/manual/20261118-add-mosque-building-registration-at-only.sql --schema prisma/schema.prisma
+          npx prisma db execute --file prisma/manual/20261118-add-mosque-building-registration-at-only.sql --schema prisma/schema.prisma
+      - name: Verify nullable millisecond column, unchanged legacy row, and Prisma compatibility
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { PrismaClient } from '@prisma/client';
+          const prisma = new PrismaClient();
+          try {
+            const columns = await prisma.$queryRaw`SELECT data_type, datetime_precision, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'MosqueBuilding' AND column_name = 'registrationAt'`;
+            assert.equal(columns.length, 1);
+            assert.equal(columns[0].data_type, 'timestamp without time zone');
+            assert.equal(columns[0].datetime_precision, 3);
+            assert.equal(columns[0].is_nullable, 'YES');
+            const preserved = await prisma.$queryRaw`SELECT ("createdAt" = TIMESTAMP '2026-01-02 03:04:05.123') AS created_at_unchanged, ("updatedAt" = TIMESTAMP '2026-01-02 03:04:05.123') AS updated_at_unchanged FROM public."MosqueBuilding" WHERE "id" = 'legacy-reg-ci'`;
+            assert.equal(preserved.length, 1);
+            assert.equal(preserved[0].created_at_unchanged, true);
+            assert.equal(preserved[0].updated_at_unchanged, true);
+            const building = await prisma.mosqueBuilding.findUnique({ where: { id: 'legacy-reg-ci' } });
+            assert.ok(building);
+            assert.equal(building.registrationAt, null);
+            console.log('PASS: legacy building preserved, Prisma read successful, no backfill.');
+          } finally {
+            await prisma.$disconnect();
+          }
+          NODE
