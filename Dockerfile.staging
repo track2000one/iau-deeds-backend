@@ -1,0 +1,18 @@
+# Dedicated Railway staging image; production Dockerfile is unchanged.
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+ENV NPM_CONFIG_FUND=false
+
+COPY package.json package-lock.json ./
+COPY prisma ./prisma
+RUN npm ci --include=dev --no-audit --no-fund
+RUN npx prisma generate
+
+# Staging startup and its fail-closed environment guard must be present in the image.
+COPY scripts/stagingSafety.js scripts/startStaging.js ./scripts/
+COPY src ./src
+
+EXPOSE 8080
+CMD ["npm", "run", "start:staging"]
