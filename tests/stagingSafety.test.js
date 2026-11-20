@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   validateStagingConfiguration, STAGING_PROJECT_ID, STAGING_ENVIRONMENT_ID,
 } from '../scripts/stagingSafety.js';
@@ -41,4 +43,12 @@ test('rejects external services and missing synthetic-only opt-in', () => {
   for (const key of ['BREVO_API_KEY', 'GOOGLE_OAUTH_REFRESH_TOKEN', 'OPENAI_API_KEY', 'DATABASE_PUBLIC_URL']) {
     assert.throws(() => validateStagingConfiguration({ ...baseline, [key]: 'nonempty' }), /integrations/);
   }
+});
+
+test('QA Docker image includes the dedicated staging startup and safety scripts', () => {
+  const dockerfile = readFileSync(fileURLToPath(new URL('../Dockerfile.staging', import.meta.url)), 'utf8');
+  assert.match(dockerfile, /COPY scripts\/stagingSafety\.js scripts\/startStaging\.js \.\/scripts\//);
+  assert.match(dockerfile, /COPY src \.\/src/);
+  assert.match(dockerfile, /CMD \["npm", "run", "start:staging"\]/);
+  assert.doesNotMatch(dockerfile, /CMD \["npm", "start"\]/);
 });
