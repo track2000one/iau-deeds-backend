@@ -265,6 +265,15 @@ const requireMosquesOrCentralBuildings = (req, res, next) => {
   const registryGrant = req.authUser?.permissions?.find(
     (permission) => permission.module === 'central_buildings'
   );
+
+  // Photos and documents belong to the edit workflow of an existing
+  // building, not to deletion of the entire building record.
+  // Route handlers additionally verify the current user created the
+  // building (or is an administrator) before changing any media.
+  const mediaPath = /^\/buildings\/[^/]+\/(?:photos|documents)(?:\/|$)/.test(req.path);
+  if (mediaPath && req.method === 'POST' && (registryGrant?.canEdit || registryGrant?.canAdd)) return next();
+  if (mediaPath && ['DELETE', 'PATCH'].includes(req.method) && registryGrant?.canEdit) return next();
+
   if (action && registryGrant?.[action]) return next();
   return requirePermission('mosques')(req, res, next);
 };
