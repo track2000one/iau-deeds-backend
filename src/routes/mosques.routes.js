@@ -2072,6 +2072,9 @@ router.delete('/buildings/pending-imports/all', requireBuildingRegistryRole('can
 router.delete('/buildings/:id', requireBuildingRegistryRole('canDelete'), async (req, res, next) => {
   try {
     const isAdmin = req.authUser?.role === 'admin';
+    if (!isAdmin) {
+      return res.status(403).json({ message: 'حذف بطاقة المبنى بالكامل متاح للمسؤول فقط' });
+    }
     const reason = z.string().trim().max(500).optional().parse(req.body?.reason) || null;
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
