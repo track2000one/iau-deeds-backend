@@ -2071,6 +2071,8 @@ router.delete('/buildings/pending-imports/all', requireBuildingRegistryRole('can
 
 router.delete('/buildings/:id', requireBuildingRegistryRole('canDelete'), async (req, res, next) => {
   try {
+    const isAdmin = req.authUser?.role === 'admin';
+    const reason = z.string().trim().max(500).optional().parse(req.body?.reason) || null;
     const current = await prisma.mosqueBuilding.findUnique({
       where: { id: req.params.id },
       include: { _count: { select: { sites: true, siteInspections: true } } },
@@ -2079,21 +2081,115 @@ router.delete('/buildings/:id', requireBuildingRegistryRole('canDelete'), async 
     if (!canManageOwnedRecord(req.authUser, current)) {
       return res.status(403).json({ message: 'لا يسمح بحذف مبنى أنشأه مستخدم آخر؛ تواصل مع المسؤول.' });
     }
-    if (storedBuildingPhotos(current.photos).length || storedBuildingDocuments(current.documents).length) {
-      return res.status(409).json({ message: 'احذف صور المبنى ومرفقاته أولًا قبل حذف سجله.' });
+
+    // Ordinary users retain the existing safeguards. A system administrator
+    // may delete an erroneous building record regardless of media or links.
+    if (!isAdmin) {
+      if (storedBuildingPhotos(current.photos).length || storedBuildingDocuments(current.documents).length) {
+        return res.status(409).json({ message: 'احذف صور المبنى ومرفقاته أولًا قبل حذف سجله.' });
+      }
+      if (current._count.sites > 0 || current._count.siteInspections > 0) {
+        return res.status(409).json({
+          message: current._count.siteInspections > 0
+            ? 'لا يمكن حذف المبنى لوجود معاينات ميدانية مرتبطة به'
+            : 'لا يمكن حذف المبنى قبل فك ارتباط المساجد والمصليات التابعة له',
+        });
+      }
     }
-    if (current._count.sites > 0 || current._count.siteInspections > 0) {
-      return res.status(409).json({
-        message: current._count.siteInspections > 0
-          ? 'لا يمكن حذف المبنى لوجود معاينات ميدانية مرتبطة به'
-          : 'لا يمكن حذف المبنى قبل فك ارتباط المساجد والمصليات التابعة له',
+
+    // Assets and accounting records keep their own data. Their explicit JSON
+    // references to the deleted central building must not become stale.
+    // MosqueSite and SiteInspection foreign keys use onDelete: SetNull.
+    const affected = await prisma.$transaction(async (tx) => {
+      let unlinkedAssets = 0;
+      let unlinkedAccounting = 0;
+      if (isAdmin) {
+        const [assets, accountingRecords] = await Promise.all([
+          tx.asset.findMany({
+            where: { excelPayload: { path: ['centralBuildingId'], equals: current.id } },
+            select: { id: true, excelPayload: true },
+          }),
+          tx.accountingTransformationRecord.findMany({
+            where: { payload: { path: ['centralBuildingId'], equals: current.id } },
+            select: { id: true, payload: true },
+          }),
+        ]);
+        for (const asset of assets) {
+          const nextPayload = { ...(asset.excelPayload || {}) };
+          delete nextPayload.centralBuildingId;
+          await tx.asset.update({ where: { id: asset.id }, data: { excelPayload: nextPayload } });
+          unlinkedAssets += 1;
+        }
+        for (const record of accountingRecords) {
+          const nextPayload = { ...(record.payload || {}) };
+          delete nextPayload.centralBuildingId;
+          await tx.accountingTransformationRecord.update({
+            where: { id: record.id },
+            data: { payload: nextPayload },
+          });
+          unlinkedAccounting += 1;
+        }
+      }
+      const deleted = await tx.mosqueBuilding.deleteMany({
+        where: ownedRecordWhere(req.authUser, req.params.id),
+      });
+      return { deletedCount: deleted.count, unlinkedAssets, unlinkedAccounting };
+    }, { timeout: 30000 });
+
+    if (!affected.deletedCount) return res.status(403).json({ message: 'لا تملك صلاحية حذف هذا المبنى' });
+
+    // Clean up private Drive media after the database transaction commits.
+    // A file-service outage must not reverse an otherwise valid admin deletion.
+    const mediaFileIds = [...new Set([
+      ...storedBuildingPhotos(current.photos),
+      ...storedBuildingDocuments(current.documents),
+    ].map((file) => file?.fileId).filter((id) => typeof id === 'string' && id.trim()))];
+    const failedMediaFiles = [];
+    for (let index = 0; index < mediaFileIds.length; index += 5) {
+      const batch = mediaFileIds.slice(index, index + 5);
+      const results = await Promise.allSettled(batch.map((id) => deleteGoogleDriveFile(id)));
+      results.forEach((result, offset) => {
+        if (result.status === 'rejected') {
+          failedMediaFiles.push(batch[offset]);
+          console.warn('Could not remove private building media after deletion:', result.reason?.message);
+        }
       });
     }
-    const deleted = await prisma.mosqueBuilding.deleteMany({
-      where: ownedRecordWhere(req.authUser, req.params.id),
+
+    const { photos, documents, _count, ...buildingSnapshot } = current;
+    await createAuditLog({
+      user: req.authUser,
+      action: 'delete',
+      module: 'central_buildings',
+      entity: 'MosqueBuilding',
+      entityId: current.id,
+      entityLabel: current.buildingNumber,
+      description: isAdmin ? 'حذف إداري لسجل مبنى من السجل المركزي' : 'حذف سجل مبنى بواسطة منشئه',
+      previousData: {
+        ...buildingSnapshot,
+        photoFileNames: storedBuildingPhotos(photos).map((photo) => photo.fileName),
+        documentFileNames: storedBuildingDocuments(documents).map((document) => document.fileName),
+      },
+      metadata: {
+        reason,
+        adminOverride: isAdmin,
+        unlinkedMosqueSites: _count.sites,
+        unlinkedInspections: _count.siteInspections,
+        unlinkedAssets: affected.unlinkedAssets,
+        unlinkedAccounting: affected.unlinkedAccounting,
+        mediaFiles: mediaFileIds.length,
+        mediaCleanupFailures: failedMediaFiles,
+      },
     });
-    if (!deleted.count) return res.status(403).json({ message: 'لا تملك صلاحية حذف هذا المبنى' });
-    res.status(204).end();
+
+    res.json({
+      deleted: true,
+      unlinkedMosqueSites: current._count.sites,
+      unlinkedInspections: current._count.siteInspections,
+      unlinkedAssets: affected.unlinkedAssets,
+      unlinkedAccounting: affected.unlinkedAccounting,
+      mediaCleanupFailures: failedMediaFiles.length,
+    });
   } catch (error) { next(error); }
 });
 
