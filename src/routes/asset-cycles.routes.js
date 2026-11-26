@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { createAuditLog, getClientIp } from '../services/audit.service.js';
@@ -527,24 +526,28 @@ router.post('/:id/approve', async (req, res, next) => {
       };
 
       const inserts = [], updates = [], metadataOnly = [], recordLinks = [];
+      const insertRecordIds = new Map();
       const activeAssetIds = new Set();
       for (const record of records) {
         const snapshot = normalizeAssetCycleInput(record.payload || {});
         if (!isSnapshotValid(snapshot)) throw conflict(`السجل ${record.itemNumber || record.name} لا يحتوي على الحقول الأساسية المطلوبة.`);
         const existing = matchLive(record);
-        const id = existing?.id || randomUUID();
-        if (activeAssetIds.has(id)) throw conflict(`أكثر من سجل يطابق الأصل نفسه (${record.itemNumber || record.name}). راجع المطابقة قبل الاعتماد.`);
-        activeAssetIds.add(id);
+        const id = existing?.id;
+        if (id && activeAssetIds.has(id)) throw conflict(`أكثر من سجل يطابق الأصل نفسه (${record.itemNumber || record.name}). راجع المطابقة قبل الاعتماد.`);
+        if (id) activeAssetIds.add(id);
         const barcode = String(snapshot.barcode || existing?.barcode || '').trim() || allocateBarcode();
         const data = snapshotToDbData(snapshot, existing, { stableKey: record.stableKey, cycleId: cycle.id, changeType: record.changeType }, barcode);
-        if (!existing) inserts.push({ id, ...data, createdBy: approvedBy });
-        else {
+        if (!existing) {
+          if (insertRecordIds.has(data.itemNumber)) throw conflict(`رقم الصنف ${data.itemNumber} مكرر في الأصول الجديدة.`);
+          insertRecordIds.set(data.itemNumber, record.id);
+          inserts.push({ ...data, createdBy: approvedBy });
+        } else {
           const fingerprint = createAssetFingerprint(assetSnapshotFromAsset(existing));
           const mustUpdate = fingerprint !== record.sourceFingerprint || !existing.isInCurrentCycle || existing.stableKey !== record.stableKey;
           if (mustUpdate) updates.push({ id, ...data });
           else metadataOnly.push({ id, cycleState: data.cycleState });
         }
-        if (record.assetId !== id) recordLinks.push({ id: record.id, assetId: id });
+        if (id && record.assetId !== id) recordLinks.push({ id: record.id, assetId: id });
       }
 
       // PostgreSQL typed recordsets perform batch updates without thousands of
@@ -615,7 +618,15 @@ router.post('/:id/approve', async (req, res, next) => {
           WHERE a.id = v.id`;
       }
       for (let offset = 0; offset < inserts.length; offset += 250) {
-        await tx.asset.createMany({ data: inserts.slice(offset, offset + 250) });
+        const created = await tx.asset.createManyAndReturn({
+          data: inserts.slice(offset, offset + 250), select: { id: true, itemNumber: true },
+        });
+        for (const asset of created) {
+          const recordId = insertRecordIds.get(asset.itemNumber);
+          if (!recordId) throw new Error('Unable to resolve created asset identity');
+          activeAssetIds.add(asset.id);
+          recordLinks.push({ id: recordId, assetId: asset.id });
+        }
       }
       for (let offset = 0; offset < metadataOnly.length; offset += 750) {
         const payload = JSON.stringify(metadataOnly.slice(offset, offset + 750));
