@@ -21,6 +21,7 @@ const ASSET_FIELDS = [
   'vatAmount', 'purchaseValueBeforeVat', 'purchaseValueIncludingVat', 'serviceDate', 'serviceDateType',
   'acquisitionCost', 'supportingCostDocument', 'archiveDocumentNumber', 'manufacturer',
   'lastInventoryDate', 'lastInventoryDateType', 'unitOfMeasure', 'quantity', 'notes',
+  'location', 'depreciationAmount', 'accumulatedDepreciation', 'residualValue', 'netBookValue',
 ];
 
 export const ASSET_FIELD_LABELS = {
@@ -37,6 +38,8 @@ export const ASSET_FIELD_LABELS = {
   serviceDate: 'تاريخ الدخول في الخدمة', serviceDateType: 'نوع تاريخ الخدمة', acquisitionCost: 'تكلفة الاقتناء',
   supportingCostDocument: 'مستند التكلفة', archiveDocumentNumber: 'رقم مستند الأرشيف', manufacturer: 'المصنع',
   lastInventoryDate: 'آخر تاريخ جرد', lastInventoryDateType: 'نوع تاريخ الجرد', unitOfMeasure: 'وحدة القياس', quantity: 'الكمية', notes: 'الملاحظات',
+  location: 'الموقع', depreciationAmount: 'قسط الإهلاك', accumulatedDepreciation: 'الإهلاك المتراكم',
+  residualValue: 'القيمة المتبقية في نهاية العمر', netBookValue: 'القيمة الدفترية',
   excelPayload: 'بيانات Excel الإضافية',
 };
 
@@ -131,6 +134,11 @@ export const assetSnapshotFromAsset = (asset) => ({
   serviceDate: dateValue(asset.serviceDate),
   serviceDateType: asset.serviceDateType || 'gregorian',
   acquisitionCost: asset.acquisitionCost ?? null,
+  location: asset.location ?? null,
+  depreciationAmount: asset.depreciationAmount?.toString() ?? null,
+  accumulatedDepreciation: asset.accumulatedDepreciation?.toString() ?? null,
+  residualValue: asset.residualValue?.toString() ?? null,
+  netBookValue: asset.netBookValue?.toString() ?? null,
   supportingCostDocument: asset.supportingCostDocument || null,
   archiveDocumentNumber: asset.archiveDocumentNumber || null,
   manufacturer: asset.manufacturer || null,
@@ -141,6 +149,18 @@ export const assetSnapshotFromAsset = (asset) => ({
   excelPayload: asset.excelPayload || {},
   notes: asset.notes || null,
 });
+
+const financialFields = ['depreciationAmount', 'accumulatedDepreciation', 'residualValue', 'netBookValue'];
+const normalizeOptionalMoney = (value) => {
+  if (value == null || String(value).trim() === '') return null;
+  const raw = String(value).trim();
+  if (!/^-?\d{1,16}(?:\.\d{1,4})?$/.test(raw)) throw Object.assign(new Error('قيمة مالية غير صالحة؛ يلزم رقم عشري لا يتجاوز أربع منازل.'), { status: 400 });
+  const [whole, fraction = ''] = raw.split('.');
+  const sign = whole.startsWith('-') ? '-' : '';
+  const integer = whole.replace(/^-/, '').replace(/^0+(?=\d)/, '');
+  const decimals = fraction.replace(/0+$/, '');
+  return (integer === '0' && !decimals ? '' : sign) + integer + (decimals ? '.' + decimals : '');
+};
 
 export const normalizeAssetCycleInput = (input = {}) => {
   const snapshot = {};
@@ -156,6 +176,8 @@ export const normalizeAssetCycleInput = (input = {}) => {
   snapshot.serviceDateType = input.serviceDateType || 'gregorian';
   snapshot.lastInventoryDateType = input.lastInventoryDateType || 'gregorian';
   snapshot.quantity = Number.isFinite(Number(input.quantity)) ? Number(input.quantity) : 1;
+  snapshot.location = normalizeAssetCycleText(input.location) || null;
+  for (const field of financialFields) snapshot[field] = normalizeOptionalMoney(input[field]);
   snapshot.excelPayload = input.excelPayload && typeof input.excelPayload === 'object' ? input.excelPayload : {};
   return snapshot;
 };
@@ -209,6 +231,8 @@ export const mergeAssetCycleSnapshots = (previous = {}, incoming = {}) => {
 
 const comparableSnapshot = (snapshot) => {
   const normalized = normalizeAssetCycleInput(snapshot);
+  // Keep legacy fingerprints unchanged when all newly introduced values are absent.
+  for (const field of ['location', ...financialFields]) if (normalized[field] == null) delete normalized[field];
   return {
     ...normalized,
     excelPayload: cleanExcelPayloadForComparison(normalized.excelPayload),

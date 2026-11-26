@@ -260,6 +260,9 @@ const normalizeSmartExtraction = (payload) => {
 const nullableText = z.string().trim().max(5000).optional().nullable();
 const nullableShortText = z.string().trim().max(500).optional().nullable();
 const nullableNumber = z.coerce.number().min(0).optional().nullable();
+// Accept exact decimal strings or numeric values; blanks are null, never zero.
+const optionalMoney = z.preprocess((value) => typeof value === 'string' && !value.trim() ? null : value,
+  z.union([z.string().trim().regex(/^-?\d{1,16}(?:\.\d{1,4})?$/), z.number().finite().refine((value) => /^-?\d{1,16}(?:\.\d{1,4})?$/.test(String(value)))]).transform(String).nullable().optional());
 const dateType = z.enum(['gregorian', 'hijri']).optional().default('gregorian');
 
 const attachmentSchema = z.object({
@@ -314,6 +317,11 @@ const assetSchema = z.object({
   serviceDate: z.string().trim().optional().nullable(),
   serviceDateType: dateType,
   acquisitionCost: nullableNumber,
+  location: nullableShortText,
+  depreciationAmount: optionalMoney,
+  accumulatedDepreciation: optionalMoney,
+  residualValue: optionalMoney,
+  netBookValue: optionalMoney,
   supportingCostDocument: nullableShortText,
   archiveDocumentNumber: nullableShortText,
   manufacturer: nullableShortText,
@@ -471,6 +479,11 @@ const normalizeAssetData = (input, { barcode, purchaseDate, serviceDate, lastInv
   serviceDate,
   serviceDateType: input.serviceDateType,
   acquisitionCost: input.acquisitionCost ?? input.purchaseValue ?? null,
+  location: input.location === undefined ? undefined : input.location || null,
+  depreciationAmount: input.depreciationAmount,
+  accumulatedDepreciation: input.accumulatedDepreciation,
+  residualValue: input.residualValue,
+  netBookValue: input.netBookValue,
   supportingCostDocument: input.supportingCostDocument || null,
   archiveDocumentNumber: input.archiveDocumentNumber || null,
   manufacturer: input.manufacturer || input.brand || null,
