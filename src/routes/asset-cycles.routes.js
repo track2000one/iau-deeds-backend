@@ -468,10 +468,24 @@ router.post('/:id/approve', async (req, res, next) => {
     const activeAssetIds = new Set();
 
     await prisma.$transaction(async (tx) => {
+      // Serialize approvals and recheck state after taking the database lock.
+      const locked = await tx.$queryRaw`SELECT "status", "isCurrent" FROM "AssetUpdateCycle" WHERE "id" = ${cycle.id} FOR UPDATE`;
+      if (!locked.length || locked[0].status !== 'under_review' || locked[0].isCurrent) {
+        throw Object.assign(new Error('تغيرت حالة الدورة. حدّث الصفحة للتحقق من نتيجة الاعتماد.'), { status: 409 });
+      }
+      // Most carried-forward records already reference their live asset. Fetch
+      // these in batches rather than issuing a query for every unchanged row.
+      const linkedIds = [...new Set(records.map((record) => record.assetId).filter(Boolean))];
+      const linkedAssets = new Map();
+      for (let offset = 0; offset < linkedIds.length; offset += 750) {
+        const assets = await tx.asset.findMany({ where: { id: { in: linkedIds.slice(offset, offset + 750) } } });
+        for (const asset of assets) linkedAssets.set(asset.id, asset);
+      }
+      const recordLinks = [];
       for (const record of records) {
         const snapshot = normalizeAssetCycleInput(record.payload || {});
         if (!isSnapshotValid(snapshot)) throw Object.assign(new Error(`السجل ${record.itemNumber || record.name} لا يحتوي على الحقول الأساسية المطلوبة.`), { status: 409 });
-        let existing = await findLiveAssetForRecord(tx, record);
+        let existing = (record.assetId && linkedAssets.get(record.assetId)) || await findLiveAssetForRecord(tx, record);
         let barcode = String(snapshot.barcode || existing?.barcode || '').trim();
         if (!barcode) barcode = await nextBarcode(tx);
         const data = snapshotToDbData(snapshot, existing, { stableKey: record.stableKey, cycleId: cycle.id, changeType: record.changeType }, barcode);
@@ -484,7 +498,18 @@ router.post('/:id/approve', async (req, res, next) => {
           saved = await tx.asset.create({ data: { ...data, createdBy: approvedBy } });
         }
         activeAssetIds.add(saved.id);
-        if (record.assetId !== saved.id) await tx.assetCycleRecord.update({ where: { id: record.id }, data: { assetId: saved.id } });
+        linkedAssets.set(saved.id, saved);
+        if (record.assetId !== saved.id) recordLinks.push({ id: record.id, assetId: saved.id });
+      }
+
+      // Batch the record-to-asset links in parameterized PostgreSQL statements.
+      // They remain part of the same atomic approval transaction.
+      for (let offset = 0; offset < recordLinks.length; offset += 750) {
+        const links = JSON.stringify(recordLinks.slice(offset, offset + 750));
+        await tx.$executeRaw`UPDATE "AssetCycleRecord" AS r
+          SET "assetId" = v."assetId", "updatedAt" = CURRENT_TIMESTAMP
+          FROM jsonb_to_recordset(${links}::jsonb) AS v(id text, "assetId" text)
+          WHERE r.id = v.id AND r."cycleId" = ${cycle.id}`;
       }
 
       for (const removed of removedRecords) {
