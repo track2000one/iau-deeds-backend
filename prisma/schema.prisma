@@ -537,6 +537,11 @@ model Asset {
   serviceDate               DateTime?
   serviceDateType           String?   @default("gregorian")
   acquisitionCost           Float?
+  location                  String?
+  depreciationAmount        Decimal?  @db.Decimal(20, 4)
+  accumulatedDepreciation   Decimal?  @db.Decimal(20, 4)
+  residualValue             Decimal?  @db.Decimal(20, 4)
+  netBookValue              Decimal?  @db.Decimal(20, 4)
   supportingCostDocument    String?
   archiveDocumentNumber     String?
   manufacturer              String?
