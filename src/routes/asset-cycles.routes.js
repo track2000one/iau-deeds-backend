@@ -553,6 +553,8 @@ router.post('/:id/approve', async (req, res, next) => {
         const payload = JSON.stringify(updates.slice(offset, offset + 250));
         await tx.$executeRaw`UPDATE "Asset" AS a
           SET "assetNumber" = v."assetNumber",
+              "itemNumber" = v."itemNumber",
+              "barcode" = v."barcode",
               "name" = v."name",
               "category" = v."category",
               "brand" = v."brand",
