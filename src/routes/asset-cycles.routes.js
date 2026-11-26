@@ -70,8 +70,14 @@ const assertDraftCycle = (cycle, res) => {
   return true;
 };
 
+const isExcelIdentifierHeader = (value) => {
+  const text = String(value ?? '').trim().replace(/\s+/g, ' ').replace(/[ـ\u064B-\u065F\u0670]/g, '').toLowerCase();
+  return /^(رقم الأصل الفريد بالجهة(?:\s*\(.*\))?|رقم الأصل الفريد في نظام وزارة المالية(?:\s*\(.*\))?|رقم الصنف|رقم الأصل|unique asset number in the entity|unique asset number in mof system|item number|asset number)$/.test(text);
+};
+
 const isSnapshotValid = (snapshot) => Boolean(
   String(snapshot.itemNumber || '').trim() &&
+  !isExcelIdentifierHeader(snapshot.itemNumber) &&
   String(snapshot.name || '').trim() &&
   String(snapshot.category || '').trim()
 );
@@ -536,7 +542,10 @@ router.post('/:id/approve', async (req, res, next) => {
       const activeAssetIds = new Set();
       for (const record of records) {
         const snapshot = normalizeAssetCycleInput(record.payload || {});
-        if (!isSnapshotValid(snapshot)) throw conflict(`السجل ${record.itemNumber || record.name} لا يحتوي على الحقول الأساسية المطلوبة.`);
+        if (isExcelIdentifierHeader(snapshot.itemNumber)) {
+          throw conflict(`رقم الصنف في السجل «${describeRecord(record)}» هو عنوان عمود Excel وليس معرف أصل صالحًا. يلزم مراجعة الصف المستورد قبل الاعتماد؛ لم تُحذف أو تُعدّل البيانات.`);
+        }
+        if (!isSnapshotValid(snapshot)) throw conflict(`السجل «${describeRecord(record)}» لا يحتوي على الحقول الأساسية المطلوبة.`);
         const existing = matchLive(record);
         const id = existing?.id;
         if (id && activeAssetIds.has(id)) throw conflict(`تعارض مطابقة: السجل «${describeRecord(record)}» والسجل «${describeRecord(usedAssetRecords.get(id))}» يطابقان الأصل نفسه «${describeAsset(existing)}». لم يتم اعتماد الدورة.`);
