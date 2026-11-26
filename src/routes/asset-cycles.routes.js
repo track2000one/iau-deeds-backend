@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { createAuditLog, getClientIp } from '../services/audit.service.js';
@@ -183,11 +184,11 @@ const findLiveAssetForRecord = async (tx, record) => {
   });
 };
 
-const carryForwardUnchangedAssetRecords = async (cycle) => {
+const carryForwardUnchangedAssetRecords = async (cycle, db = prisma) => {
   if (!cycle.basedOnCycleId) return 0;
   const [baseRecords, targetRecords] = await Promise.all([
-    prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.basedOnCycleId } }),
-    prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.id }, select: { stableKey: true } }),
+    db.assetCycleRecord.findMany({ where: { cycleId: cycle.basedOnCycleId } }),
+    db.assetCycleRecord.findMany({ where: { cycleId: cycle.id }, select: { stableKey: true } }),
   ]);
   const targetKeys = new Set(targetRecords.map((item) => item.stableKey).filter(Boolean));
   const carryRows = baseRecords
@@ -205,7 +206,7 @@ const carryForwardUnchangedAssetRecords = async (cycle) => {
       };
     });
   for (let index = 0; index < carryRows.length; index += 750) {
-    await prisma.assetCycleRecord.createMany({ data: carryRows.slice(index, index + 750) });
+    await db.assetCycleRecord.createMany({ data: carryRows.slice(index, index + 750) });
   }
   return carryRows.length;
 };
@@ -455,55 +456,173 @@ router.post('/:id/approve', async (req, res, next) => {
     if (!cycle) return;
     if (cycle.status !== 'under_review' || cycle.isCurrent) return res.status(409).json({ message: 'يجب إرسال الدورة للمراجعة قبل اعتمادها.' });
     if (!cycle._count.records) return res.status(409).json({ message: 'لا يمكن اعتماد دورة لا تحتوي على بيانات.' });
-    const carriedForward = await carryForwardUnchangedAssetRecords(cycle);
-    const pendingReview = await prisma.assetCycleRecord.count({ where: { cycleId: cycle.id, reviewStatus: 'needs_review' } });
-    if (pendingReview) return res.status(409).json({ message: `يوجد ${pendingReview} سجل يحتاج مراجعة وتأكيد قبل اعتماد الدورة.` });
-    const comparison = await getAssetCycleComparison(cycle);
-    const records = await prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.id } });
-    const baseRecords = cycle.basedOnCycleId ? await prisma.assetCycleRecord.findMany({ where: { cycleId: cycle.basedOnCycleId } }) : [];
-    const targetKeys = new Set(records.map((record) => record.stableKey));
-    const removedRecords = baseRecords.filter((record) => record.stableKey && !targetKeys.has(record.stableKey));
     const approvedAt = new Date();
     const approvedBy = userLabel(req);
-    const activeAssetIds = new Set();
+    const conflict = (message) => Object.assign(new Error(message), { status: 409 });
+    let carriedForward = 0;
 
     await prisma.$transaction(async (tx) => {
-      // Serialize approvals and recheck state after taking the database lock.
-      const locked = await tx.$queryRaw`SELECT "status", "isCurrent" FROM "AssetUpdateCycle" WHERE "id" = ${cycle.id} FOR UPDATE`;
-      if (!locked.length || locked[0].status !== 'under_review' || locked[0].isCurrent) {
-        throw Object.assign(new Error('تغيرت حالة الدورة. حدّث الصفحة للتحقق من نتيجة الاعتماد.'), { status: 409 });
-      }
-      // Most carried-forward records already reference their live asset. Fetch
-      // these in batches rather than issuing a query for every unchanged row.
-      const linkedIds = [...new Set(records.map((record) => record.assetId).filter(Boolean))];
-      const linkedAssets = new Map();
-      for (let offset = 0; offset < linkedIds.length; offset += 750) {
-        const assets = await tx.asset.findMany({ where: { id: { in: linkedIds.slice(offset, offset + 750) } } });
-        for (const asset of assets) linkedAssets.set(asset.id, asset);
-      }
-      const recordLinks = [];
-      for (const record of records) {
-        const snapshot = normalizeAssetCycleInput(record.payload || {});
-        if (!isSnapshotValid(snapshot)) throw Object.assign(new Error(`السجل ${record.itemNumber || record.name} لا يحتوي على الحقول الأساسية المطلوبة.`), { status: 409 });
-        let existing = (record.assetId && linkedAssets.get(record.assetId)) || await findLiveAssetForRecord(tx, record);
-        let barcode = String(snapshot.barcode || existing?.barcode || '').trim();
-        if (!barcode) barcode = await nextBarcode(tx);
-        const data = snapshotToDbData(snapshot, existing, { stableKey: record.stableKey, cycleId: cycle.id, changeType: record.changeType }, barcode);
-        let saved;
-        if (existing) {
-          const liveFingerprint = createAssetFingerprint(assetSnapshotFromAsset(existing));
-          const mustUpdate = liveFingerprint !== record.sourceFingerprint || !existing.isInCurrentCycle || existing.stableKey !== record.stableKey;
-          saved = mustUpdate ? await tx.asset.update({ where: { id: existing.id }, data: { ...data, createdAt: existing.createdAt } }) : existing;
-        } else {
-          saved = await tx.asset.create({ data: { ...data, createdBy: approvedBy } });
-        }
-        activeAssetIds.add(saved.id);
-        linkedAssets.set(saved.id, saved);
-        if (record.assetId !== saved.id) recordLinks.push({ id: record.id, assetId: saved.id });
+      // All changes, including carry-forward, are committed together.
+      // A short lock prevents parallel approval/import/asset writes from racing
+      // with identity matching or barcode allocation; normal reads remain available.
+      await tx.$executeRaw`SET LOCAL lock_timeout = '5s'`;
+      await tx.$executeRaw`LOCK TABLE "AssetUpdateCycle", "AssetCycleRecord", "Asset" IN SHARE ROW EXCLUSIVE MODE`;
+      const locked = await tx.assetUpdateCycle.findUnique({ where: { id: cycle.id } });
+      if (!locked || locked.status !== 'under_review' || locked.isCurrent) {
+        throw conflict('تغيرت حالة الدورة. حدّث الصفحة للتحقق من نتيجة الاعتماد.');
       }
 
-      // Batch the record-to-asset links in parameterized PostgreSQL statements.
-      // They remain part of the same atomic approval transaction.
+      carriedForward = await carryForwardUnchangedAssetRecords(locked, tx);
+      const pendingReview = await tx.assetCycleRecord.count({ where: { cycleId: cycle.id, reviewStatus: 'needs_review' } });
+      if (pendingReview) throw conflict(`يوجد ${pendingReview} سجل يحتاج مراجعة وتأكيد قبل اعتماد الدورة.`);
+      const records = await tx.assetCycleRecord.findMany({ where: { cycleId: cycle.id } });
+      if (!records.length) throw conflict('لا يمكن اعتماد دورة لا تحتوي على بيانات.');
+      const baseRecords = locked.basedOnCycleId ? await tx.assetCycleRecord.findMany({
+        where: { cycleId: locked.basedOnCycleId },
+        select: { assetId: true, stableKey: true, itemNumber: true, barcode: true, serialNumber: true, cardNumber: true },
+      }) : [];
+      const targetKeys = new Set(records.map((record) => record.stableKey));
+      const removedRecords = baseRecords.filter((record) => record.stableKey && !targetKeys.has(record.stableKey));
+
+      // Preload current identities once, using the same ID-first then latest
+      // matching identity policy as findLiveAssetForRecord.
+      const live = await tx.asset.findMany({ orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }] });
+      const byId = new Map(live.map((asset) => [asset.id, asset]));
+      const matchFields = ['stableKey', 'itemNumber', 'barcode', 'serialNumber', 'cardNumber'];
+      const indices = new Map(matchFields.map((field) => [field, new Map()]));
+      const rank = new Map(live.map((asset, index) => [asset.id, index]));
+      for (const asset of live) {
+        for (const field of matchFields) {
+          const value = asset[field];
+          if (String(value || '').trim() && !indices.get(field).has(value)) indices.get(field).set(value, asset);
+        }
+      }
+      const matchLive = (record) => {
+        if (record.assetId && byId.has(record.assetId)) return byId.get(record.assetId);
+        let best = null;
+        for (const field of matchFields) {
+          const value = record[field];
+          if (!String(value || '').trim()) continue;
+          const candidate = indices.get(field).get(value);
+          if (candidate && (!best || rank.get(candidate.id) < rank.get(best.id))) best = candidate;
+        }
+        return best;
+      };
+
+      const barcodePrefix = `IAU-AST-${approvedAt.getFullYear()}-`;
+      const reservedBarcodes = new Set(live.map((asset) => asset.barcode).filter(Boolean));
+      for (const record of records) {
+        const barcode = String(record.payload?.barcode || record.barcode || '').trim();
+        if (barcode) reservedBarcodes.add(barcode);
+      }
+      let barcodeSequence = 0;
+      for (const barcode of reservedBarcodes) {
+        if (barcode.startsWith(barcodePrefix)) barcodeSequence = Math.max(barcodeSequence, Number(barcode.slice(barcodePrefix.length)) || 0);
+      }
+      const allocateBarcode = () => {
+        let barcode;
+        do { barcode = barcodePrefix + String(++barcodeSequence).padStart(7, '0'); } while (reservedBarcodes.has(barcode));
+        reservedBarcodes.add(barcode);
+        return barcode;
+      };
+
+      const inserts = [], updates = [], metadataOnly = [], recordLinks = [];
+      const activeAssetIds = new Set();
+      for (const record of records) {
+        const snapshot = normalizeAssetCycleInput(record.payload || {});
+        if (!isSnapshotValid(snapshot)) throw conflict(`السجل ${record.itemNumber || record.name} لا يحتوي على الحقول الأساسية المطلوبة.`);
+        const existing = matchLive(record);
+        const id = existing?.id || randomUUID();
+        if (activeAssetIds.has(id)) throw conflict(`أكثر من سجل يطابق الأصل نفسه (${record.itemNumber || record.name}). راجع المطابقة قبل الاعتماد.`);
+        activeAssetIds.add(id);
+        const barcode = String(snapshot.barcode || existing?.barcode || '').trim() || allocateBarcode();
+        const data = snapshotToDbData(snapshot, existing, { stableKey: record.stableKey, cycleId: cycle.id, changeType: record.changeType }, barcode);
+        if (!existing) inserts.push({ id, ...data, createdBy: approvedBy });
+        else {
+          const fingerprint = createAssetFingerprint(assetSnapshotFromAsset(existing));
+          const mustUpdate = fingerprint !== record.sourceFingerprint || !existing.isInCurrentCycle || existing.stableKey !== record.stableKey;
+          if (mustUpdate) updates.push({ id, ...data });
+          else metadataOnly.push({ id, cycleState: data.cycleState });
+        }
+        if (record.assetId !== id) recordLinks.push({ id: record.id, assetId: id });
+      }
+
+      // PostgreSQL typed recordsets perform batch updates without thousands of
+      // individual round trips. Values are bound parameters, not SQL strings.
+      for (let offset = 0; offset < updates.length; offset += 250) {
+        const payload = JSON.stringify(updates.slice(offset, offset + 250));
+        await tx.$executeRaw`UPDATE "Asset" AS a
+          SET "assetNumber" = v."assetNumber",
+              "name" = v."name",
+              "category" = v."category",
+              "brand" = v."brand",
+              "model" = v."model",
+              "serialNumber" = v."serialNumber",
+              "status" = v."status",
+              "technicalCondition" = v."technicalCondition",
+              "department" = v."department",
+              "building" = v."building",
+              "floor" = v."floor",
+              "room" = v."room",
+              "custodian" = v."custodian",
+              "entityName" = v."entityName",
+              "entityCode" = v."entityCode",
+              "assetDescription" = v."assetDescription",
+              "cardNumber" = v."cardNumber",
+              "responsibleDepartment" = v."responsibleDepartment",
+              "region" = v."region",
+              "city" = v."city",
+              "buildingNumber" = v."buildingNumber",
+              "coordinates" = v."coordinates",
+              "classification1" = v."classification1",
+              "classification2" = v."classification2",
+              "classification3" = v."classification3",
+              "classification4" = v."classification4",
+              "classification5" = v."classification5",
+              "classification6" = v."classification6",
+              "accountingGroup" = v."accountingGroup",
+              "accountingGroupCode" = v."accountingGroupCode",
+              "assetCode" = v."assetCode",
+              "remainingLife" = v."remainingLife",
+              "usefulLife" = v."usefulLife",
+              "purchaseDate" = v."purchaseDate",
+              "purchaseDateType" = v."purchaseDateType",
+              "purchaseValue" = v."purchaseValue",
+              "vatRate" = v."vatRate",
+              "vatAmount" = v."vatAmount",
+              "purchaseValueBeforeVat" = v."purchaseValueBeforeVat",
+              "purchaseValueIncludingVat" = v."purchaseValueIncludingVat",
+              "serviceDate" = v."serviceDate",
+              "serviceDateType" = v."serviceDateType",
+              "acquisitionCost" = v."acquisitionCost",
+              "supportingCostDocument" = v."supportingCostDocument",
+              "archiveDocumentNumber" = v."archiveDocumentNumber",
+              "manufacturer" = v."manufacturer",
+              "lastInventoryDate" = v."lastInventoryDate",
+              "lastInventoryDateType" = v."lastInventoryDateType",
+              "unitOfMeasure" = v."unitOfMeasure",
+              "quantity" = v."quantity",
+              "excelPayload" = v."excelPayload",
+              "notes" = v."notes",
+              "stableKey" = v."stableKey",
+              "isInCurrentCycle" = v."isInCurrentCycle",
+              "cycleState" = v."cycleState",
+              "lastApprovedCycleId" = v."lastApprovedCycleId",
+              "updatedAt" = CURRENT_TIMESTAMP
+          FROM jsonb_populate_recordset(NULL::"Asset", ${payload}::jsonb) AS v
+          WHERE a.id = v.id`;
+      }
+      for (let offset = 0; offset < inserts.length; offset += 250) {
+        await tx.asset.createMany({ data: inserts.slice(offset, offset + 250) });
+      }
+      for (let offset = 0; offset < metadataOnly.length; offset += 750) {
+        const payload = JSON.stringify(metadataOnly.slice(offset, offset + 750));
+        await tx.$executeRaw`UPDATE "Asset" AS a
+          SET "lastApprovedCycleId" = ${cycle.id}, "cycleState" = v."cycleState",
+              "isInCurrentCycle" = true, "updatedAt" = CURRENT_TIMESTAMP
+          FROM jsonb_to_recordset(${payload}::jsonb) AS v(id text, "cycleState" text)
+          WHERE a.id = v.id`;
+      }
       for (let offset = 0; offset < recordLinks.length; offset += 750) {
         const links = JSON.stringify(recordLinks.slice(offset, offset + 750));
         await tx.$executeRaw`UPDATE "AssetCycleRecord" AS r
@@ -512,14 +631,13 @@ router.post('/:id/approve', async (req, res, next) => {
           WHERE r.id = v.id AND r."cycleId" = ${cycle.id}`;
       }
 
-      for (const removed of removedRecords) {
-        let existing = removed.assetId ? await tx.asset.findUnique({ where: { id: removed.assetId } }) : null;
-        if (!existing) existing = await findLiveAssetForRecord(tx, removed);
-        if (existing && !activeAssetIds.has(existing.id)) {
-          await tx.asset.update({ where: { id: existing.id }, data: { isInCurrentCycle: false, cycleState: 'missing' } });
-        }
+      const missingIds = [...new Set(removedRecords.map(matchLive).filter(Boolean).map((asset) => asset.id).filter((id) => !activeAssetIds.has(id)))];
+      for (let offset = 0; offset < missingIds.length; offset += 750) {
+        await tx.asset.updateMany({
+          where: { id: { in: missingIds.slice(offset, offset + 750) } },
+          data: { isInCurrentCycle: false, cycleState: 'missing' },
+        });
       }
-
       await tx.assetUpdateCycle.updateMany({
         where: { isCurrent: true, id: { not: cycle.id } },
         data: { isCurrent: false, status: 'archived', archivedAt: approvedAt },
@@ -530,6 +648,7 @@ router.post('/:id/approve', async (req, res, next) => {
       });
     }, { maxWait: 15000, timeout: 120000 });
 
+    const comparison = await getAssetCycleComparison(cycle);
     const updated = await prisma.assetUpdateCycle.findUnique({ where: { id: cycle.id }, include: { _count: { select: { records: true } } } });
     await createAuditLog({
       user: req.authUser, action: 'approve_cycle', module: 'assets', entity: 'asset_cycle', entityId: cycle.id,
