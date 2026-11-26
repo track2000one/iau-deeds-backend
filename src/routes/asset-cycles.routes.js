@@ -527,27 +527,59 @@ router.post('/:id/approve', async (req, res, next) => {
 
       const inserts = [], updates = [], metadataOnly = [], recordLinks = [];
       const insertRecordIds = new Map();
+      const plannedRecords = [];
+      const usedAssetRecords = new Map();
+      const uniqueFields = [['assetNumber', 'رقم الأصل'], ['itemNumber', 'رقم الصنف'], ['barcode', 'الباركود'], ['serialNumber', 'الرقم التسلسلي']];
+      const currentOwners = new Map(uniqueFields.map(([field]) => [field, new Map(live.filter((asset) => asset[field] != null).map((asset) => [asset[field], asset]))]));
+      const describeRecord = (record) => `${record.itemNumber || 'بلا رقم صنف'} — ${record.name || 'أصل غير مسمى'}${record.sourceRow ? ` (صف Excel ${record.sourceRow}${record.sourceSheet ? `، ورقة ${record.sourceSheet}` : ''})` : ''}`;
+      const describeAsset = (asset) => `${asset.itemNumber || asset.assetNumber || 'بلا رقم'} — ${asset.name || 'أصل غير مسمى'}`;
       const activeAssetIds = new Set();
       for (const record of records) {
         const snapshot = normalizeAssetCycleInput(record.payload || {});
         if (!isSnapshotValid(snapshot)) throw conflict(`السجل ${record.itemNumber || record.name} لا يحتوي على الحقول الأساسية المطلوبة.`);
         const existing = matchLive(record);
         const id = existing?.id;
-        if (id && activeAssetIds.has(id)) throw conflict(`أكثر من سجل يطابق الأصل نفسه (${record.itemNumber || record.name}). راجع المطابقة قبل الاعتماد.`);
-        if (id) activeAssetIds.add(id);
+        if (id && activeAssetIds.has(id)) throw conflict(`تعارض مطابقة: السجل «${describeRecord(record)}» والسجل «${describeRecord(usedAssetRecords.get(id))}» يطابقان الأصل نفسه «${describeAsset(existing)}». لم يتم اعتماد الدورة.`);
+        if (id) { activeAssetIds.add(id); usedAssetRecords.set(id, record); }
         const barcode = String(snapshot.barcode || existing?.barcode || '').trim() || allocateBarcode();
         const data = snapshotToDbData(snapshot, existing, { stableKey: record.stableKey, cycleId: cycle.id, changeType: record.changeType }, barcode);
+        // assetNumber is a separate, unique legacy identifier. Do not rewrite
+        // an already assigned asset number when importing a new item number.
+        if (existing?.assetNumber != null && String(existing.assetNumber).trim()) data.assetNumber = existing.assetNumber;
+        const fingerprint = existing ? createAssetFingerprint(assetSnapshotFromAsset(existing)) : null;
+        const mustUpdate = !existing || fingerprint !== record.sourceFingerprint || !existing.isInCurrentCycle || existing.stableKey !== record.stableKey;
+        plannedRecords.push({ id, record, data: mustUpdate ? data : existing });
         if (!existing) {
-          if (insertRecordIds.has(data.itemNumber)) throw conflict(`رقم الصنف ${data.itemNumber} مكرر في الأصول الجديدة.`);
+          if (insertRecordIds.has(data.itemNumber)) {
+            const prior = plannedRecords.find((plan) => plan.record.id === insertRecordIds.get(data.itemNumber));
+            throw conflict(`تعارض رقم الصنف «${data.itemNumber}» بين «${describeRecord(record)}» و«${describeRecord(prior.record)}». لم يتم اعتماد الدورة.`);
+          }
           insertRecordIds.set(data.itemNumber, record.id);
           inserts.push({ ...data, createdBy: approvedBy });
         } else {
-          const fingerprint = createAssetFingerprint(assetSnapshotFromAsset(existing));
-          const mustUpdate = fingerprint !== record.sourceFingerprint || !existing.isInCurrentCycle || existing.stableKey !== record.stableKey;
           if (mustUpdate) updates.push({ id, ...data });
           else metadataOnly.push({ id, cycleState: data.cycleState });
         }
         if (id && record.assetId !== id) recordLinks.push({ id: record.id, assetId: id });
+      }
+
+      // Detect unique-value collisions before executing any live asset writes.
+      // Keep every source record and never silently renumber, merge or delete.
+      const plannedOwners = new Map(uniqueFields.map(([field]) => [field, new Map()]));
+      for (const plan of plannedRecords) {
+        for (const [field, label] of uniqueFields) {
+          const value = plan.data[field];
+          if (value == null) continue;
+          const prior = plannedOwners.get(field).get(value);
+          if (prior && prior.record.id !== plan.record.id) {
+            throw conflict(`تعارض في ${label} «${value}»: السجل «${describeRecord(plan.record)}» والسجل «${describeRecord(prior.record)}». لم يتم اعتماد الدورة ولم تتغير بيانات الأصول.`);
+          }
+          plannedOwners.get(field).set(value, plan);
+          const owner = currentOwners.get(field).get(value);
+          if (owner && owner.id !== plan.id) {
+            throw conflict(`تعارض في ${label} «${value}»: السجل «${describeRecord(plan.record)}» والقيمة مستخدمة في الأصل الحالي «${describeAsset(owner)}». يلزم مراجعة المطابقة قبل الاعتماد. لم تتغير بيانات الأصول.`);
+          }
+        }
       }
 
       // PostgreSQL typed recordsets perform batch updates without thousands of
